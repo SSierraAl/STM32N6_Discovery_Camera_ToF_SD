@@ -1,0 +1,386 @@
+/**
+ ******************************************************************************
+ * @file    app_cam.c
+ * @author  GPM Application Team
+ *
+ ******************************************************************************
+ * @attention
+ *
+ * Copyright (c) 2023 STMicroelectronics.
+ * All rights reserved.
+ *
+ * This software is licensed under terms that can be found in the LICENSE file
+ * in the root directory of this software component.
+ * If no LICENSE file comes with this software, it is provided AS-IS.
+ *
+ ******************************************************************************
+ */
+#include <assert.h>
+#include "cmw_camera.h"
+#include "app_cam.h"
+#include "app_config.h"
+#include "stm32n6xx.h"
+#include "stm32n6xx_hal.h"
+#include "utils.h"
+#include "FreeRTOS.h"
+#include "task.h"
+
+/* Define sensor orientation */
+#if CAMERA_SELFY == 1
+#define SENSOR_IMX335_FLIP CMW_MIRRORFLIP_MIRROR
+#define SENSOR_VD66GY_FLIP CMW_MIRRORFLIP_FLIP
+#define SENSOR_VD55G1_FLIP CMW_MIRRORFLIP_FLIP
+#define SENSOR_VD1943_FLIP CMW_MIRRORFLIP_MIRROR
+#else
+#define SENSOR_IMX335_FLIP CMW_MIRRORFLIP_NONE
+#define SENSOR_VD66GY_FLIP CMW_MIRRORFLIP_FLIP_MIRROR
+#define SENSOR_VD55G1_FLIP CMW_MIRRORFLIP_FLIP_MIRROR
+#define SENSOR_VD1943_FLIP CMW_MIRRORFLIP_NONE
+#endif
+
+/* Define sensor width x height size. 0x0 means full frame */
+#define SENSOR_WIDTH     0
+#define SENSOR_HEIGHT    0
+
+static const char *sensor_names[] = {
+  "CMW_UNKNOWN",
+  "CMW_VD66GY",
+  "CMW_IMX335",
+  "CMW_VD55G1",
+  "CMW_VD1943",
+};
+
+static CMW_Sensor_Name_t sensor;
+static int is_sensor_valid = 0;
+
+static int CAM_getFlipMode(CMW_Sensor_Name_t sensor)
+{
+  int sensor_mirror_flip = CMW_MIRRORFLIP_NONE;
+  int sensor_name_idx = 0;
+
+  switch (sensor) {
+  case CMW_VD66GY_Sensor:
+    sensor_mirror_flip = SENSOR_VD66GY_FLIP;
+    sensor_name_idx = 1;
+    break;
+  case CMW_IMX335_Sensor:
+    sensor_mirror_flip = SENSOR_IMX335_FLIP;
+    sensor_name_idx = 2;
+    break;
+  case CMW_VD55G1_Sensor:
+    sensor_mirror_flip = SENSOR_VD55G1_FLIP;
+    sensor_name_idx = 3;
+    break;
+  case CMW_VD1943_Sensor:
+    sensor_mirror_flip = SENSOR_VD1943_FLIP;
+    sensor_name_idx = 4;
+    break;
+  default:
+    assert(0);
+  }
+  printf("Detected %s\n", sensor_names[sensor_name_idx]);
+
+  return sensor_mirror_flip;
+}
+
+static int CAM_FormatToBpp(int dcmipp_output_format)
+{
+  int bpp = 0;
+
+  switch (dcmipp_output_format)
+  {
+  case DCMIPP_PIXEL_PACKER_FORMAT_MONO_Y8_G8_1:
+    bpp = 1;
+    break;
+  case DCMIPP_PIXEL_PACKER_FORMAT_RGB565_1:
+  case DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1:
+    bpp = 2;
+    break;
+  case DCMIPP_PIXEL_PACKER_FORMAT_RGB888_YUV444_1:
+    bpp = 3;
+    break;
+  default:
+    assert(0);
+  }
+
+  return bpp;
+}
+
+/* Keep display output aspect ratio using crop area */
+static void CAM_InitCropConfig(CMW_Manual_roi_area_t *roi, int sensor_width, int sensor_height, CAM_conf_t *conf)
+{
+  const float ratiox = (float)sensor_width / conf->capture_width;
+  const float ratioy = (float)sensor_height / conf->capture_height;
+  const float ratio = MIN(ratiox, ratioy);
+
+  assert(ratio >= 1);
+  assert(ratio < 64);
+
+  roi->width = (uint32_t) MIN(conf->capture_width * ratio, sensor_width);
+  roi->height = (uint32_t) MIN(conf->capture_height * ratio, sensor_height);
+  roi->offset_x = (sensor_width - roi->width + 1) / 2;
+  roi->offset_y = (sensor_height - roi->height + 1) / 2;
+}
+
+static void CAM_EnableYuv(uint32_t Pipe)
+{
+  DCMIPP_ColorConversionConfTypeDef color_conf = {
+    .ClampOutputSamples = ENABLE,
+    .OutputSamplesType = DCMIPP_CLAMP_YUV,
+    .RR = 131, .RG = -119, .RB = -12, .RA = 128,
+    .GR =  55, .GG =  183, .GB =  18, .GA =   0,
+    .BR = -30, .BG = -101, .BB = 131, .BA = 128,
+  };
+  int ret;
+
+  /* only pipe1 can do yuv */
+  assert(Pipe == DCMIPP_PIPE1);
+  ret = HAL_DCMIPP_PIPE_SetYUVConversionConfig(CMW_CAMERA_GetDCMIPPHandle(), Pipe, &color_conf);
+  assert(ret == HAL_OK);
+  ret = HAL_DCMIPP_PIPE_EnableYUVConversion(CMW_CAMERA_GetDCMIPPHandle(), Pipe);
+  assert(ret == HAL_OK);
+}
+
+static void DCMIPP_PipeInitCapture(CAM_conf_t *cam_conf, int sensor_width, int sensor_height, CAM_conf_t *conf)
+{
+  CMW_DCMIPP_Conf_t dcmipp_conf;
+  uint32_t hw_pitch;
+  int ret;
+
+  assert(conf->capture_width >= conf->capture_height);
+
+  dcmipp_conf.output_width = conf->capture_width;
+  dcmipp_conf.output_height = conf->capture_height;
+  dcmipp_conf.output_format = cam_conf->dcmipp_output_format;
+  dcmipp_conf.output_bpp = CAM_FormatToBpp(cam_conf->dcmipp_output_format);
+  dcmipp_conf.mode = CMW_Aspect_ratio_manual_roi;
+  dcmipp_conf.enable_swap = cam_conf->is_rgb_swap;
+  dcmipp_conf.enable_gamma_conversion = 0;
+  CAM_InitCropConfig(&dcmipp_conf.manual_conf, sensor_width, sensor_height, conf);
+  ret = CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &dcmipp_conf, &hw_pitch);
+  assert(ret == HAL_OK);
+  assert(hw_pitch == dcmipp_conf.output_width * dcmipp_conf.output_bpp);
+
+  if (cam_conf->dcmipp_output_format == DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1)
+    CAM_EnableYuv(DCMIPP_PIPE1);
+}
+
+void CAM_Init(CAM_conf_t *conf)
+{
+  CMW_CameraInit_t cam_conf;
+  int ret;
+
+  if (!is_sensor_valid) {
+    is_sensor_valid = 1;
+    ret = CMW_CAMERA_GetSensorName(&sensor);
+    assert(ret == CMW_ERROR_NONE);
+  }
+
+  cam_conf.width = SENSOR_WIDTH;
+  cam_conf.height = SENSOR_HEIGHT;
+  cam_conf.fps = conf->fps;
+  cam_conf.mirror_flip = CAM_getFlipMode(sensor);
+
+  ret = CMW_CAMERA_Init(&cam_conf, NULL);
+  assert(ret == CMW_ERROR_NONE);
+
+  /* CMW_CAMERA_Init update width height */
+  assert(cam_conf.width);
+  assert(cam_conf.height);
+  DCMIPP_PipeInitCapture(conf, cam_conf.width, cam_conf.height, conf);
+}
+
+void CAM_SetSliceROI(uint16_t y_start, uint16_t height)
+{
+  CMW_DCMIPP_Conf_t conf;
+  /* Reuse existing pipe config, change only manual_conf.offset_y and height */
+  conf.manual_conf.offset_y = y_start;
+  conf.manual_conf.height = height;
+  CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &conf, NULL);
+}
+
+
+void CAM_CapturePipe_Start(uint8_t *capture_pipe_dst, uint32_t cam_mode)
+{
+  int ret;
+
+  ret = CMW_CAMERA_Start(DCMIPP_PIPE1, capture_pipe_dst, cam_mode);
+  assert(ret == CMW_ERROR_NONE);
+}
+
+void CAM_IspUpdate(void)
+{
+  int ret;
+
+  ret = CMW_CAMERA_Run();
+  assert(ret == CMW_ERROR_NONE);
+}
+
+void CAM_Deinit()
+{
+  int ret;
+
+  ret = CMW_CAMERA_DeInit();
+  assert(ret == CMW_ERROR_NONE);
+}
+
+void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe)
+{
+  /* FIXME : Need to tune sensor/ipplug so we can remove this implementation */
+}
+
+/* ---------- Frame counter for standalone warmup ----------
+   The vsync interrupt fires once per captured frame. We count frames
+   here so we can discard exactly N warmup frames instead of guessing
+   with a time-based delay. */
+static volatile uint32_t g_frame_count = 0;
+static volatile int      g_wait_frames = 0;  /* target: frames to wait before done */
+
+/**
+ * @brief Called from CMW_CAMERA_PIPE_VsyncEventCallback on each frame completion.
+ *        Increments the frame counter; when enough frames arrive, sets g_wait_frames = 0. */
+void CAM_CountVsyncFrame(void)
+{
+  if (g_wait_frames > 0) {
+    g_frame_count++;
+    if (g_frame_count >= (uint32_t)g_wait_frames)
+      g_wait_frames = 0;  /* signal: warmup done */
+  }
+}
+
+/**
+ * @brief Reset the frame counter and set the target number of frames to wait.
+ *        Call this before starting a standalone capture. */
+void CAM_ResetFrameCounter(int wait_frames)
+{
+  g_frame_count = 0;
+  g_wait_frames = wait_frames;
+}
+
+/**
+ * @brief Get the current frame count (for debugging). */
+uint32_t CAM_GetFrameCount(void)
+{
+  return g_frame_count;
+}
+
+/**
+ * @brief Capture a single frame WITHOUT UVC streaming.
+ *
+ * Strategy (frame-counted warmup, NOT time-based):
+ *   1. Init camera sensor + DCMIPP pipe (YUV422, requested resolution)
+ *   2. Start CONTINUOUS capture into buf (each frame overwrites buf)
+ *   3. Wait for exactly `warmup_frames + 1' frame completions:
+ *      - `warmup_frames' are discarded (sensor stabilization)
+ *      - the final frame is kept in buf
+ *   4. Stop DCMIPP (buf holds the clean, stabilized frame)
+ *   5. Deinit camera (power down sensor + DCMIPP)
+ *
+ * @param buf            Pre-allocated buffer (≥ width*height*2 bytes)
+ * @param buf_size       Size of buf in bytes
+ * @param width          Capture width  (e.g. 640)
+ * @param height         Capture height (e.g. 480)
+ * @param fps            Sensor frame-rate (e.g. 30)
+ * @param warmup_frames  Number of frames to discard before keeping one (default: 8)
+ * @return 0 on success, -1 on error (timeout)
+ */
+int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, int fps, int warmup_frames)
+{
+  /* ---- sanity checks ---- */
+  int min_size = width * height * 2;  /* YUV422 = 2 bpp */
+
+  printf("[CAM] Enter: %dx%d, min_buf=%d, avail=%d\n", width, height, min_size, buf_size);
+
+  if (buf == NULL || buf_size <= 0) {
+    printf("[CAM] FAIL: buf NULL or size 0\n");
+    return -1;
+  }
+  if (buf_size < min_size) {
+    printf("[CAM] FAIL: buffer too small (%d < %d)\n", buf_size, min_size);
+    return -1;
+  }
+  if (warmup_frames < 1) warmup_frames = 8;
+
+  /* ---- 1. Init camera ---- */
+  printf("[CAM] Init camera %dx%d@%d YUV422 ...\n", width, height, fps);
+  CAM_conf_t conf = {0};
+  conf.capture_width        = width;
+  conf.capture_height       = height;
+  conf.fps                  = fps;
+  conf.dcmipp_output_format = DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1;
+  conf.is_rgb_swap          = 0;
+
+  CAM_Init(&conf);
+
+  /* ---- Apply camera quality settings from app_config.h ----
+     CRITICAL: Must be AFTER CAM_Init() so sensor defaults don't override */
+  int32_t ret_expo_mode;
+
+  ret_expo_mode = CMW_CAMERA_SetExposureMode(
+      CAM_EXPOSURE_MODE == 1 ? CMW_EXPOSUREMODE_MANUAL :
+      CAM_EXPOSURE_MODE == 2 ? CMW_EXPOSUREMODE_AUTOFREEZE :
+                               CMW_EXPOSUREMODE_AUTO);
+
+  if (CAM_EXPOSURE_MODE == 1) {
+    int32_t ret_expo = CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+    int32_t ret_gain = CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+
+    /* Read back to verify */
+    int32_t readback_expo, readback_gain;
+    CMW_CAMERA_GetExposure(&readback_expo);
+    CMW_CAMERA_GetGain(&readback_gain);
+    printf("[CAM] SetExposure(%ld)->rc=%ld, SetGain(%ld)->rc=%ld\n",
+           (long)CAM_EXPOSURE_VALUE, (long)ret_expo,
+           (long)CAM_GAIN_VALUE, (long)ret_gain);
+    printf("[CAM] Readback: exposure=%ld, gain=%ld\n", (long)readback_expo, (long)readback_gain);
+  } else {
+    printf("[CAM] SetExposureMode=%ld rc=%ld\n", (long)CAM_EXPOSURE_MODE, (long)ret_expo_mode);
+  }
+  printf("[CAM] Camera init done\n");
+
+  DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
+
+  /* Reset frame counter */
+  CAM_ResetFrameCounter(warmup_frames + 1);
+
+  /* ---- 2. Start CONTINUOUS capture into buf ---- */
+  printf("[CAM] Start continuous capture ...\n");
+  CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
+  printf("[CAM] Capture started. Waiting %d frames...\n",
+         warmup_frames + 1);
+
+  /* ---- 3. Wait for enough frames ---- */
+  uint32_t t0 = HAL_GetTick();
+  while (g_wait_frames != 0) {
+    CAM_IspUpdate();
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    if (HAL_GetTick() - t0 > 5000) {
+      printf("[CAM] TIMEOUT! Only got %lu frames (wanted %d)\n",
+             (unsigned long)g_frame_count, warmup_frames + 1);
+      HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
+      CAM_Deinit();
+      return -1;
+    }
+  }
+  printf("[CAM] Got %lu frames. Frame #%d captured!\n",
+         (unsigned long)g_frame_count, warmup_frames + 1);
+
+  /* ---- 4. Stop DCMIPP — buf has the clean frame ---- */
+  printf("[CAM] Stop DCMIPP ...\n");
+  HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
+  HAL_Delay(5);
+
+  /* ---- 5. Deinit camera ---- */
+  printf("[CAM] Deinit camera ...\n");
+  CAM_Deinit();
+  printf("[CAM] Done. buf=%p size=%d\n", (void*)buf, min_size);
+
+  return 0;
+}
+
+/* Backward-compatible wrapper with default warmup = 8 frames */
+int CAM_CaptureSingleFrame_DefaultWarmup(uint8_t *buf, int buf_size, int width, int height, int fps)
+{
+  return CAM_CaptureSingleFrame(buf, buf_size, width, height, fps, 8);
+}

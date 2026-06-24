@@ -1,0 +1,968 @@
+/**
+ ******************************************************************************
+ * @file    main.c
+ * @brief   Standalone Camera Snapshot Capture — NUCLEO-N657X0-Q
+ *
+ *   Captures images from the CMW-IMX335 camera module and stores them as
+ *   raw YUV422 frames on a microSD card.  No USB/UVC, no FileX/fatfs,
+ *   no PC connection required after flashing.
+ *
+ *   Hardware:
+ *     - MCU:      STM32N657 (NUCLEO-N657X0-Q / MB1940)
+ *     - Camera:   CMW-IMX335 (5 MP, YUV422 output via CSI-2)
+ *     - Storage:  microSD card (SDMMC2, 4-bit bus)
+ *     - Button:   USER B1 = PC13 (active HIGH, external pull-down)
+ *     - LEDs:     RED = PG10, GREEN = PG0
+ *
+ *   Flow (OPTIMIZED - Sleep Mode):
+ *     1. Boot → init clocks, MPU, PSRAM, SD card
+ *     2. Init camera + warmup frames (one-time cost at boot)
+ *     3. STOP camera pipe (sleep = low power, fast wakeup)
+ *     4. GREEN LED on (system ready)
+ *     5. User presses USER button (PC13)
+ *     6. START pipe → 3 frames → capture → STOP pipe (~100ms total)
+ *     7. Frame saved to SD card
+ *     8. Back to sleep → wait for next press
+ *
+ *   Two FreeRTOS tasks:
+ *     - main_thread: board init, SD card init, camera sleep mode init, then deletes
+ *     - btn_thread:  polls USER button, triggers fast capture + SD write
+ *
+ *   All configurable parameters are in Inc/app_config.h.
+ ******************************************************************************
+ */
+
+#include <assert.h>
+#include <stdio.h>
+#include <string.h>
+
+/* ---- STM32 HAL / BSP ---- */
+#include "stm32n6xx_hal_conf.h"
+#include "stm32n6xx_hal.h"
+#include "stm32n6xx_hal_sd.h"
+#include "stm32n6xx_hal_rif.h"
+//#include "stm32n6xx_nucleo.h"
+//#include "stm32n6xx_nucleo_bus.h"
+//#include "stm32n6xx_nucleo_xspi.h"
+
+#include "stm32n6570_discovery.h"
+#include "stm32n6570_discovery_bus.h"
+#include "stm32n6570_discovery_xspi.h"
+
+
+#include "ws2812.h"
+
+/* ---- Application ---- */
+#include "app_config.h"
+#include "app_cam.h"
+#include "app_fuseprogramming.h"
+#include "main.h"
+#include "npu_cache.h"
+#include "utils.h"
+
+/* ---- FreeRTOS ---- */
+#include "FreeRTOS.h"
+#include "task.h"
+
+/* ================================================================
+   GLOBAL HANDLES
+   ================================================================ */
+
+UART_HandleTypeDef huart1;
+SD_HandleTypeDef hsd1;
+
+TIM_HandleTypeDef htim1;
+DMA_HandleTypeDef handle_GPDMA1_Channel1;
+
+/* ================================================================
+   FREERTOS TASK CONTROL BLOCKS AND STACKS
+   ============================================================ */
+
+static StaticTask_t    main_thread_cb;
+static StackType_t     main_thread_stack[configMINIMAL_STACK_SIZE];
+
+static StaticTask_t    btn_thread_cb;
+static StackType_t     btn_thread_stack[4 * configMINIMAL_STACK_SIZE];
+
+/* ================================================================
+   FORWARD DECLARATIONS
+   ================================================================ */
+
+static void  SystemClock_Config(void);
+static void  Security_Config(void);
+static void  IAC_Config(void);
+static void  CONSOLE_Config(void);
+static void  Setup_Mpu(void);
+static int   main_freertos(void);
+static void  main_thread_fct(void *arg);
+static void  btn_thread_fct(void *arg);
+static void  SD_Benchmarks(void);
+static int   SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
+                              uint32_t w, uint32_t h, uint32_t pixel_format);
+static int   SD_ReadRawImage(uint8_t *img_buf, uint32_t *data_size_p);
+static void  MX_TIM1_Init(void);
+
+extern void  vPortSetupTimerInterrupt(void);
+extern int   __uncached_bss_start__;
+extern int   __uncached_bss_end__;
+
+
+void PeriphCommonClock_Config(void);
+static void MX_GPDMA1_Init(void);
+
+
+/* ================================================================
+   RUNTIME STATE
+   ================================================================ */
+
+static volatile int system_ready = 0;
+static uint32_t snap_count = 0;
+static uint32_t snap_base_block = SD_SNAP_BASE_BLOCK;
+
+/** Camera frame buffer — allocated in PSRAM for DMA access */
+static uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
+
+/** SD batch-write buffer — allocated in PSRAM for multi-block writes.
+    Size = SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE = 64 * 512 = 32 KB.
+    This buffer holds multiple 512-byte SD blocks so we can write them
+    in a single HAL_SD_WriteBlocks() call, drastically reducing the
+    number of HAL API calls per snapshot (~307 instead of ~19,643). */
+static uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
+
+/* ================================================================
+   SD CARD IMAGE HEADER FORMAT
+   ================================================================ */
+
+typedef struct {
+    uint32_t magic;
+    uint32_t width;
+    uint32_t height;
+    uint32_t pixel_format;
+    uint32_t data_size;
+    uint32_t timestamp;
+    uint32_t checksum;
+    uint32_t snap_id;
+    uint8_t  reserved[28];
+} sd_image_header_t;
+
+#define SD_HEADER_TAG       0x49444745U
+
+static uint32_t SD_IMG_BASE_BLOCK = 1000;
+
+/* ================================================================
+   ENTRY POINT
+   ================================================================ */
+
+int main(void)
+{
+    MEMSYSCTL->MSCR |= MEMSYSCTL_MSCR_ICACTIVE_Msk;
+    __HAL_RCC_CPUCLK_CONFIG(RCC_CPUCLKSOURCE_HSI);
+    __HAL_RCC_SYSCLK_CONFIG(RCC_SYSCLKSOURCE_HSI);
+    HAL_Init();
+    Setup_Mpu();
+    SCB_EnableICache();
+
+#if defined(USE_DCACHE)
+    MEMSYSCTL->MSCR |= MEMSYSCTL_MSCR_DCACTIVE_Msk;
+    SCB_EnableDCache();
+#endif
+
+    return main_freertos();
+}
+
+/* ================================================================
+   MPU SETUP
+   ================================================================ */
+
+static void Setup_Mpu(void)
+{
+    MPU_Attributes_InitTypeDef attr;
+    MPU_Region_InitTypeDef     region;
+
+    attr.Number     = MPU_ATTRIBUTES_NUMBER0;
+    attr.Attributes = MPU_NOT_CACHEABLE;
+    HAL_MPU_ConfigMemoryAttributes(&attr);
+
+    region.Enable           = MPU_REGION_ENABLE;
+    region.Number           = MPU_REGION_NUMBER0;
+    region.BaseAddress      = (uint32_t)&__uncached_bss_start__;
+    region.LimitAddress     = (uint32_t)&__uncached_bss_end__ - 1;
+    region.AttributesIndex  = MPU_ATTRIBUTES_NUMBER0;
+    region.AccessPermission = MPU_REGION_ALL_RW;
+    region.DisableExec      = MPU_INSTRUCTION_ACCESS_ENABLE;
+    region.DisablePrivExec  = MPU_PRIV_INSTRUCTION_ACCESS_ENABLE;
+    region.IsShareable      = MPU_ACCESS_NOT_SHAREABLE;
+    HAL_MPU_ConfigRegion(&region);
+    HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+    memset(&__uncached_bss_start__, 0, &__uncached_bss_end__ - &__uncached_bss_start__);
+}
+
+/* ================================================================
+   SECURITY CONFIGURATION
+   ================================================================ */
+
+static void Security_Config(void)
+{
+    __HAL_RCC_RIFSC_CLK_ENABLE();
+    __HAL_RCC_SYSCFG_CLK_ENABLE();
+    volatile uint32_t delay = 1000;
+    while (delay--);
+
+    RIMC_MasterConfig_t RIMC_master = {0};
+    RIMC_master.MasterCID = RIF_CID_1;
+    RIMC_master.SecPriv   = RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV;
+
+    HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_NPU,    &RIMC_master);
+    HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_DMA2D,  &RIMC_master);
+    HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_DCMIPP, &RIMC_master);
+    HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC1,  &RIMC_master);
+    HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC2,  &RIMC_master);
+    HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_OTG1,   &RIMC_master);
+
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_NPU,    RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_DMA2D,  RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_CSI,    RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_DCMIPP, RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDC,   RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDCL1, RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_LTDCL2, RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_JPEG,   RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+    HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_OTG1HS, RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
+
+    // Configure GPDMA1 channel 2
+    if (HAL_DMA_ConfigChannelAttributes(&handle_GPDMA1_Channel1,
+                                        DMA_CHANNEL_SEC | DMA_CHANNEL_PRIV |
+                                        DMA_CHANNEL_SRC_SEC | DMA_CHANNEL_DEST_SEC) != HAL_OK) {
+
+    	//Error_Handler();
+    }
+
+    // Configure GPIO PD7
+    HAL_GPIO_ConfigPinAttributes(GPIOE, GPIO_PIN_9, GPIO_PIN_SEC | GPIO_PIN_NPRIV);
+
+
+
+
+
+}
+
+/* ================================================================
+   IAC CONFIGURATION
+   ================================================================ */
+
+static void IAC_Config(void)
+{
+    __HAL_RCC_IAC_CLK_ENABLE();
+    __HAL_RCC_IAC_FORCE_RESET();
+    __HAL_RCC_IAC_RELEASE_RESET();
+}
+
+void IAC_IRQHandler(void) { while (1) {} }
+
+/* ================================================================
+   SYSTEM CLOCK CONFIGURATION
+   ================================================================ */
+
+static void SystemClock_Config(void)
+{
+    RCC_ClkInitTypeDef              RCC_ClkInitStruct      = {0};
+    RCC_OscInitTypeDef              RCC_OscInitStruct      = {0};
+    RCC_PeriphCLKInitTypeDef        RCC_PeriphCLKInitStruct = {0};
+
+    BSP_SMPS_Init(SMPS_VOLTAGE_OVERDRIVE);
+    HAL_Delay(1);
+
+    RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_NONE;
+    RCC_OscInitStruct.PLL1.PLLState  = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL1.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL1.PLLM      = 2;
+    RCC_OscInitStruct.PLL1.PLLN      = 25;
+    RCC_OscInitStruct.PLL1.PLLFractional = 0;
+    RCC_OscInitStruct.PLL1.PLLP1     = 1;
+    RCC_OscInitStruct.PLL1.PLLP2     = 1;
+
+    RCC_OscInitStruct.PLL2.PLLState  = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL2.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL2.PLLM      = 8;
+    RCC_OscInitStruct.PLL2.PLLN      = 125;
+    RCC_OscInitStruct.PLL2.PLLFractional = 0;
+    RCC_OscInitStruct.PLL2.PLLP1     = 1;
+    RCC_OscInitStruct.PLL2.PLLP2     = 1;
+
+    RCC_OscInitStruct.PLL3.PLLState  = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL3.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL3.PLLM      = 16;
+    RCC_OscInitStruct.PLL3.PLLN      = 225;
+    RCC_OscInitStruct.PLL3.PLLFractional = 0;
+    RCC_OscInitStruct.PLL3.PLLP1     = 1;
+    RCC_OscInitStruct.PLL3.PLLP2     = 1;
+
+    RCC_OscInitStruct.PLL4.PLLState  = RCC_PLL_ON;
+    RCC_OscInitStruct.PLL4.PLLSource = RCC_PLLSOURCE_HSI;
+    RCC_OscInitStruct.PLL4.PLLM      = 32;
+    RCC_OscInitStruct.PLL4.PLLN      = 20;
+    RCC_OscInitStruct.PLL4.PLLFractional = 0;
+    RCC_OscInitStruct.PLL4.PLLP1     = 1;
+    RCC_OscInitStruct.PLL4.PLLP2     = 1;
+
+    if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { while (1); }
+
+    RCC_ClkInitStruct.ClockType = (RCC_CLOCKTYPE_CPUCLK | RCC_CLOCKTYPE_SYSCLK |
+                                   RCC_CLOCKTYPE_HCLK   | RCC_CLOCKTYPE_PCLK1 |
+                                   RCC_CLOCKTYPE_PCLK2   | RCC_CLOCKTYPE_PCLK4 |
+                                   RCC_CLOCKTYPE_PCLK5);
+    RCC_ClkInitStruct.CPUCLKSource   = RCC_CPUCLKSOURCE_IC1;
+    RCC_ClkInitStruct.SYSCLKSource   = RCC_SYSCLKSOURCE_IC2_IC6_IC11;
+    RCC_ClkInitStruct.IC1Selection.ClockSelection = RCC_ICCLKSOURCE_PLL1;
+    RCC_ClkInitStruct.IC1Selection.ClockDivider   = 1;
+    RCC_ClkInitStruct.IC2Selection.ClockSelection = RCC_ICCLKSOURCE_PLL1;
+    RCC_ClkInitStruct.IC2Selection.ClockDivider   = 2;
+    RCC_ClkInitStruct.IC6Selection.ClockSelection = RCC_ICCLKSOURCE_PLL2;
+    RCC_ClkInitStruct.IC6Selection.ClockDivider   = 1;
+    RCC_ClkInitStruct.IC11Selection.ClockSelection = RCC_ICCLKSOURCE_PLL3;
+    RCC_ClkInitStruct.IC11Selection.ClockDivider   = 1;
+    RCC_ClkInitStruct.AHBCLKDivider   = RCC_HCLK_DIV2;
+    RCC_ClkInitStruct.APB1CLKDivider  = RCC_APB1_DIV1;
+    RCC_ClkInitStruct.APB2CLKDivider  = RCC_APB2_DIV1;
+    RCC_ClkInitStruct.APB4CLKDivider  = RCC_APB4_DIV1;
+    RCC_ClkInitStruct.APB5CLKDivider  = RCC_APB5_DIV1;
+
+    if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct) != HAL_OK) { while (1); }
+
+    RCC_PeriphCLKInitStruct.PeriphClockSelection = 0;
+    RCC_PeriphCLKInitStruct.PeriphClockSelection |= RCC_PERIPHCLK_XSPI1;
+    RCC_PeriphCLKInitStruct.Xspi1ClockSelection  = RCC_XSPI1CLKSOURCE_HCLK;
+    RCC_PeriphCLKInitStruct.PeriphClockSelection |= RCC_PERIPHCLK_XSPI2;
+    RCC_PeriphCLKInitStruct.Xspi2ClockSelection  = RCC_XSPI2CLKSOURCE_HCLK;
+    RCC_PeriphCLKInitStruct.PeriphClockSelection |= RCC_PERIPHCLK_SDMMC2;
+    RCC_PeriphCLKInitStruct.Sdmmc2ClockSelection = RCC_SDMMC2CLKSOURCE_HCLK;
+
+    if (HAL_RCCEx_PeriphCLKConfig(&RCC_PeriphCLKInitStruct) != HAL_OK) { while (1); }
+}
+
+/* ================================================================
+   DEBUG CONSOLE (UART)
+   ================================================================ */
+
+static void CONSOLE_Config(void)
+{
+    GPIO_InitTypeDef gpio_init;
+    __HAL_RCC_USART1_CLK_ENABLE();
+    __HAL_RCC_GPIOE_CLK_ENABLE();
+
+    gpio_init.Pin       = GPIO_PIN_5 | GPIO_PIN_6;
+    gpio_init.Mode      = GPIO_MODE_AF_PP;
+    gpio_init.Pull      = GPIO_PULLUP;
+    gpio_init.Speed     = GPIO_SPEED_FREQ_HIGH;
+    gpio_init.Alternate = GPIO_AF7_USART1;
+    HAL_GPIO_Init(GPIOE, &gpio_init);
+
+    huart1.Instance          = USART1;
+    huart1.Init.BaudRate     = 115200;
+    huart1.Init.Mode         = UART_MODE_TX_RX;
+    huart1.Init.Parity       = UART_PARITY_NONE;
+    huart1.Init.WordLength   = UART_WORDLENGTH_8B;
+    huart1.Init.StopBits     = UART_STOPBITS_1;
+    huart1.Init.HwFlowCtl    = UART_HWCONTROL_NONE;
+    huart1.Init.OverSampling = UART_OVERSAMPLING_8;
+
+    if (HAL_UART_Init(&huart1) != HAL_OK) { while (1); }
+}
+
+/* ================================================================
+   SD CARD BENCHMARK
+   ================================================================ */
+
+#define SD_BENCH_BLOCKS  64
+#define SD_BENCH_BYTES   (SD_BENCH_BLOCKS * SD_BLOCK_SIZE)
+
+static uint8_t sd_wbuf[SD_BENCH_BYTES];
+static uint8_t sd_rbuf[SD_BENCH_BYTES];
+
+static void SD_Benchmarks(void)
+{
+    uint32_t          t0, t1;
+    HAL_StatusTypeDef st;
+    float             speed;
+    uint32_t          blk = 200;
+    uint32_t          i;
+
+    for (i = 0; i < SD_BENCH_BYTES; i++)
+        sd_wbuf[i] = (uint8_t)((i ^ 0xA5) & 0xFF);
+
+    printf("\n ==== SD Speed Test (blocking, %d blocks) ====\n", SD_BENCH_BLOCKS);
+    printf("  Bus : %s | ClkDiv : %lu\n\n",
+           (hsd1.Init.BusWide == SDMMC_BUS_WIDE_4B) ? "4B" : "1B",
+           (unsigned long)hsd1.Init.ClockDiv);
+
+    printf("[W] ");
+    t0 = HAL_GetTick();
+    st = HAL_SD_WriteBlocks(&hsd1, sd_wbuf, blk, SD_BENCH_BLOCKS, HAL_MAX_DELAY);
+    t1 = HAL_GetTick();
+
+    if (st == HAL_OK && t1 > t0) {
+        speed = (float)SD_BENCH_BYTES / ((float)(t1 - t0) * 1000.0f);
+        printf("OK  %.2f MB/s  (%lu ms)\n", speed, (unsigned long)(t1 - t0));
+    } else {
+        printf("FAIL HAL=0x%08lX STA=0x%08lX\n",
+               (unsigned long)st, (unsigned long)SDMMC2->STA);
+        return;
+    }
+
+    printf("[R] ");
+    t0 = HAL_GetTick();
+    st = HAL_SD_ReadBlocks(&hsd1, sd_rbuf, blk, SD_BENCH_BLOCKS, HAL_MAX_DELAY);
+    t1 = HAL_GetTick();
+
+    if (st == HAL_OK && t1 > t0) {
+        speed = (float)SD_BENCH_BYTES / ((float)(t1 - t0) * 1000.0f);
+        printf("OK  %.2f MB/s  (%lu ms)\n", speed, (unsigned long)(t1 - t0));
+        uint32_t errs = 0;
+        for (i = 0; i < SD_BENCH_BYTES; i++)
+            if (sd_rbuf[i] != sd_wbuf[i]) errs++;
+        printf("[.] Integrity: %s  (%lu errors)\n",
+               errs == 0 ? "PASSED" : "FAILED", errs);
+    } else {
+        printf("FAIL HAL=0x%08lX STA=0x%08lX\n",
+               (unsigned long)st, (unsigned long)SDMMC2->STA);
+    }
+
+    printf(" ==== Done ====\n");
+}
+
+/* ================================================================
+   SD CARD IMAGE STORAGE (BATCHED — writes SD_BATCH_WRITE_BLOCKS
+   blocks per HAL_SD_WriteBlocks call for much faster throughput)
+   ================================================================ */
+
+static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
+                            uint32_t w, uint32_t h, uint32_t pixel_format)
+{
+    uint32_t         base = SD_IMG_BASE_BLOCK;
+    uint32_t         total_blocks = (SD_IMG_HEADER_SIZE + img_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+    uint32_t         i, checksum = 0;
+
+    /* ---- Overflow protection: check if this snapshot fits on the card ---- */
+    if (hsd1.SdCard.BlockNbr > 0) {
+        uint32_t last_block = base + total_blocks - 1;
+        if (last_block >= hsd1.SdCard.BlockNbr) {
+            printf("[SD Store] OVERFLOW! block %lu >= card max %lu\n",
+                   (unsigned long)last_block, (unsigned long)hsd1.SdCard.BlockNbr);
+            return -1;
+        }
+    }
+
+    for (i = 0; i < img_size; i++)
+        checksum ^= img_buf[i];
+
+    sd_image_header_t hdr;
+    hdr.magic        = SD_HEADER_TAG;
+    hdr.width        = w;
+    hdr.height       = h;
+    hdr.pixel_format = pixel_format;
+    hdr.data_size    = img_size;
+    hdr.timestamp    = HAL_GetTick();
+    hdr.checksum     = checksum;
+    hdr.snap_id      = 0;
+    memset(hdr.reserved, 0, sizeof(hdr.reserved));
+
+    /* ---- Use the PSRAM batch buffer (sd_batch_buf) for all writes ---- */
+    uint32_t batch_size = SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE;
+
+    printf("\n[SD Store] %lux%lu fmt=%lu  %lu bytes  %lu blocks  (batch=%lu blocks/call)\n",
+           (unsigned long)w, (unsigned long)h, pixel_format,
+           img_size, total_blocks, (unsigned long)SD_BATCH_WRITE_BLOCKS);
+
+    /* --- Step 1: Write header block (block 0 of this snapshot) ---
+       The header is 64 bytes at offset 0; image data starts at offset 64.
+       Fill the rest of the first block with image data, then pad
+       remaining batch slots with zeros. */
+    memset(sd_batch_buf, 0, batch_size);
+    memcpy(sd_batch_buf, &hdr, SD_IMG_HEADER_SIZE);
+    uint32_t first_chunk = SD_BLOCK_SIZE - SD_IMG_HEADER_SIZE;
+    if (first_chunk > img_size) first_chunk = img_size;
+    memcpy(sd_batch_buf + SD_IMG_HEADER_SIZE, img_buf, first_chunk);
+
+    /* If image has more data, also pre-fill batch slots 2..N */
+    uint32_t img_offset = first_chunk;          // bytes of image already in block 0
+    uint32_t batch_blk  = 1;                    // next block index within batch (0 = header)
+    while (img_offset < img_size && batch_blk < SD_BATCH_WRITE_BLOCKS) {
+        uint32_t chunk = SD_BLOCK_SIZE;
+        if (chunk > img_size - img_offset) chunk = img_size - img_offset;
+        memcpy(sd_batch_buf + batch_blk * SD_BLOCK_SIZE, img_buf + img_offset, chunk);
+        if (chunk < SD_BLOCK_SIZE)
+            memset(sd_batch_buf + batch_blk * SD_BLOCK_SIZE + chunk, 0, SD_BLOCK_SIZE - chunk);
+        img_offset += chunk;
+        batch_blk++;
+    }
+
+    /* Write however many blocks we filled (at least 1 for the header) */
+    uint32_t blocks_to_write = batch_blk;
+
+    HAL_StatusTypeDef st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, base, blocks_to_write, HAL_MAX_DELAY);
+    if (st != HAL_OK) {
+        printf("[SD Store] header batch FAIL (blocks %lu..%lu)\n",
+               (unsigned long)base, (unsigned long)(base + blocks_to_write - 1));
+        return -1;
+    }
+
+    uint32_t current_block = base + blocks_to_write;
+
+    /* --- Step 2: Write remaining image data in full batches --- */
+    while (img_offset < img_size) {
+        uint32_t remaining_bytes = img_size - img_offset;
+        uint32_t remaining_blocks_full = (remaining_bytes + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+        uint32_t blocks_in_batch = (remaining_blocks_full < SD_BATCH_WRITE_BLOCKS)
+                                    ? remaining_blocks_full : SD_BATCH_WRITE_BLOCKS;
+
+        /* Fill the batch buffer */
+        for (uint32_t b = 0; b < blocks_in_batch; b++) {
+            uint32_t src = img_offset + b * SD_BLOCK_SIZE;
+            uint32_t dst = b * SD_BLOCK_SIZE;
+            if (src + SD_BLOCK_SIZE <= img_size) {
+                /* Full block — direct copy */
+                memcpy(sd_batch_buf + dst, img_buf + src, SD_BLOCK_SIZE);
+            } else {
+                /* Last block — copy partial + zero-pad */
+                uint32_t partial = img_size - src;
+                memcpy(sd_batch_buf + dst, img_buf + src, partial);
+                memset(sd_batch_buf + dst + partial, 0, SD_BLOCK_SIZE - partial);
+            }
+        }
+
+        /* Wait for SD card to be ready before next batch.
+           SDXC cards (128GB+) need significant time between multi-block write
+           operations to complete internal flash programming. A tight loop is
+           insufficient — we use TaskYIELD to let the SDMMC interrupt handler
+           process and update the card state machine. */
+        {
+            uint32_t wait_ms = 0;
+            while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 2000) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+                wait_ms++;
+            }
+            if (wait_ms >= 2000) {
+                printf("[SD Store] Card timeout before block %lu (state=%lu after %lu ms)\n",
+                       (unsigned long)current_block,
+                       (unsigned long)HAL_SD_GetCardState(&hsd1),
+                       (unsigned long)wait_ms);
+            }
+        }
+
+        st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
+        if (st != HAL_OK) {
+            printf("[SD Store] batch FAIL at block %lu (HAL=0x%08lX STA=0x%08lX)\n",
+                   (unsigned long)current_block, (unsigned long)st, (unsigned long)SDMMC2->STA);
+            return -1;
+        }
+
+        img_offset += blocks_in_batch * SD_BLOCK_SIZE;
+        current_block += blocks_in_batch;
+    }
+
+    printf("[SD Store] OK (blocks %lu..%lu, %lu HAL calls vs %lu original)\n",
+           (unsigned long)base, (unsigned long)(current_block - 1),
+           (unsigned long)((total_blocks + SD_BATCH_WRITE_BLOCKS - 1) / SD_BATCH_WRITE_BLOCKS),
+           (unsigned long)total_blocks);
+    return 0;
+}
+
+/* ================================================================
+   BUTTON THREAD (runs forever)
+   ================================================================ */
+
+static void btn_thread_fct(void *arg)
+{
+    (void)arg;
+
+    while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
+
+
+    printf("\n============================================\n");
+    printf("  STANDALONE SNAPSHOT MODE\n");
+    printf("  Resolution: %d x %d @ %d FPS\n",
+           SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
+    printf("  Camera: ON-DEMAND (init per capture)\n");
+    printf("  Press USER button (PC13) to capture.\n");
+    printf("============================================\n\n");
+
+    BSP_LED_On(LED_GREEN);
+
+    while (1) {
+        if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
+            vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
+            if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) != GPIO_PIN_SET)
+                continue;
+            WS2812_TurnOn();
+            BSP_LED_Off(LED_GREEN);
+            BSP_LED_On(LED_RED);
+
+            uint32_t t_capture_start = HAL_GetTick();
+            uint32_t snap_num = snap_count + 1;
+            printf("[BTN] >>> Button pressed! Capturing #%lu...\n", (unsigned long)snap_num);
+
+            /* Full init + capture + deinit (safe - CMW doesn't support pipe restart) */
+            int rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
+                                            SNAP_WIDTH, SNAP_HEIGHT,
+                                            SNAP_FPS, SNAP_WARMUP_FRAMES);
+
+            uint32_t t_capture_end = HAL_GetTick();
+            uint32_t capture_elapsed = t_capture_end - t_capture_start;
+
+            if (rc != 0) {
+                printf("[BTN] >>> Camera capture FAILED (rc=%d)!\n", rc);
+                BSP_LED_Off(LED_RED);
+                BSP_LED_On(LED_GREEN);
+                while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+
+            uint32_t frame_size   = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
+            uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+            uint32_t target_block = snap_base_block + (snap_count * total_blocks);
+            uint32_t saved_base   = SD_IMG_BASE_BLOCK;
+            SD_IMG_BASE_BLOCK     = target_block;
+
+            printf("[CAM] Captured in %lu ms!\n", (unsigned long)capture_elapsed);
+
+            uint32_t t_sd_start = HAL_GetTick();
+
+            if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
+                snap_count++;
+                uint32_t t_sd_end = HAL_GetTick();
+                printf("[BTN] >>> Snapshot #%lu SAVED (block %lu)\n",
+                       (unsigned long)snap_num, (unsigned long)target_block);
+                printf("[PERF] Capture=%lums + SD=%lums = Total=%lums\n",
+                       (unsigned long)capture_elapsed,
+                       (unsigned long)(t_sd_end - t_sd_start),
+                       (unsigned long)(t_sd_end - t_capture_start));
+            } else {
+                printf("[BTN] >>> SD write FAILED!\n");
+            }
+
+
+            BSP_LED_Off(LED_RED);
+            BSP_LED_On(LED_GREEN);
+            WS2812_TurnOff();
+
+            while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
+                vTaskDelay(pdMS_TO_TICKS(50));
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(BTN_POLL_DELAY_MS));
+    }
+}
+
+/* ================================================================
+   FREERTOS INITIALIZATION
+   ================================================================ */
+
+static int main_freertos(void)
+{
+    TaskHandle_t hdl;
+
+    hdl = xTaskCreateStatic(main_thread_fct, "main",
+                            configMINIMAL_STACK_SIZE, NULL,
+                            tskIDLE_PRIORITY + 1,
+                            main_thread_stack, &main_thread_cb);
+    assert(hdl != NULL);
+
+    /* Button task at HIGHER priority for immediate response */
+    hdl = xTaskCreateStatic(btn_thread_fct, "btn",
+                            4 * configMINIMAL_STACK_SIZE, NULL,
+                            tskIDLE_PRIORITY + 2,
+                            btn_thread_stack, &btn_thread_cb);
+    assert(hdl != NULL);
+
+    vTaskStartScheduler();
+    assert(0);
+    return -1;
+}
+
+/* ================================================================
+   MAIN THREAD (runs once: board init, SD init, camera sleep init)
+   ================================================================ */
+
+static void main_thread_fct(void *arg)
+{
+    (void)arg;
+    uint32_t preemptPriority, subPriority;
+    IRQn_Type i;
+    int ret;
+
+    HAL_NVIC_GetPriority(SysTick_IRQn, HAL_NVIC_GetPriorityGrouping(),
+                         &preemptPriority, &subPriority);
+    for (i = PVD_PVM_IRQn; i <= LTDC_UP_ERR_IRQn; i++)
+        HAL_NVIC_SetPriority(i, preemptPriority, subPriority);
+
+    SystemClock_Config();
+    vPortSetupTimerInterrupt();
+    CONSOLE_Config();
+    Fuse_Programming();
+
+
+    //////////////////////////////////////////
+    //------------- LED ------------------//
+    //////////////////////////////////////////
+    printf("[INIT] Light system\n");
+    MX_GPDMA1_Init();
+    MX_TIM1_Init();
+    // Initialize WS2812
+    WS2812_Init();
+    //////////////////////////////////////////
+
+
+
+#ifdef STM32N6570_DK_REV
+    BSP_XSPI_RAM_Init(0);
+    BSP_XSPI_RAM_EnableMemoryMappedMode(0);
+#endif
+
+    BSP_XSPI_NOR_Init_t NOR_Init;
+    NOR_Init.InterfaceMode  = BSP_XSPI_NOR_OPI_MODE;
+    NOR_Init.TransferRate   = BSP_XSPI_NOR_DTR_TRANSFER;
+    BSP_XSPI_NOR_Init(0, &NOR_Init);
+    BSP_XSPI_NOR_EnableMemoryMappedMode(0);
+
+    ret = BSP_LED_Init(LED_GREEN); assert(ret == BSP_ERROR_NONE);
+    ret = BSP_LED_Init(LED_RED);   assert(ret == BSP_ERROR_NONE);
+
+    BSP_PB_Init(BUTTON_USER1, BUTTON_MODE_GPIO);
+    printf("[BTN] PC13 initialized via BSP (active HIGH). State=%s\n",
+           BSP_PB_GetState(BUTTON_USER1) == GPIO_PIN_SET ? "PRESSED" : "RELEASED");
+
+    Security_Config();
+    IAC_Config();
+
+    LL_BUS_EnableClockLowPower(~0);
+    LL_MEM_EnableClockLowPower(~0);
+    LL_AHB1_GRP1_EnableClockLowPower(~0);
+    LL_AHB2_GRP1_EnableClockLowPower(~0);
+    LL_AHB3_GRP1_EnableClockLowPower(~0);
+    LL_AHB4_GRP1_EnableClockLowPower(~0);
+    LL_AHB5_GRP1_EnableClockLowPower(~0);
+    LL_APB1_GRP1_EnableClockLowPower(~0);
+    LL_APB1_GRP2_EnableClockLowPower(~0);
+    LL_APB2_GRP1_EnableClockLowPower(~0);
+    LL_APB4_GRP1_EnableClockLowPower(~0);
+    LL_APB4_GRP2_EnableClockLowPower(~0);
+    LL_APB5_GRP1_EnableClockLowPower(~0);
+    LL_MISC_EnableClockLowPower(~0);
+
+
+
+    /* ---- SD CARD INITIALIZATION ---- */
+    printf("\n=== SD Card Detection Test ===\n");
+
+    HAL_PWREx_EnableVddIO5();
+    for (volatile uint32_t d = 0; d < 500000; d++);
+
+    RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+    PeriphClkInit.PeriphClockSelection  = RCC_PERIPHCLK_SDMMC2;
+    PeriphClkInit.Sdmmc2ClockSelection  = RCC_SDMMC2CLKSOURCE_HCLK;
+    HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit);
+
+    __HAL_RCC_SDMMC2_FORCE_RESET();
+    for (volatile uint32_t d = 0; d < 1000; d++);
+    __HAL_RCC_SDMMC2_RELEASE_RESET();
+    for (volatile uint32_t d = 0; d < 1000; d++);
+
+    hsd1.Instance             = SDMMC2;
+    hsd1.Init.ClockEdge       = SDMMC_CLOCK_EDGE_RISING;
+    hsd1.Init.ClockPowerSave  = SDMMC_CLOCK_POWER_SAVE_DISABLE;
+    hsd1.Init.BusWide         = SDMMC_BUS_WIDE_4B;
+    hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
+    hsd1.Init.ClockDiv        = 2;
+    hsd1.State                = HAL_SD_STATE_RESET;
+
+    HAL_SD_MspInit(&hsd1);
+    HAL_StatusTypeDef status = HAL_SD_Init(&hsd1);
+
+    if (status == HAL_OK) {
+        printf("[SD] Switching to 4-bit bus width...\n");
+        status = HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B);
+        if (status == HAL_OK) {
+            hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
+            printf("[SD] 4-bit bus width configured successfully\n");
+        } else {
+            printf("[SD] Wide bus config failed (%lu), staying in 1-bit\n", (unsigned long)status);
+            status = HAL_OK;
+        }
+    }
+
+    if (status == HAL_OK) {
+        uint64_t     total_bytes = (uint64_t)hsd1.SdCard.BlockNbr * (uint64_t)hsd1.SdCard.BlockSize;
+        unsigned long size_mb    = (unsigned long)(total_bytes / 1048576UL);
+        unsigned long size_gb    = (unsigned long)(total_bytes / 1073741824UL);
+
+        printf("\n*** SD CARD DETECTED SUCCESSFULLY! ***\n\n");
+        printf("  Card Size: %lu GB (%lu MB)\n", size_gb, size_mb);
+        printf("  Blocks:    %lu x %lu bytes\n",
+               (unsigned long)hsd1.SdCard.BlockNbr, (unsigned long)hsd1.SdCard.BlockSize);
+        printf("  Card Type: %s\n",
+               (hsd1.SdCard.CardType == CARD_SDHC_SDXC) ? "SDHC/SDXC" : "SDSC");
+        printf("  Bus Width: %s\n",
+               (hsd1.Init.BusWide == SDMMC_BUS_WIDE_4B) ? "4-bit" : "1-bit");
+
+        /* Storage capacity info */
+        uint32_t blocks_per_snap = (SD_IMG_HEADER_SIZE + SNAP_FRAME_SIZE + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+        uint32_t available_blocks = hsd1.SdCard.BlockNbr - SD_SNAP_BASE_BLOCK;
+        uint32_t max_snaps = available_blocks / blocks_per_snap;
+        printf("  Blocks/snapshot: %lu\n", (unsigned long)blocks_per_snap);
+        printf("  Max snapshots: ~%lu (from block %lu onward)\n",
+               (unsigned long)max_snaps, (unsigned long)SD_SNAP_BASE_BLOCK);
+        printf("\n");
+
+        SD_Benchmarks();
+    } else {
+        printf("[ERROR] SD card init failed: %lu\n", (unsigned long)status);
+    }
+
+    /* ---- Ready! ---- */
+    printf("\n===========================================\n");
+    printf("[INFO] System READY!\n");
+    printf("[INFO] Camera: ON-DEMAND (init per capture)\n");
+    printf("[INFO] Press USER button (PC13) to capture + save.\n");
+    printf("===========================================\n\n");
+
+
+    system_ready = 1;
+    vTaskDelete(NULL);
+}
+
+
+
+
+
+/* ================================================================
+   DCMIPP CLOCK CONFIGURATION
+   ================================================================ */
+
+HAL_StatusTypeDef MX_DCMIPP_ClockConfig(DCMIPP_HandleTypeDef *hdcmipp)
+{
+    (void)hdcmipp;
+    RCC_PeriphCLKInitTypeDef RCC_PeriphCLKInitStruct = {0};
+    HAL_StatusTypeDef        ret;
+
+    RCC_PeriphCLKInitStruct.PeriphClockSelection   = RCC_PERIPHCLK_DCMIPP;
+    RCC_PeriphCLKInitStruct.DcmippClockSelection   = RCC_DCMIPPCLKSOURCE_IC17;
+    RCC_PeriphCLKInitStruct.ICSelection[RCC_IC17].ClockSelection = RCC_ICCLKSOURCE_PLL2;
+    RCC_PeriphCLKInitStruct.ICSelection[RCC_IC17].ClockDivider   = 3;
+    ret = HAL_RCCEx_PeriphCLKConfig(&RCC_PeriphCLKInitStruct);
+    if (ret) return ret;
+
+    RCC_PeriphCLKInitStruct.PeriphClockSelection = RCC_PERIPHCLK_CSI;
+    RCC_PeriphCLKInitStruct.ICSelection[RCC_IC18].ClockSelection = RCC_ICCLKSOURCE_PLL1;
+    RCC_PeriphCLKInitStruct.ICSelection[RCC_IC18].ClockDivider   = 40;
+    ret = HAL_RCCEx_PeriphCLKConfig(&RCC_PeriphCLKInitStruct);
+    if (ret) return ret;
+
+    return HAL_OK;
+}
+
+/* ================================================================
+   USB MSP INIT
+   ================================================================ */
+
+void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
+{
+    assert(hpcd->Instance == USB1_OTG_HS);
+    __HAL_RCC_PWR_CLK_ENABLE();
+    HAL_PWREx_EnableVddUSBVMEN();
+    while (__HAL_PWR_GET_FLAG(PWR_FLAG_USB33RDY) == 0U);
+    HAL_PWREx_EnableVddUSB();
+    __HAL_RCC_USB1_OTG_HS_CLK_ENABLE();
+    USB1_HS_PHYC->USBPHYC_CR &= ~(0x7U << 0x4U);
+    USB1_HS_PHYC->USBPHYC_CR |= (0x2U << 0x4U);
+    __HAL_RCC_USB1_OTG_HS_PHY_CLK_ENABLE();
+    HAL_NVIC_SetPriority(USB1_OTG_HS_IRQn, 6U, 0U);
+    HAL_NVIC_EnableIRQ(USB1_OTG_HS_IRQn);
+}
+
+/* ================================================================
+   TIM1 INIT
+   ================================================================ */
+
+static void MX_TIM1_Init(void)
+{
+    TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+    TIM_MasterConfigTypeDef sMasterConfig = {0};
+    TIM_OC_InitTypeDef sConfigOC = {0};
+    TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+    htim1.Instance = TIM1;
+    htim1.Init.Prescaler = 5;      // 200 MHz / 6 = 33.33 MHz
+    htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
+    htim1.Init.Period = 500;
+    htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+    htim1.Init.RepetitionCounter = 0;
+    htim1.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+    HAL_TIM_Base_Init(&htim1);
+
+    sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+    HAL_TIM_ConfigClockSource(&htim1, &sClockSourceConfig);
+    HAL_TIM_PWM_Init(&htim1);
+
+    sConfigOC.OCMode = TIM_OCMODE_PWM1;
+    sConfigOC.Pulse = 0;
+    sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+    sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+    sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+    sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+    sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+    HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_1);
+
+    sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+    sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+    sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+    sBreakDeadTimeConfig.DeadTime = 0;
+    sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+    sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+    HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig);
+
+    HAL_TIM_MspPostInit(&htim1);
+}
+
+void PeriphCommonClock_Config(void)
+{
+    RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_TIM;
+    PeriphClkInitStruct.TIMPresSelection = RCC_TIMPRES_DIV1;
+    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK) {
+        //Error_Handler();
+    }
+}
+
+static void MX_GPDMA1_Init(void)
+{
+    __HAL_RCC_GPDMA1_CLK_ENABLE();
+    HAL_NVIC_SetPriority(GPDMA1_Channel1_IRQn, 0, 0);
+    HAL_NVIC_EnableIRQ(GPDMA1_Channel1_IRQn);
+}
+
+
+
+/* ================================================================
+   ASSERT CALLBACK
+   ================================================================ */
+
+#ifdef USE_FULL_ASSERT
+void assert_failed(uint8_t *file, uint32_t line)
+{
+    UNUSED(file);
+    UNUSED(line);
+    __BKPT(0);
+    while (1) {}
+}
+#endif
+
+/* ================================================================
+   DEBUG HELPER
+   ================================================================ */
+
+__attribute__((section(".keep_me")))
+void app_clean_invalidate_dbg(void)
+{
+    SCB_CleanInvalidateDCache();
+}

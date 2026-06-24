@@ -1,0 +1,15 @@
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:81:24:xEventGroupCreateStatic	1
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:133:24:xEventGroupCreate	2
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:302:13:xEventGroupWaitBits	14
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:458:13:xEventGroupClearBits	1
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:707:6:vEventGroupClearBitsCallback	1
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:488:16:xEventGroupClearBitsFromISR	1
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:502:13:xEventGroupGetBitsFromISR	1
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:518:13:xEventGroupSetBits	5
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:179:13:xEventGroupSync	8
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:698:6:vEventGroupSetBitsCallback	1
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:614:6:vEventGroupDelete	3
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:661:16:xEventGroupGetStaticBuffer	2
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:753:16:xEventGroupSetBitsFromISR	1
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:770:17:uxEventGroupGetNumber	2
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/FreeRTOS/Source/event_groups.c:792:10:vEventGroupSetNumber	1

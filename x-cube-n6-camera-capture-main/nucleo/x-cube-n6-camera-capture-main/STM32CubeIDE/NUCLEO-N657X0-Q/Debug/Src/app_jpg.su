@@ -1,0 +1,6 @@
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_jpg.c:41:5:JPG_Init	40	static
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_jpg.c:68:6:JPG_Deinit	8	static
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_jpg.c:77:5:JPG_Encode	24	static
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_jpg.c:101:6:HAL_JPEG_DataReadyCallback	0	static
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_jpg.c:112:6:HAL_JPEG_MspInit	8	static
+D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_jpg.c:117:6:HAL_JPEG_MspDeInit	0	static
