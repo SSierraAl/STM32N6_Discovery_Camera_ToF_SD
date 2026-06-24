@@ -157,6 +157,11 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/partition_stm32n657xx.h</locationURI>
 		</link>
 		<link>
+			<name>Inc/platform.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Inc/platform.h</locationURI>
+		</link>
+		<link>
 			<name>Inc/stm32_assert_template.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/stm32_assert_template.h</locationURI>
@@ -322,6 +327,11 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Src/main.c</locationURI>
 		</link>
 		<link>
+			<name>Src/platform.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Src/platform.c</locationURI>
+		</link>
+		<link>
 			<name>Src/stm32n6xx_hal_sd.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Src/stm32n6xx_hal_sd.c</locationURI>
@@ -370,6 +380,11 @@
 			<name>Lib/Camera_Middleware/cmw_utils.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Lib/Camera_Middleware/cmw_utils.c</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API</name>
+			<type>2</type>
+			<locationURI>virtual:/virtual</locationURI>
 		</link>
 		<link>
 			<name>Src/Inc/fx_stm32_sd_driver.h</name>
@@ -448,6 +463,16 @@
 		</link>
 		<link>
 			<name>STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc</name>
+			<type>2</type>
+			<locationURI>virtual:/virtual</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc</name>
+			<type>2</type>
+			<locationURI>virtual:/virtual</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src</name>
 			<type>2</type>
 			<locationURI>virtual:/virtual</locationURI>
 		</link>
@@ -1260,6 +1285,51 @@
 			<name>STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_ll_usb.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_ll_usb.c</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_api.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_api.h</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_buffers.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_buffers.h</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_plugin_detection_thresholds.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_plugin_detection_thresholds.h</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_plugin_motion_indicator.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_plugin_motion_indicator.h</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_plugin_xtalk.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc/vl53l5cx_plugin_xtalk.h</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/vl53l5cx_api.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/vl53l5cx_api.c</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/vl53l5cx_plugin_detection_thresholds.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/vl53l5cx_plugin_detection_thresholds.c</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/vl53l5cx_plugin_motion_indicator.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/vl53l5cx_plugin_motion_indicator.c</locationURI>
+		</link>
+		<link>
+			<name>STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/vl53l5cx_plugin_xtalk.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/vl53l5cx_plugin_xtalk.c</locationURI>
 		</link>
 		<link>
 			<name>STM32Cube_FW_N6/Middlewares/ST/filex/LICENSE.txt</name>

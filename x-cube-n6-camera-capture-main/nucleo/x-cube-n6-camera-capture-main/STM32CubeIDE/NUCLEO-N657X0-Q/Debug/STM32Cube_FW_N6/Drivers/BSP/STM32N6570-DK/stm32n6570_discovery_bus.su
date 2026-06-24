@@ -1,4 +1,4 @@
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_bus.h:1407:22:LL_AHB4_GRP1_EnableClock	8	static
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_bus.h:1407:22:LL_AHB4_GRP1_EnableClock	8	static
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Drivers/BSP/STM32N6570-DK/stm32n6570_discovery_bus.c:1050:17:I2C_GetTiming.constprop	80	static
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Drivers/BSP/STM32N6570-DK/stm32n6570_discovery_bus.c:245:9:BSP_I2C1_DeInit	8	static
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Drivers/BSP/STM32N6570-DK/stm32n6570_discovery_bus.c:273:26:MX_I2C1_Init	8	static

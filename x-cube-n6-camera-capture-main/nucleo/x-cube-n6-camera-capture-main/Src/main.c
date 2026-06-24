@@ -1,18 +1,22 @@
 /**
- ******************************************************************************
+ * *****************************************************************************
  * @file    main.c
- * @brief   Standalone Camera Snapshot Capture — NUCLEO-N657X0-Q
+ * @brief   Standalone Camera + ToF Snapshot Capture — NUCLEO-N657X0-Q
  *
  *   Captures images from the CMW-IMX335 camera module and stores them as
- *   raw YUV422 frames on a microSD card.  No USB/UVC, no FileX/fatfs,
- *   no PC connection required after flashing.
+ *   raw YUV422 frames on a microSD card.  Includes VL53L5CX Time-of-Flight
+ *   sensor integration for distance measurements.
+ *
+ *   No USB/UVC, no FileX/fatfs, no PC connection required after flashing.
  *
  *   Hardware:
  *     - MCU:      STM32N657 (NUCLEO-N657X0-Q / MB1940)
  *     - Camera:   CMW-IMX335 (5 MP, YUV422 output via CSI-2)
+ *     - ToF:      VL53L5CX (8x8 resolution, continuous mode)
  *     - Storage:  microSD card (SDMMC2, 4-bit bus)
  *     - Button:   USER B1 = PC13 (active HIGH, external pull-down)
  *     - LEDs:     RED = PG10, GREEN = PG0
+ *     - Illumination: WS2812 (GPDMA1 + TIM1 PWM)
  *
  *   Flow (OPTIMIZED - Sleep Mode):
  *     1. Boot → init clocks, MPU, PSRAM, SD card
@@ -25,12 +29,17 @@
  *     8. Back to sleep → wait for next press
  *
  *   Two FreeRTOS tasks:
- *     - main_thread: board init, SD card init, camera sleep mode init, then deletes
+ *     - main_thread: board init, SD card init, camera sleep mode init,
+ *                    then deletes itself
  *     - btn_thread:  polls USER button, triggers fast capture + SD write
  *
  *   All configurable parameters are in Inc/app_config.h.
- ******************************************************************************
+ * *****************************************************************************
  */
+
+/* ================================================================
+   SECTION 1: INCLUDES
+   ================================================================ */
 
 #include <assert.h>
 #include <stdio.h>
@@ -49,10 +58,15 @@
 #include "stm32n6570_discovery_bus.h"
 #include "stm32n6570_discovery_xspi.h"
 
-
+/* ---- Illumination (WS2812) ---- */
 #include "ws2812.h"
 
-/* ---- Application ---- */
+/* ---- Time of Flight (VL53L5CX) ---- */
+#include "platform.h"
+#include "vl53l5cx_api.h"
+#include "vl53l5cx_plugin_motion_indicator.h"
+
+/* ---- Application Modules ---- */
 #include "app_config.h"
 #include "app_cam.h"
 #include "app_fuseprogramming.h"
@@ -64,19 +78,37 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+
 /* ================================================================
-   GLOBAL HANDLES
+   SECTION 2: GLOBAL PERIPHERAL HANDLES
    ================================================================ */
 
+/* I2C */
+I2C_HandleTypeDef hi2c1;
+
+/* UART (Debug Console) */
 UART_HandleTypeDef huart1;
+
+/* microSD (SDMMC2) */
 SD_HandleTypeDef hsd1;
 
+/* TIM1 (WS2812 PWM) */
 TIM_HandleTypeDef htim1;
+
+/* DMA (WS2812 Data) */
 DMA_HandleTypeDef handle_GPDMA1_Channel1;
 
+/* VL53L5CX ToF Sensor State */
+VL53L5CX_Configuration  Dev;
+VL53L5CX_ResultsData    Results;
+uint8_t                 status;
+uint8_t                 isAlive;
+uint8_t                 isReady;
+
+
 /* ================================================================
-   FREERTOS TASK CONTROL BLOCKS AND STACKS
-   ============================================================ */
+   SECTION 3: FREERTOS TASK CONTROL BLOCKS AND STACKS
+   ================================================================ */
 
 static StaticTask_t    main_thread_cb;
 static StackType_t     main_thread_stack[configMINIMAL_STACK_SIZE];
@@ -84,38 +116,55 @@ static StackType_t     main_thread_stack[configMINIMAL_STACK_SIZE];
 static StaticTask_t    btn_thread_cb;
 static StackType_t     btn_thread_stack[4 * configMINIMAL_STACK_SIZE];
 
+
 /* ================================================================
-   FORWARD DECLARATIONS
+   SECTION 4: FORWARD DECLARATIONS
    ================================================================ */
 
-static void  SystemClock_Config(void);
-static void  Security_Config(void);
-static void  IAC_Config(void);
-static void  CONSOLE_Config(void);
-static void  Setup_Mpu(void);
+/* ---- System Configuration ---- */
+static void SystemClock_Config(void);
+static void Security_Config(void);
+static void IAC_Config(void);
+static void CONSOLE_Config(void);
+static void Setup_Mpu(void);
+
+/* ---- FreeRTOS Entry Points ---- */
 static int   main_freertos(void);
 static void  main_thread_fct(void *arg);
 static void  btn_thread_fct(void *arg);
+
+/* ---- SD Card Operations ---- */
 static void  SD_Benchmarks(void);
 static int   SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
                               uint32_t w, uint32_t h, uint32_t pixel_format);
 static int   SD_ReadRawImage(uint8_t *img_buf, uint32_t *data_size_p);
-static void  MX_TIM1_Init(void);
 
+/* ---- Peripheral Initialization (WS2812 / Illumination) ---- */
+static void MX_TIM1_Init(void);
+static void MX_GPDMA1_Init(void);
+void        PeriphCommonClock_Config(void);
+
+/* ---- Peripheral Initialization (VL53L5CX ToF Sensor) ---- */
+static void VL53L5CX_I2C_Init(void);
+static void VL53L5CX_GPIO_Init(void);
+static void VL53L5CX_StartSequence(void);
+static void VL53L5CX_Validate(void);
+static void VL53L5CX_ReadingTest(void);
+
+/* ---- External References ---- */
 extern void  vPortSetupTimerInterrupt(void);
 extern int   __uncached_bss_start__;
 extern int   __uncached_bss_end__;
 
 
-void PeriphCommonClock_Config(void);
-static void MX_GPDMA1_Init(void);
-
-
 /* ================================================================
-   RUNTIME STATE
+   SECTION 5: RUNTIME STATE AND BUFFERS
    ================================================================ */
 
+/* System readiness flag (set by main_thread, polled by btn_thread) */
 static volatile int system_ready = 0;
+
+/* Snapshot counter and base block tracking */
 static uint32_t snap_count = 0;
 static uint32_t snap_base_block = SD_SNAP_BASE_BLOCK;
 
@@ -128,6 +177,7 @@ static uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
     in a single HAL_SD_WriteBlocks() call, drastically reducing the
     number of HAL API calls per snapshot (~307 instead of ~19,643). */
 static uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
+
 
 /* ================================================================
    SD CARD IMAGE HEADER FORMAT
@@ -149,15 +199,19 @@ typedef struct {
 
 static uint32_t SD_IMG_BASE_BLOCK = 1000;
 
+
 /* ================================================================
-   ENTRY POINT
+   SECTION 6: ENTRY POINT
    ================================================================ */
 
 int main(void)
 {
+    /* Enable instruction cache */
     MEMSYSCTL->MSCR |= MEMSYSCTL_MSCR_ICACTIVE_Msk;
     __HAL_RCC_CPUCLK_CONFIG(RCC_CPUCLKSOURCE_HSI);
     __HAL_RCC_SYSCLK_CONFIG(RCC_SYSCLKSOURCE_HSI);
+
+    /* Basic HAL initialization */
     HAL_Init();
     Setup_Mpu();
     SCB_EnableICache();
@@ -167,22 +221,32 @@ int main(void)
     SCB_EnableDCache();
 #endif
 
+    /* Start FreeRTOS scheduler */
     return main_freertos();
 }
 
+
 /* ================================================================
-   MPU SETUP
+   SECTION 7: MPU SETUP
    ================================================================ */
 
+/**
+ * @brief  Configure Memory Protection Unit
+ *
+ *         Sets up a non-cacheable region for the .uncached_bss section
+ *         to ensure proper access for peripherals that require it.
+ */
 static void Setup_Mpu(void)
 {
     MPU_Attributes_InitTypeDef attr;
     MPU_Region_InitTypeDef     region;
 
+    /* Configure non-cacheable memory attribute */
     attr.Number     = MPU_ATTRIBUTES_NUMBER0;
     attr.Attributes = MPU_NOT_CACHEABLE;
     HAL_MPU_ConfigMemoryAttributes(&attr);
 
+    /* Map attribute to .uncached_bss region */
     region.Enable           = MPU_REGION_ENABLE;
     region.Number           = MPU_REGION_NUMBER0;
     region.BaseAddress      = (uint32_t)&__uncached_bss_start__;
@@ -197,10 +261,19 @@ static void Setup_Mpu(void)
     memset(&__uncached_bss_start__, 0, &__uncached_bss_end__ - &__uncached_bss_start__);
 }
 
+
 /* ================================================================
-   SECURITY CONFIGURATION
+   SECTION 8: SECURITY CONFIGURATION
    ================================================================ */
 
+/**
+ * @brief  Configure RIF (Resource Identification and Firewall) settings
+ *
+ *         Sets master and slave security attributes for various
+ *         peripherals (NPU, DMA2D, CSI, DCMIPP, LTDC, USB OTG).
+ *         Also configures DMA and GPIO attributes for illumination
+ *         and I2C peripherals.
+ */
 static void Security_Config(void)
 {
     __HAL_RCC_RIFSC_CLK_ENABLE();
@@ -212,6 +285,7 @@ static void Security_Config(void)
     RIMC_master.MasterCID = RIF_CID_1;
     RIMC_master.SecPriv   = RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV;
 
+    /* Configure master attributes for secure peripherals */
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_NPU,    &RIMC_master);
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_DMA2D,  &RIMC_master);
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_DCMIPP, &RIMC_master);
@@ -219,6 +293,7 @@ static void Security_Config(void)
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC2,  &RIMC_master);
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_OTG1,   &RIMC_master);
 
+    /* Configure slave secure attributes */
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_NPU,    RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_DMA2D,  RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_CSI,    RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
@@ -229,27 +304,27 @@ static void Security_Config(void)
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_JPEG,   RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_OTG1HS, RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
 
-    // Configure GPDMA1 channel 2
+    /* ---- Illumination (WS2812) DMA + GPIO attributes ---- */
     if (HAL_DMA_ConfigChannelAttributes(&handle_GPDMA1_Channel1,
                                         DMA_CHANNEL_SEC | DMA_CHANNEL_PRIV |
                                         DMA_CHANNEL_SRC_SEC | DMA_CHANNEL_DEST_SEC) != HAL_OK) {
-
-    	//Error_Handler();
+        //Error_Handler();
     }
-
-    // Configure GPIO PD7
     HAL_GPIO_ConfigPinAttributes(GPIOE, GPIO_PIN_9, GPIO_PIN_SEC | GPIO_PIN_NPRIV);
 
-
-
-
-
+    /* ---- I2C GPIO attributes (VL53L5CX) ---- */
+    HAL_GPIO_ConfigPinAttributes(GPIOC, GPIO_PIN_1, GPIO_PIN_SEC | GPIO_PIN_NPRIV);
+    HAL_GPIO_ConfigPinAttributes(GPIOH, GPIO_PIN_9, GPIO_PIN_SEC | GPIO_PIN_NPRIV);
 }
 
+
 /* ================================================================
-   IAC CONFIGURATION
+   SECTION 9: IAC CONFIGURATION
    ================================================================ */
 
+/**
+ * @brief  Initialize Illegal Access Controller
+ */
 static void IAC_Config(void)
 {
     __HAL_RCC_IAC_CLK_ENABLE();
@@ -257,12 +332,22 @@ static void IAC_Config(void)
     __HAL_RCC_IAC_RELEASE_RESET();
 }
 
+/** IAC Interrupt Handler — traps into infinite loop on illegal access */
 void IAC_IRQHandler(void) { while (1) {} }
 
+
 /* ================================================================
-   SYSTEM CLOCK CONFIGURATION
+   SECTION 10: SYSTEM CLOCK CONFIGURATION
    ================================================================ */
 
+/**
+ * @brief  Configure system clocks using PLL1-4
+ *
+ *         PLL1: IC1 (CPU)    — 200 MHz
+ *         PLL2: IC6          — 125 MHz (CSI/DCMIPP)
+ *         PLL3: IC11         — 225 MHz
+ *         PLL4: USB          —  480 MHz / 32 = 15 MHz → USB 480M
+ */
 static void SystemClock_Config(void)
 {
     RCC_ClkInitTypeDef              RCC_ClkInitStruct      = {0};
@@ -272,6 +357,7 @@ static void SystemClock_Config(void)
     BSP_SMPS_Init(SMPS_VOLTAGE_OVERDRIVE);
     HAL_Delay(1);
 
+    /* ---- PLL1: CPU Core Clock (200 MHz via IC1) ---- */
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_NONE;
     RCC_OscInitStruct.PLL1.PLLState  = RCC_PLL_ON;
     RCC_OscInitStruct.PLL1.PLLSource = RCC_PLLSOURCE_HSI;
@@ -281,6 +367,7 @@ static void SystemClock_Config(void)
     RCC_OscInitStruct.PLL1.PLLP1     = 1;
     RCC_OscInitStruct.PLL1.PLLP2     = 1;
 
+    /* ---- PLL2: IC6 Clock (125 MHz) ---- */
     RCC_OscInitStruct.PLL2.PLLState  = RCC_PLL_ON;
     RCC_OscInitStruct.PLL2.PLLSource = RCC_PLLSOURCE_HSI;
     RCC_OscInitStruct.PLL2.PLLM      = 8;
@@ -289,6 +376,7 @@ static void SystemClock_Config(void)
     RCC_OscInitStruct.PLL2.PLLP1     = 1;
     RCC_OscInitStruct.PLL2.PLLP2     = 1;
 
+    /* ---- PLL3: IC11 Clock (225 MHz) ---- */
     RCC_OscInitStruct.PLL3.PLLState  = RCC_PLL_ON;
     RCC_OscInitStruct.PLL3.PLLSource = RCC_PLLSOURCE_HSI;
     RCC_OscInitStruct.PLL3.PLLM      = 16;
@@ -297,6 +385,7 @@ static void SystemClock_Config(void)
     RCC_OscInitStruct.PLL3.PLLP1     = 1;
     RCC_OscInitStruct.PLL3.PLLP2     = 1;
 
+    /* ---- PLL4: USB Clock ---- */
     RCC_OscInitStruct.PLL4.PLLState  = RCC_PLL_ON;
     RCC_OscInitStruct.PLL4.PLLSource = RCC_PLLSOURCE_HSI;
     RCC_OscInitStruct.PLL4.PLLM      = 32;
@@ -307,6 +396,7 @@ static void SystemClock_Config(void)
 
     if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { while (1); }
 
+    /* ---- Clock Tree Distribution ---- */
     RCC_ClkInitStruct.ClockType = (RCC_CLOCKTYPE_CPUCLK | RCC_CLOCKTYPE_SYSCLK |
                                    RCC_CLOCKTYPE_HCLK   | RCC_CLOCKTYPE_PCLK1 |
                                    RCC_CLOCKTYPE_PCLK2   | RCC_CLOCKTYPE_PCLK4 |
@@ -329,6 +419,7 @@ static void SystemClock_Config(void)
 
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct) != HAL_OK) { while (1); }
 
+    /* ---- Peripheral Clocks ---- */
     RCC_PeriphCLKInitStruct.PeriphClockSelection = 0;
     RCC_PeriphCLKInitStruct.PeriphClockSelection |= RCC_PERIPHCLK_XSPI1;
     RCC_PeriphCLKInitStruct.Xspi1ClockSelection  = RCC_XSPI1CLKSOURCE_HCLK;
@@ -340,10 +431,16 @@ static void SystemClock_Config(void)
     if (HAL_RCCEx_PeriphCLKConfig(&RCC_PeriphCLKInitStruct) != HAL_OK) { while (1); }
 }
 
+
 /* ================================================================
-   DEBUG CONSOLE (UART)
+   SECTION 11: DEBUG CONSOLE (UART)
    ================================================================ */
 
+/**
+ * @brief  Initialize USART1 for debug output
+ *
+ *         PE5 = TX, PE6 = RX, 115200 baud, 8N1
+ */
 static void CONSOLE_Config(void)
 {
     GPIO_InitTypeDef gpio_init;
@@ -369,8 +466,9 @@ static void CONSOLE_Config(void)
     if (HAL_UART_Init(&huart1) != HAL_OK) { while (1); }
 }
 
+
 /* ================================================================
-   SD CARD BENCHMARK
+   SECTION 12: SD CARD BENCHMARK
    ================================================================ */
 
 #define SD_BENCH_BLOCKS  64
@@ -379,6 +477,11 @@ static void CONSOLE_Config(void)
 static uint8_t sd_wbuf[SD_BENCH_BYTES];
 static uint8_t sd_rbuf[SD_BENCH_BYTES];
 
+/**
+ * @brief  Run SD card read/write speed benchmark
+ *
+ *         Writes and reads 64 blocks (32 KB), reports speed and integrity.
+ */
 static void SD_Benchmarks(void)
 {
     uint32_t          t0, t1;
@@ -395,6 +498,7 @@ static void SD_Benchmarks(void)
            (hsd1.Init.BusWide == SDMMC_BUS_WIDE_4B) ? "4B" : "1B",
            (unsigned long)hsd1.Init.ClockDiv);
 
+    /* Write benchmark */
     printf("[W] ");
     t0 = HAL_GetTick();
     st = HAL_SD_WriteBlocks(&hsd1, sd_wbuf, blk, SD_BENCH_BLOCKS, HAL_MAX_DELAY);
@@ -409,6 +513,7 @@ static void SD_Benchmarks(void)
         return;
     }
 
+    /* Read benchmark */
     printf("[R] ");
     t0 = HAL_GetTick();
     st = HAL_SD_ReadBlocks(&hsd1, sd_rbuf, blk, SD_BENCH_BLOCKS, HAL_MAX_DELAY);
@@ -430,11 +535,24 @@ static void SD_Benchmarks(void)
     printf(" ==== Done ====\n");
 }
 
+
 /* ================================================================
-   SD CARD IMAGE STORAGE (BATCHED — writes SD_BATCH_WRITE_BLOCKS
-   blocks per HAL_SD_WriteBlocks call for much faster throughput)
+   SECTION 13: SD CARD IMAGE STORAGE (BATCHED)
    ================================================================ */
 
+/**
+ * @brief  Store a raw image frame to SD card with header metadata
+ *
+ *         Uses batched writes (SD_BATCH_WRITE_BLOCKS per HAL call) for
+ *         much faster throughput than single-block writes.
+ *
+ * @param  img_buf       Pointer to image data buffer
+ * @param  img_size      Size of image data in bytes
+ * @param  w             Image width in pixels
+ * @param  h             Image height in pixels
+ * @param  pixel_format  Pixel format identifier
+ * @return 0 on success, -1 on failure
+ */
 static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
                             uint32_t w, uint32_t h, uint32_t pixel_format)
 {
@@ -452,9 +570,11 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
         }
     }
 
+    /* Compute XOR checksum of image data */
     for (i = 0; i < img_size; i++)
         checksum ^= img_buf[i];
 
+    /* Build image header */
     sd_image_header_t hdr;
     hdr.magic        = SD_HEADER_TAG;
     hdr.width        = w;
@@ -484,8 +604,8 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
     memcpy(sd_batch_buf + SD_IMG_HEADER_SIZE, img_buf, first_chunk);
 
     /* If image has more data, also pre-fill batch slots 2..N */
-    uint32_t img_offset = first_chunk;          // bytes of image already in block 0
-    uint32_t batch_blk  = 1;                    // next block index within batch (0 = header)
+    uint32_t img_offset = first_chunk;          /* bytes of image already in block 0 */
+    uint32_t batch_blk  = 1;                    /* next block index within batch (0 = header) */
     while (img_offset < img_size && batch_blk < SD_BATCH_WRITE_BLOCKS) {
         uint32_t chunk = SD_BLOCK_SIZE;
         if (chunk > img_size - img_offset) chunk = img_size - img_offset;
@@ -567,16 +687,28 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
     return 0;
 }
 
+
 /* ================================================================
-   BUTTON THREAD (runs forever)
+   SECTION 14: BUTTON THREAD (runs forever)
    ================================================================ */
 
+/**
+ * @brief  Button polling task (highest priority)
+ *
+ *         Waits for the system_ready flag, then enters a loop polling
+ *         the USER button (PC13). On press: activates WS2812 illumination,
+ *         captures a single camera frame, and saves it to SD card.
+ */
 static void btn_thread_fct(void *arg)
 {
     (void)arg;
 
+    /* Wait until main_thread completes initialization */
     while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 
+    /* ---- Initialize VL53L5CX ToF Sensor ---- */
+    VL53L5CX_Validate();
+    VL53L5CX_ReadingTest();
 
     printf("\n============================================\n");
     printf("  STANDALONE SNAPSHOT MODE\n");
@@ -593,6 +725,8 @@ static void btn_thread_fct(void *arg)
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) != GPIO_PIN_SET)
                 continue;
+
+            /* Activate illumination and status LEDs */
             WS2812_TurnOn();
             BSP_LED_Off(LED_GREEN);
             BSP_LED_On(LED_RED);
@@ -618,6 +752,7 @@ static void btn_thread_fct(void *arg)
                 continue;
             }
 
+            /* Calculate SD block offsets for this snapshot */
             uint32_t frame_size   = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
             uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
             uint32_t target_block = snap_base_block + (snap_count * total_blocks);
@@ -641,11 +776,12 @@ static void btn_thread_fct(void *arg)
                 printf("[BTN] >>> SD write FAILED!\n");
             }
 
-
+            /* Deactivate illumination and restore status LEDs */
             BSP_LED_Off(LED_RED);
             BSP_LED_On(LED_GREEN);
             WS2812_TurnOff();
 
+            /* Wait for button release */
             while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
                 vTaskDelay(pdMS_TO_TICKS(50));
         }
@@ -654,10 +790,18 @@ static void btn_thread_fct(void *arg)
     }
 }
 
+
 /* ================================================================
-   FREERTOS INITIALIZATION
+   SECTION 15: FREERTOS INITIALIZATION
    ================================================================ */
 
+/**
+ * @brief  Create and start FreeRTOS tasks
+ *
+ *         Creates two static tasks:
+ *         - main_thread (priority 2): Board initialization, then deletes itself
+ *         - btn_thread  (priority 3): Button polling and capture loop
+ */
 static int main_freertos(void)
 {
     TaskHandle_t hdl;
@@ -680,10 +824,28 @@ static int main_freertos(void)
     return -1;
 }
 
+
 /* ================================================================
-   MAIN THREAD (runs once: board init, SD init, camera sleep init)
+   SECTION 16: MAIN THREAD (runs once: board init, then deletes)
    ================================================================ */
 
+/**
+ * @brief  Main initialization task
+ *
+ *         Performs all hardware initialization in sequence:
+ *         1. NVIC priorities
+ *         2. System clock
+ *         3. Debug console
+ *         4. Fuse programming
+ *         5. WS2812 illumination (DMA + TIM)
+ *         6. VL53L5CX ToF sensor (I2C + GPIO)
+ *         7. PSRAM (XSPI RAM + NOR)
+ *         8. LEDs + User button
+ *         9. Security + IAC config
+ *         10. Low-power clock gates
+ *         11. SD card init + benchmark
+ *         12. Set system_ready flag, delete task
+ */
 static void main_thread_fct(void *arg)
 {
     (void)arg;
@@ -691,29 +853,30 @@ static void main_thread_fct(void *arg)
     IRQn_Type i;
     int ret;
 
+    /* ---- NVIC Priority Configuration ---- */
     HAL_NVIC_GetPriority(SysTick_IRQn, HAL_NVIC_GetPriorityGrouping(),
                          &preemptPriority, &subPriority);
     for (i = PVD_PVM_IRQn; i <= LTDC_UP_ERR_IRQn; i++)
         HAL_NVIC_SetPriority(i, preemptPriority, subPriority);
 
+    /* ---- Clocks + Console + Fuses ---- */
     SystemClock_Config();
     vPortSetupTimerInterrupt();
     CONSOLE_Config();
     Fuse_Programming();
 
-
-    //////////////////////////////////////////
-    //------------- LED ------------------//
-    //////////////////////////////////////////
+    /* ---- Illumination System (WS2812) ---- */
     printf("[INIT] Light system\n");
     MX_GPDMA1_Init();
     MX_TIM1_Init();
-    // Initialize WS2812
     WS2812_Init();
-    //////////////////////////////////////////
 
+    /* ---- VL53L5CX ToF Sensor (I2C1 + GPIO) ---- */
+    VL53L5CX_I2C_Init();
+    VL53L5CX_GPIO_Init();
+    VL53L5CX_StartSequence();
 
-
+    /* ---- PSRAM Initialization ---- */
 #ifdef STM32N6570_DK_REV
     BSP_XSPI_RAM_Init(0);
     BSP_XSPI_RAM_EnableMemoryMappedMode(0);
@@ -725,6 +888,7 @@ static void main_thread_fct(void *arg)
     BSP_XSPI_NOR_Init(0, &NOR_Init);
     BSP_XSPI_NOR_EnableMemoryMappedMode(0);
 
+    /* ---- LEDs + User Button ---- */
     ret = BSP_LED_Init(LED_GREEN); assert(ret == BSP_ERROR_NONE);
     ret = BSP_LED_Init(LED_RED);   assert(ret == BSP_ERROR_NONE);
 
@@ -732,9 +896,11 @@ static void main_thread_fct(void *arg)
     printf("[BTN] PC13 initialized via BSP (active HIGH). State=%s\n",
            BSP_PB_GetState(BUTTON_USER1) == GPIO_PIN_SET ? "PRESSED" : "RELEASED");
 
+    /* ---- Security + IAC ---- */
     Security_Config();
     IAC_Config();
 
+    /* ---- Low-Power Clock Gates ---- */
     LL_BUS_EnableClockLowPower(~0);
     LL_MEM_EnableClockLowPower(~0);
     LL_AHB1_GRP1_EnableClockLowPower(~0);
@@ -750,9 +916,7 @@ static void main_thread_fct(void *arg)
     LL_APB5_GRP1_EnableClockLowPower(~0);
     LL_MISC_EnableClockLowPower(~0);
 
-
-
-    /* ---- SD CARD INITIALIZATION ---- */
+    /* ---- SD Card Initialization ---- */
     printf("\n=== SD Card Detection Test ===\n");
 
     HAL_PWREx_EnableVddIO5();
@@ -819,26 +983,28 @@ static void main_thread_fct(void *arg)
         printf("[ERROR] SD card init failed: %lu\n", (unsigned long)status);
     }
 
-    /* ---- Ready! ---- */
+    /* ---- System Ready ---- */
     printf("\n===========================================\n");
     printf("[INFO] System READY!\n");
     printf("[INFO] Camera: ON-DEMAND (init per capture)\n");
     printf("[INFO] Press USER button (PC13) to capture + save.\n");
     printf("===========================================\n\n");
 
-
     system_ready = 1;
     vTaskDelete(NULL);
 }
 
 
-
-
-
 /* ================================================================
-   DCMIPP CLOCK CONFIGURATION
+   SECTION 17: DCMIPP CLOCK CONFIGURATION
    ================================================================ */
 
+/**
+ * @brief  Configure DCMIPP and CSI clock sources
+ *
+ *         DCMIPP → IC17 from PLL2/3
+ *         CSI    → IC18 from PLL1/40
+ */
 HAL_StatusTypeDef MX_DCMIPP_ClockConfig(DCMIPP_HandleTypeDef *hdcmipp)
 {
     (void)hdcmipp;
@@ -861,10 +1027,14 @@ HAL_StatusTypeDef MX_DCMIPP_ClockConfig(DCMIPP_HandleTypeDef *hdcmipp)
     return HAL_OK;
 }
 
+
 /* ================================================================
-   USB MSP INIT
+   SECTION 18: USB MSP INIT
    ================================================================ */
 
+/**
+ * @brief  USB OTG HS MSP initialization (called by HAL when USB is used)
+ */
 void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
 {
     assert(hpcd->Instance == USB1_OTG_HS);
@@ -880,10 +1050,18 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
     HAL_NVIC_EnableIRQ(USB1_OTG_HS_IRQn);
 }
 
+
 /* ================================================================
-   TIM1 INIT
+   SECTION 19: PERIPHERAL INITIALIZATION (TIM1, GPDMA1, CLOCK)
    ================================================================ */
 
+/**
+ * @brief  TIM1 initialization for WS2812 PWM signal generation
+ *
+ *         Prescaler = 5 → 200 MHz / 6 = 33.33 MHz timer clock
+ *         Period    = 500 → PWM frequency ≈ 66.67 kHz
+ *         Channel 1, PWM1 mode
+ */
 static void MX_TIM1_Init(void)
 {
     TIM_ClockConfigTypeDef sClockSourceConfig = {0};
@@ -892,7 +1070,7 @@ static void MX_TIM1_Init(void)
     TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
     htim1.Instance = TIM1;
-    htim1.Init.Prescaler = 5;      // 200 MHz / 6 = 33.33 MHz
+    htim1.Init.Prescaler = 5;      /* 200 MHz / 6 = 33.33 MHz */
     htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
     htim1.Init.Period = 500;
     htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -924,6 +1102,9 @@ static void MX_TIM1_Init(void)
     HAL_TIM_MspPostInit(&htim1);
 }
 
+/**
+ * @brief  Configure peripheral common clock (TIM prescaler)
+ */
 void PeriphCommonClock_Config(void)
 {
     RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
@@ -934,6 +1115,11 @@ void PeriphCommonClock_Config(void)
     }
 }
 
+/**
+ * @brief  GPDMA1 initialization for WS2812 data transmission
+ *
+ *         Enables GPDMA1 clock and configures Channel1 IRQ.
+ */
 static void MX_GPDMA1_Init(void)
 {
     __HAL_RCC_GPDMA1_CLK_ENABLE();
@@ -942,12 +1128,226 @@ static void MX_GPDMA1_Init(void)
 }
 
 
+/* ================================================================
+   SECTION 20: I2C1 INITIALIZATION (VL53L5CX ToF Sensor)
+   ================================================================ */
+
+/**
+ * @brief  I2C1 initialization for VL53L5CX Time-of-Flight sensor
+ *
+ *         Timing: 0x00401242 (100 kHz standard mode)
+ *         Addressing: 7-bit
+ *         Analog filter: enabled
+ *         Fast mode plus: enabled
+ */
+static void VL53L5CX_I2C_Init(void)
+{
+    hi2c1.Instance = I2C1;
+    hi2c1.Init.Timing = 0x00401242;
+    hi2c1.Init.OwnAddress1 = 0;
+    hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
+    hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
+    hi2c1.Init.OwnAddress2 = 0;
+    hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
+    hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
+    hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+
+    if (HAL_I2C_Init(&hi2c1) != HAL_OK) {
+        //Error_Handler();
+    }
+
+    /* Configure Analog filter */
+    if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK) {
+        //Error_Handler();
+    }
+
+    /* Configure Digital filter */
+    if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK) {
+        //Error_Handler();
+    }
+
+    /* I2C Fast mode Plus enable */
+    if (HAL_I2CEx_ConfigFastModePlus(&hi2c1, I2C_FASTMODEPLUS_ENABLE) != HAL_OK) {
+        //Error_Handler();
+    }
+}
+
 
 /* ================================================================
-   ASSERT CALLBACK
+   SECTION 21: VL53L5CX TIME-OF-FLIGHT SENSOR FUNCTIONS
+   ================================================================ */
+
+/**
+ * @brief  Initialize GPIO pins for VL53L5CX control signals
+ *
+ *         Pin Mapping:
+ *           - PD0  → PWR_EN  (Power Enable, active HIGH)
+ *           - PE7  → I2C_RST (Reset, active LOW pulse)
+ *           - PD6  → LPn     (Low Power disable, active HIGH)
+ */
+static void VL53L5CX_GPIO_Init(void)
+{
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    /* PWR_EN (PD0) - Power Enable output */
+    GPIO_InitStruct.Pin = GPIO_PIN_0;
+    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+    /* I2C_RST (PE7) - Reset output */
+    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+    /* LPn (PD6) - Low Power mode disable output */
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+}
+
+/**
+ * @brief  Execute VL53L5CX power-up sequence
+ *
+ *         Sequence:
+ *           1. Assert PWR_EN (PD0 HIGH)
+ *           2. Pulse reset (PE7 LOW → HIGH)
+ *           3. Disable low-power mode (PD6 HIGH)
+ *           4. Wait for sensor stabilization
+ */
+static void VL53L5CX_StartSequence(void)
+{
+    printf("\n=== ToF Sensor Power Up ===\n");
+
+    /* Step 1: Enable power (PWR_EN = HIGH) */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+    HAL_Delay(10);  /* Power stabilization delay */
+
+    /* Step 2: Reset pulse (active LOW) */
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
+    HAL_Delay(10);
+    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_SET);
+    HAL_Delay(10);
+
+    /* Step 3: Disable Low Power mode (LPn = HIGH) */
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+    HAL_Delay(100);
+
+    printf("[OK] Sensor power-up complete\n\n");
+}
+
+/**
+ * @brief  Validate VL53L5CX sensor presence and initialize
+ *
+ *         Checks if the sensor is alive at I2C address 0x29,
+ *         initializes the device, and scans the I2C bus for
+ *         all connected devices.
+ */
+static void VL53L5CX_Validate(void)
+{
+    Dev.platform.address = 0x29;
+
+    /* Check if sensor is alive */
+    status = vl53l5cx_is_alive(&Dev, &isAlive);
+    printf("ALIVE %i and status %i\r\n", isAlive, status);
+
+    if (!isAlive || status) {
+        printf("Sensor NOT detected\r\n");
+    } else {
+        printf("Sensor detected\r\n");
+
+        status = vl53l5cx_init(&Dev);
+        if (status) {
+            printf("Init FAIL\r\n");
+        } else {
+            printf("Init OK\r\n");
+            vl53l5cx_start_ranging(&Dev);
+        }
+    }
+    HAL_Delay(1000);
+
+    /* Scan I2C bus for all connected devices */
+    for (uint8_t addr = 0; addr < 128; addr++) {
+        if (HAL_I2C_IsDeviceReady(&hi2c1, addr << 1, 1, 10) == HAL_OK) {
+            printf("I2C device found at 0x%02X\r\n", addr);
+        }
+    }
+}
+
+/**
+ * @brief  Configure VL53L5CX for high-performance continuous ranging
+ *
+ *         Settings:
+ *           - Resolution:    8x8 (64 zones)
+ *           - Integration:   800 ms
+ *           - Frequency:     15 Hz
+ *           - Target order:  Closest object
+ *           - Sharpener:     10%
+ *           - Mode:          Continuous
+ *
+ *         After configuration, reads 6 sample frames and prints
+ *         distance + target status for all 64 zones.
+ */
+static void VL53L5CX_ReadingTest(void)
+{
+    /* ---- High-Performance Configuration ---- */
+
+    /* Resolution: 8x8 (64 zones) */
+    status = vl53l5cx_set_resolution(&Dev, VL53L5CX_RESOLUTION_8X8);
+
+    /* Integration time: 800 ms */
+    status = vl53l5cx_set_integration_time_ms(&Dev, 800);
+
+    /* Ranging frequency: 15 Hz (maximum for 8x8 resolution) */
+    status = vl53l5cx_set_ranging_frequency_hz(&Dev, 15);
+
+    /* Always report the closest object */
+    status = vl53l5cx_set_target_order(&Dev, VL53L5CX_TARGET_ORDER_CLOSEST);
+
+    /* Sharpener at 10% to reduce pixel blurring */
+    status = vl53l5cx_set_sharpener_percent(&Dev, 10);
+
+    /* Continuous ranging mode */
+    status = vl53l5cx_set_ranging_mode(&Dev, VL53L5CX_RANGING_MODE_CONTINUOUS);
+
+    /* Start ranging measurements */
+    status = vl53l5cx_start_ranging(&Dev);
+    VL53L5CX_WaitMs(&(Dev.platform), 200);
+
+    /* Read 6 sample frames */
+    for (int i = 0; i < 6; i++) {
+        vl53l5cx_check_data_ready(&Dev, &isReady);
+        if (isReady) {
+            vl53l5cx_get_ranging_data(&Dev, &Results);
+
+            /* Print frame header for easy parsing */
+            printf("FRAME");
+
+            /* Output all 64 zones: distance_mm, target_status */
+            for (int i = 0; i < 64; i++) {
+                printf(",%d,%d",
+                    Results.distance_mm[VL53L5CX_NB_TARGET_PER_ZONE * i],
+                    Results.target_status[VL53L5CX_NB_TARGET_PER_ZONE * i]);
+            }
+
+            printf("\r\n");
+        }
+
+        VL53L5CX_WaitMs(&(Dev.platform), 20);
+    }
+}
+
+
+/* ================================================================
+   SECTION 22: ASSERT CALLBACK
    ================================================================ */
 
 #ifdef USE_FULL_ASSERT
+/**
+ * @brief  Report an assertion failure
+ *
+ *         Breaks into debugger (if attached) otherwise traps
+ *         in an infinite loop.
+ */
 void assert_failed(uint8_t *file, uint32_t line)
 {
     UNUSED(file);
@@ -957,10 +1357,17 @@ void assert_failed(uint8_t *file, uint32_t line)
 }
 #endif
 
+
 /* ================================================================
-   DEBUG HELPER
+   SECTION 23: DEBUG HELPER
    ================================================================ */
 
+/**
+ * @brief  Clean and invalidate the entire D-Cache
+ *
+ *         Placed in .keep_me section to prevent linker removal.
+ *         Useful for debugging DMA/cache coherency issues.
+ */
 __attribute__((section(".keep_me")))
 void app_clean_invalidate_dbg(void)
 {

@@ -40,6 +40,7 @@ STM32Cube_FW_N6/Drivers/BSP/STM32N6570-DK \
 STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Source/Templates/gcc \
 STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Source/Templates \
 STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Src \
+STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src \
 STM32Cube_FW_N6/Middlewares/ST/filex/common/drivers \
 STM32Cube_FW_N6/Middlewares/ST/filex/common/src \
 STM32Cube_FW_N6/Middlewares/ST/usbx/common/core/src \

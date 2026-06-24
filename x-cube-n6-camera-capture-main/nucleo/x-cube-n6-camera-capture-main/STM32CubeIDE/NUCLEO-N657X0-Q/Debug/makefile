@@ -15,6 +15,7 @@ RM := rm -rf
 -include STM32Cube_FW_N6/Middlewares/ST/usbx/common/core/src/subdir.mk
 -include STM32Cube_FW_N6/Middlewares/ST/filex/common/src/subdir.mk
 -include STM32Cube_FW_N6/Middlewares/ST/filex/common/drivers/subdir.mk
+-include STM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/src/subdir.mk
 -include STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Src/subdir.mk
 -include STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Source/Templates/gcc/subdir.mk
 -include STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Source/Templates/subdir.mk

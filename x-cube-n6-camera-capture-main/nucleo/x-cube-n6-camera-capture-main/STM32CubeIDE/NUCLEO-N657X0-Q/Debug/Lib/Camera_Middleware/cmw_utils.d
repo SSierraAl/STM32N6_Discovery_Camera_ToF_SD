@@ -1,10 +1,10 @@
 Lib/Camera_Middleware/cmw_utils.o: \
  D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_utils.c \
  D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_utils.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal.h \
  ../../../Inc/stm32n6xx_hal_conf.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_rcc.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_def.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_rcc.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_def.h \
  ../../../STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Include/stm32n6xx.h \
  ../../../STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Include/stm32n657xx.h \
  ../../../STM32Cube_FW_N6/Drivers/CMSIS/Include/core_cm55.h \
@@ -15,38 +15,38 @@ Lib/Camera_Middleware/cmw_utils.o: \
  ../../../STM32Cube_FW_N6/Drivers/CMSIS/Include/m-profile/armv8m_pmu.h \
  ../../../STM32Cube_FW_N6/Drivers/CMSIS/Include/m-profile/armv7m_cachel1.h \
  ../../../STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Include/system_stm32n6xx.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/Legacy/stm32_hal_legacy.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_bus.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_rcc.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_rcc_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_gpio.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_gpio_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_rif.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dma.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dma_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_cortex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_bsec.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dcmipp.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_exti.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_i2c.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_i2c_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_jpeg.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_pcd.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_usb.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_pcd_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_pwr.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_pwr_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/Legacy/stm32_hal_legacy.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_bus.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_rcc.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_rcc_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_gpio.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_gpio_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_rif.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_dma.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_dma_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_cortex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_bsec.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_dcmipp.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_exti.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_i2c.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_i2c_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_jpeg.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_pcd.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_usb.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_pcd_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_pwr.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_pwr_ex.h \
  ../../../Inc/stm32n6xx_hal_sd.h ../../../Inc/stm32n6xx_ll_sdmmc.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_def.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_dlyb.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_def.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_dlyb.h \
  ../../../Inc/stm32n6xx_hal_sd_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_spi.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_spi_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_tim.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_tim_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_uart.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_uart_ex.h \
- ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_xspi.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_spi.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_spi_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_tim.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_tim_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_uart.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_uart_ex.h \
+ ../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_xspi.h \
  D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_camera.h \
  D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_errno.h \
  ../../../Inc/cmw_camera_conf.h ../../../Inc/stm32n6570_discovery_bus.h \
@@ -57,10 +57,10 @@ Lib/Camera_Middleware/cmw_utils.o: \
  ../../../Inc/isp_conf.h \
  ../../../Lib/Camera_Middleware/ISP_Library/isp/Inc/isp_platform.h
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_utils.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal.h:
 ../../../Inc/stm32n6xx_hal_conf.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_rcc.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_def.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_rcc.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_def.h:
 ../../../STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Include/stm32n6xx.h:
 ../../../STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Include/stm32n657xx.h:
 ../../../STM32Cube_FW_N6/Drivers/CMSIS/Include/core_cm55.h:
@@ -71,39 +71,39 @@ D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-cap
 ../../../STM32Cube_FW_N6/Drivers/CMSIS/Include/m-profile/armv8m_pmu.h:
 ../../../STM32Cube_FW_N6/Drivers/CMSIS/Include/m-profile/armv7m_cachel1.h:
 ../../../STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Include/system_stm32n6xx.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/Legacy/stm32_hal_legacy.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_bus.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_rcc.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_rcc_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_gpio.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_gpio_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_rif.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dma.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dma_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_cortex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_bsec.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dcmipp.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_exti.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_i2c.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_i2c_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_jpeg.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_pcd.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_usb.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_pcd_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_pwr.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_pwr_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/Legacy/stm32_hal_legacy.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_bus.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_rcc.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_rcc_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_gpio.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_gpio_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_rif.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_dma.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_dma_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_cortex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_bsec.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_dcmipp.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_exti.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_i2c.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_i2c_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_jpeg.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_pcd.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_usb.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_pcd_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_pwr.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_pwr_ex.h:
 ../../../Inc/stm32n6xx_hal_sd.h:
 ../../../Inc/stm32n6xx_ll_sdmmc.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_def.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_dlyb.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_def.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_dlyb.h:
 ../../../Inc/stm32n6xx_hal_sd_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_spi.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_spi_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_tim.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_tim_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_uart.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_uart_ex.h:
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_xspi.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_spi.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_spi_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_tim.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_tim_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_uart.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_uart_ex.h:
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_hal_xspi.h:
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_camera.h:
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_errno.h:
 ../../../Inc/cmw_camera_conf.h:

@@ -1,7 +1,7 @@
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_rcc.h:1839:26:LL_RCC_HSI_IsReady	0	static
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_rcc.h:1973:26:LL_RCC_MSI_IsReady	0	static
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_rcc.h:2673:22:LL_RCC_ConfigMCO	8	static
-../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_rcc.h:5019:26:LL_RCC_PLL1_IsReady	0	static
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_rcc.h:1839:26:LL_RCC_HSI_IsReady	0	static
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_rcc.h:1973:26:LL_RCC_MSI_IsReady	0	static
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_rcc.h:2673:22:LL_RCC_ConfigMCO	8	static
+../../../STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/inc/stm32n6xx_ll_rcc.h:5019:26:LL_RCC_PLL1_IsReady	0	static
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_rcc.c:2281:17:RCC_PLL_IsNewConfig	16	static
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_rcc.c:2496:13:RCC_ATTR_ConfigItemGroup	16	static
 D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Src/stm32n6xx_hal_rcc.c:2251:26:RCC_PLL_Enable	16	static
