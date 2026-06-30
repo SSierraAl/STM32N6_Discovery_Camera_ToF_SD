@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-STM32 SD Card Snapshot Visualizer — Pro + AI Enhancer
+STM32 SD Card Snapshot Visualizer — Pro + AI Enhancer check
 """
 
 import struct
