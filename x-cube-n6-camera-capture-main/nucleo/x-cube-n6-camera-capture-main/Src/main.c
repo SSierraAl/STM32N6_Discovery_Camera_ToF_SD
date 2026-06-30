@@ -78,6 +78,13 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
+#define BASELINE5CX_SAMPLES      10      /* Frames to learn baseline per zone */
+#define INSECT5CX_THRESHOLD_PCT  10      /* Signal drop % to trigger detection */
+#define NUM_ZONES             16      /* 4x4 resolution = 16 zones */
+#define MOTION_INDICATOR_THRESH  20
+
+//#define VL53L5CX_ZONES_ALL       0xFFFF
+//#define VL53L5CX_ZONES_CENTER_4  0x1818
 
 /* ================================================================
    SECTION 2: GLOBAL PERIPHERAL HANDLES
@@ -105,6 +112,19 @@ uint8_t                 status;
 uint8_t                 isAlive;
 uint8_t                 isReady;
 
+static uint32_t  g_baseline_signal[NUM_ZONES] = {0};
+static uint16_t  g_baseline_distance[NUM_ZONES] = {0};
+static uint8_t   g_zone_valid[NUM_ZONES] = {0};
+static uint8_t   g_baseline_ready = 0;
+
+//static uint16_t g_zone_mask      = VL53L5CX_ZONES_CENTER_4;
+//static uint8_t  g_zone_filter_on = 1;
+//
+//static inline int is_zone_enabled(uint8_t z)
+//{
+//    if (!g_zone_filter_on) return 1;
+//    return (g_zone_mask >> z) & 1;
+//}
 
 /* ================================================================
    SECTION 3: FREERTOS TASK CONTROL BLOCKS AND STACKS
@@ -116,6 +136,9 @@ static StackType_t     main_thread_stack[configMINIMAL_STACK_SIZE];
 static StaticTask_t    btn_thread_cb;
 static StackType_t     btn_thread_stack[4 * configMINIMAL_STACK_SIZE];
 
+/** Insect detection task (runs forever, monitors ToF sensor) */
+static StaticTask_t    insect_thread_cb;
+static StackType_t     insect_thread_stack[4 * configMINIMAL_STACK_SIZE];
 
 /* ================================================================
    SECTION 4: FORWARD DECLARATIONS
@@ -132,6 +155,7 @@ static void Setup_Mpu(void);
 static int   main_freertos(void);
 static void  main_thread_fct(void *arg);
 static void  btn_thread_fct(void *arg);
+static void  insect_detection_task(void *arg);
 
 /* ---- SD Card Operations ---- */
 static void  SD_Benchmarks(void);
@@ -150,6 +174,7 @@ static void VL53L5CX_GPIO_Init(void);
 static void VL53L5CX_StartSequence(void);
 static void VL53L5CX_Validate(void);
 static void VL53L5CX_ReadingTest(void);
+static void VL53L5CX_MotionTest(void);
 
 /* ---- External References ---- */
 extern void  vPortSetupTimerInterrupt(void);
@@ -707,8 +732,9 @@ static void btn_thread_fct(void *arg)
     while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 
     /* ---- Initialize VL53L5CX ToF Sensor ---- */
-    VL53L5CX_Validate();
-    VL53L5CX_ReadingTest();
+    //VL53L5CX_Validate();
+    //VL53L5CX_ReadingTest();
+    //VL53L5CX_MotionTest();
 
     printf("\n============================================\n");
     printf("  STANDALONE SNAPSHOT MODE\n");
@@ -790,6 +816,321 @@ static void btn_thread_fct(void *arg)
     }
 }
 
+static void insect_detection_task(void *arg)
+{
+    (void)arg;
+
+    uint8_t status_local;
+    uint8_t isAlive;
+    uint8_t is_ready;
+    uint8_t i;
+
+    /* ---- Wait for system to be ready ---- */
+    while (!system_ready) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    printf("\n============================================\n");
+    printf("  INSECT DETECTION MODE (VL53L5CX)\n");
+    printf("  4x4 zone-based signal drop detection\n");
+    printf("============================================\n\n");
+
+    /* ---- Properly initialize the sensor FIRST ---- */
+    printf("[ToF] Initializing VL53L5CX...\n");
+
+    /* Power up the sensor */
+    VL53L5CX_GPIO_Init();
+    VL53L5CX_StartSequence();
+
+    Dev.platform.address = 0x29;
+
+    /* Check if sensor is alive */
+    status_local = vl53l5cx_is_alive(&Dev, &isAlive);
+    if (!isAlive || status_local) {
+        printf("[ERROR] VL53L5CX sensor not detected!\n");
+        printf("  Status: %d, Alive: %d\n", status_local, isAlive);
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    printf("[ToF] Sensor detected!\n");
+
+    /* Initialize the sensor */
+    status_local = vl53l5cx_init(&Dev);
+    if (status_local) {
+        printf("[ERROR] VL53L5CX init failed: %d\n", status_local);
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    printf("[ToF] Sensor initialized\n");
+
+    /* ---- High-Performance Configuration (same as VL53L5CX_ReadingTest) ---- */
+    status_local = vl53l5cx_set_resolution(&Dev, VL53L5CX_RESOLUTION_4X4);
+
+    /* Reset baseline state */
+    memset(g_baseline_signal, 0, sizeof(g_baseline_signal));
+    memset(g_baseline_distance, 0, sizeof(g_baseline_distance));
+    memset(g_zone_valid, 0, sizeof(g_zone_valid));
+    g_baseline_ready = 0;
+
+    /* Integration time: 800 ms */
+    status_local = vl53l5cx_set_integration_time_ms(&Dev, 800);
+
+    /* Ranging frequency: 15 Hz (maximum for 4x4 resolution) */
+    status_local = vl53l5cx_set_ranging_frequency_hz(&Dev, 15);
+
+    /* Always report the closest object */
+    status_local = vl53l5cx_set_target_order(&Dev, VL53L5CX_TARGET_ORDER_CLOSEST);
+
+    /* Sharpener at 10% to reduce pixel blurring */
+    status_local = vl53l5cx_set_sharpener_percent(&Dev, 10);
+
+    /* Continuous ranging mode */
+    status_local = vl53l5cx_set_ranging_mode(&Dev, VL53L5CX_RANGING_MODE_CONTINUOUS);
+
+    /* ---- Start Ranging ---- */
+    vl53l5cx_start_ranging(&Dev);
+    VL53L5CX_WaitMs(&(Dev.platform), 200);
+    printf("[ToF] Ranging started...\n");
+
+    /* ================================================================ */
+    /*  Phase 1: Learn per-zone baseline signal (same as ReadingTest)   */
+    /* ================================================================ */
+    printf("\r\n[BASELINE] Taking %d samples per zone...\r\n", BASELINE5CX_SAMPLES);
+
+    for (i = 0; i < BASELINE5CX_SAMPLES; i++)
+    {
+        /* Wait for data ready */
+        do {
+            vl53l5cx_check_data_ready(&Dev, &is_ready);
+            if (!is_ready) vTaskDelay(pdMS_TO_TICKS(10));
+        } while (!is_ready);
+
+        /* Get results (includes implicit interrupt clear) */
+        if (vl53l5cx_get_ranging_data(&Dev, &Results) != 0)
+            continue;
+
+        /* Accumulate per-zone signal and distance */
+        for (int z = 0; z < NUM_ZONES; z++)
+        {
+            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+
+            if (Results.target_status[idx] == 0 || Results.target_status[idx] == 5 || Results.target_status[idx] == 9)
+            {
+                g_baseline_signal[z] += Results.signal_per_spad[idx];
+                g_baseline_distance[z] += Results.distance_mm[idx];
+                g_zone_valid[z] = 1;
+            }
+        }
+
+        /* Progress indicator */
+        printf("  [%d/%d]\r", i + 1, BASELINE5CX_SAMPLES);
+    }
+
+    /* Compute per-zone averages */
+    printf("\r\n[BASELINE] Zone | Distance(mm) | Signal(kcps/spad)\r\n");
+    printf("----------|----------------|----------------------\r\n");
+
+    uint8_t valid_zone_count = 0;
+
+    for (int z = 0; z < NUM_ZONES; z++)
+    {
+        if (g_zone_valid[z])
+        {
+            g_baseline_signal[z] /= BASELINE5CX_SAMPLES;
+            g_baseline_distance[z] /= BASELINE5CX_SAMPLES;
+            valid_zone_count++;
+
+            printf("  Z%2d    |    %8d     |    %10d\r\n",
+                   z, g_baseline_distance[z], g_baseline_signal[z]);
+        }
+    }
+
+    printf("\r\n[BASELINE] Valid zones: %d/%d\r\n", valid_zone_count, NUM_ZONES);
+    printf("[BASELINE] Insect threshold: >%d%% drop in any zone\r\n",
+           INSECT5CX_THRESHOLD_PCT);
+
+    if (valid_zone_count < 2) {
+        printf("[ERROR] Not enough valid zones for baseline (%d/%d)\n", valid_zone_count, NUM_ZONES);
+        printf("  Please check sensor connection and ensure objects are in range.\n");
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+    g_baseline_ready = 1;
+
+    /* ================================================================ */
+    /*  Phase 2: Monitor per-zone for insect detection (same as ReadingTest) */
+    /* ================================================================ */
+    printf("\r\n[MONITORING] Watching %d zones for insect passage...\r\n",
+           valid_zone_count);
+    printf("  Camera will auto-capture on insect detection.\r\n\r\n");
+
+    uint32_t capture_count = 0;
+    uint32_t cooldown_frames = 0;
+    const uint32_t COOLDOWN_FRAMES_VALUE = 30;
+
+    while (1)
+    {
+        /* Wait for data ready */
+        do {
+            vl53l5cx_check_data_ready(&Dev, &is_ready);
+            if (!is_ready) vTaskDelay(pdMS_TO_TICKS(10));
+        } while (!is_ready);
+
+        /* Get results */
+        if (vl53l5cx_get_ranging_data(&Dev, &Results) != 0)
+            continue;
+
+        /* ---- Check each zone independently against its own baseline ---- */
+        uint8_t  insect_found = 0;
+        uint8_t  affected_zones[NUM_ZONES] = {0};
+        uint32_t affected_drop[NUM_ZONES] = {0};
+        uint8_t  affected_count = 0;
+
+        for (int z = 0; z < NUM_ZONES; z++)
+        {
+            if (!g_zone_valid[z])
+                continue;  /* Skip zones with no baseline */
+
+            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+
+            if (Results.target_status[idx] != 0 && Results.target_status[idx] != 5 && Results.target_status[idx] != 9)
+                continue;  /* Skip invalid measurements this frame */
+
+            /* Compute signal drop for this zone vs its own baseline */
+            uint32_t signal_drop = 0;
+            if (g_baseline_signal[z] > 0)
+            {
+                int32_t diff = (int32_t)g_baseline_signal[z] -
+                               (int32_t)Results.signal_per_spad[idx];
+                if (diff < 0) diff = -diff;
+                signal_drop = (uint32_t)diff * 100 / g_baseline_signal[z];
+            }
+
+            if (signal_drop > INSECT5CX_THRESHOLD_PCT)
+            {
+                affected_zones[affected_count] = z;
+                affected_drop[affected_count] = signal_drop;
+                affected_count++;
+                insect_found = 1;
+            }
+        }
+
+        /* ---- Check cooldown ---- */
+        if (cooldown_frames > 0) {
+            cooldown_frames--;
+        }
+
+        /* ---- Report results + Trigger camera on detection ---- */
+        if (insect_found && cooldown_frames == 0)
+        {
+            /* Build zone list string */
+            char zone_list[64] = {0};
+            for (uint8_t k = 0; k < affected_count; k++)
+            {
+                char tmp[16];
+                sprintf(tmp, "Z%u", affected_zones[k]);
+                if (k == 0)
+                    strcpy(zone_list, tmp);
+                else
+                    strcat(zone_list, tmp);
+            }
+
+            printf(">>> INSECT DETECTED! Zones: [%s] (%u zone(s))\r\n",
+                   zone_list, affected_count);
+
+            /* Print details for each affected zone */
+            for (uint8_t k = 0; k < affected_count; k++)
+            {
+                uint8_t z = affected_zones[k];
+                uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+                printf("    Z%2d: dist=%4dmm  signal=%6d  baseline=%6d  (drop=%u%%)\r\n",
+                       z,
+                       Results.distance_mm[idx],
+                       Results.signal_per_spad[idx],
+                       g_baseline_signal[z],
+                       affected_drop[k]);
+            }
+            printf("\r\n");
+
+            /* ---- TRIGGER CAMERA CAPTURE ---- */
+            printf("    Triggering camera capture...\n");
+
+            BSP_LED_Off(LED_GREEN);
+            BSP_LED_On(LED_RED);
+
+            /* Flash WS2812 */
+            WS2812_TurnOn();
+            HAL_Delay(100);
+            WS2812_TurnOff();
+
+            /* Capture image */
+            uint32_t snap_num = capture_count + 1;
+            int rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
+                                            SNAP_WIDTH, SNAP_HEIGHT,
+                                            SNAP_FPS, SNAP_WARMUP_FRAMES);
+
+            if (rc == 0) {
+                uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
+                uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+                uint32_t target_block = snap_base_block + (capture_count * total_blocks);
+
+                uint32_t saved_base = SD_IMG_BASE_BLOCK;
+                SD_IMG_BASE_BLOCK = target_block;
+
+                if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
+                    capture_count++;
+                    printf("    >>> Snapshot #%lu SAVED!\n", (unsigned long)snap_num);
+                } else {
+                    printf("    [ERROR] SD write failed!\n");
+                }
+
+                SD_IMG_BASE_BLOCK = saved_base;
+            } else {
+                printf("    [ERROR] Camera capture failed (rc=%d)!\n", rc);
+            }
+
+            BSP_LED_Off(LED_RED);
+            BSP_LED_On(LED_GREEN);
+
+            /* Apply cooldown to prevent rapid-fire captures */
+            cooldown_frames = COOLDOWN_FRAMES_VALUE;
+            printf("    Cooldown: %d frames (%.1f seconds)\n\n",
+                   COOLDOWN_FRAMES_VALUE, (float)COOLDOWN_FRAMES_VALUE / 15.0f);
+
+        }
+        else
+        {
+            /* Compact status: show min/max distance and signal across valid zones */
+            uint16_t min_d = 9999, max_d = 0;
+            uint32_t min_s = 999999, max_s = 0;
+            uint8_t  frame_valid = 0;
+
+            for (int z = 0; z < NUM_ZONES; z++)
+            {
+                if (!g_zone_valid[z]) continue;
+                uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+                if (Results.target_status[idx] != 0 && Results.target_status[idx] != 5 && Results.target_status[idx] != 9) continue;
+
+                frame_valid++;
+                if (Results.distance_mm[idx] < min_d) min_d = Results.distance_mm[idx];
+                if (Results.distance_mm[idx] > max_d) max_d = Results.distance_mm[idx];
+                if (Results.signal_per_spad[idx] < min_s) min_s = Results.signal_per_spad[idx];
+                if (Results.signal_per_spad[idx] > max_s) max_s = Results.signal_per_spad[idx];
+            }
+
+            if (frame_valid > 0 && (capture_count == 0 || (g_baseline_distance[0] > 0 && min_d < g_baseline_distance[0])))
+            {
+                printf(". zones=%2d  dist=%4d-%4dmm  signal=%5d-%5d  (captures: %lu)\r\n",
+                       frame_valid, min_d, max_d, min_s, max_s,
+                       (unsigned long)capture_count);
+            }
+        }
+    }
+}
 
 /* ================================================================
    SECTION 15: FREERTOS INITIALIZATION
@@ -810,6 +1151,13 @@ static int main_freertos(void)
                             configMINIMAL_STACK_SIZE, NULL,
                             tskIDLE_PRIORITY + 1,
                             main_thread_stack, &main_thread_cb);
+    assert(hdl != NULL);
+
+    /* Create insect detection task (priority: IDLE+2 - higher than button) */
+    hdl = xTaskCreateStatic(insect_detection_task, "insect",
+                            4 * configMINIMAL_STACK_SIZE, NULL,
+                            tskIDLE_PRIORITY + 2,
+                            insect_thread_stack, &insect_thread_cb);
     assert(hdl != NULL);
 
     /* Button task at HIGHER priority for immediate response */
@@ -1289,53 +1637,384 @@ static void VL53L5CX_Validate(void)
  */
 static void VL53L5CX_ReadingTest(void)
 {
+
     /* ---- High-Performance Configuration ---- */
+    status = vl53l5cx_set_resolution(&Dev, VL53L5CX_RESOLUTION_4X4);
 
-    /* Resolution: 8x8 (64 zones) */
-    status = vl53l5cx_set_resolution(&Dev, VL53L5CX_RESOLUTION_8X8);
+    uint8_t  is_ready;
+	    uint8_t  i;
 
-    /* Integration time: 800 ms */
+	    /* Reset baseline state */
+	    memset(g_baseline_signal, 0, sizeof(g_baseline_signal));
+	    memset(g_baseline_distance, 0, sizeof(g_baseline_distance));
+	    memset(g_zone_valid, 0, sizeof(g_zone_valid));
+	    g_baseline_ready = 0;
+
+	    /* Integration time: 800 ms */
+	    status = vl53l5cx_set_integration_time_ms(&Dev, 800);
+
+	    /* Ranging frequency: 15 Hz (maximum for 8x8 resolution) */
+	    status = vl53l5cx_set_ranging_frequency_hz(&Dev, 15);
+
+	    /* Always report the closest object */
+	    status = vl53l5cx_set_target_order(&Dev, VL53L5CX_TARGET_ORDER_CLOSEST);
+
+	    /* Sharpener at 10% to reduce pixel blurring */
+	    status = vl53l5cx_set_sharpener_percent(&Dev, 10);
+
+	    /* Continuous ranging mode */
+	    status = vl53l5cx_set_ranging_mode(&Dev, VL53L5CX_RANGING_MODE_CONTINUOUS);
+
+	    /* ---- Start Ranging ---- */
+	    vl53l5cx_start_ranging(&Dev);
+	    VL53L5CX_WaitMs(&(Dev.platform), 200);
+	    printf("Ranging started...\r\n");
+
+	    /* ================================================================ */
+	    /*  Phase 1: Learn per-zone baseline signal                         */
+	    /* ================================================================ */
+	    printf("\r\n[BASELINE] Taking %d samples per zone...\r\n", BASELINE5CX_SAMPLES);
+
+	    for (i = 0; i < BASELINE5CX_SAMPLES; i++)
+	    {
+	        /* Wait for data ready */
+	        do {
+	            vl53l5cx_check_data_ready(&Dev, &is_ready);
+	            if (!is_ready) HAL_Delay(10);
+	        } while (!is_ready);
+
+	        /* Get results (includes implicit interrupt clear) */
+	        if (vl53l5cx_get_ranging_data(&Dev, &Results) != 0)
+	            continue;
+
+	        /* Accumulate per-zone signal and distance */
+	        for (int z = 0; z < NUM_ZONES; z++)
+	        {
+	            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+
+	            if (Results.target_status[idx] == 0 || Results.target_status[idx] == 5 ||Results.target_status[idx] == 9)  /* Valid measurement */
+	            {
+	                g_baseline_signal[z] += Results.signal_per_spad[idx];
+	                g_baseline_distance[z] += Results.distance_mm[idx];
+	                g_zone_valid[z] = 1;
+	            }
+	        }
+
+	        /* Progress indicator */
+	        printf("  [%d/ %d]\r", i + 1, BASELINE5CX_SAMPLES);
+	    }
+
+	    /* Compute per-zone averages */
+	    printf("\r\n[BASELINE] Zone | Distance(mm) | Signal(kcps/spad)\r\n");
+	    printf("----------|----------------|----------------------\r\n");
+
+	    uint8_t valid_zone_count = 0;
+
+	    for (int z = 0; z < NUM_ZONES; z++)
+	    {
+	        if (g_zone_valid[z])
+	        {
+	            g_baseline_signal[z] /= BASELINE5CX_SAMPLES;
+	            g_baseline_distance[z] /= BASELINE5CX_SAMPLES;
+	            valid_zone_count++;
+
+	            printf("  Z%2d    |    %8d     |    %10d\r\n",
+	                   z, g_baseline_distance[z], g_baseline_signal[z]);
+	        }
+	    }
+
+	    printf("\r\n[BASELINE] Valid zones: %d/%d\r\n", valid_zone_count, NUM_ZONES);
+	    printf("[BASELINE] Insect threshold: >%d%% drop in any zone\r\n",
+	           INSECT5CX_THRESHOLD_PCT);
+	    g_baseline_ready = 1;
+
+	    /* ================================================================ */
+	    /*  Phase 2: Monitor per-zone for insect detection                  */
+	    /* ================================================================ */
+	    printf("\r\n[MONITORING] Watching %d zones for insect passage...\r\n",
+	           valid_zone_count);
+	    printf("  (Wave your hand or blow air in front of the sensor to simulate)\r\n\n");
+
+	    while (1)
+	    {
+	        /* Wait for data ready */
+	        do {
+	            vl53l5cx_check_data_ready(&Dev, &is_ready);
+	            if (!is_ready) HAL_Delay(10);
+	        } while (!is_ready);
+
+	        /* Get results */
+	        if (vl53l5cx_get_ranging_data(&Dev, &Results) != 0)
+	            continue;
+
+	        /* ---- Check each zone independently against its own baseline ---- */
+	        uint8_t  insect_found = 0;
+	        uint8_t  affected_zones[NUM_ZONES] = {0};
+	        uint32_t affected_drop[NUM_ZONES] = {0};
+	        uint8_t  affected_count = 0;
+
+	        for (int z = 0; z < NUM_ZONES; z++)
+	        {
+	            if (!g_zone_valid[z])
+	                continue;  /* Skip zones with no baseline */
+
+	            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+
+	            if (Results.target_status[idx] != 0 && Results.target_status[idx] != 5 && Results.target_status[idx] != 9)
+	                continue;  /* Skip invalid measurements this frame */
+
+	            /* Compute signal drop for this zone vs its own baseline */
+	            uint32_t signal_drop = 0;
+	            if (g_baseline_signal[z] > 0)
+	            {
+	                int32_t diff = (int32_t)g_baseline_signal[z] -
+	                               (int32_t)Results.signal_per_spad[idx];
+	                if (diff < 0) diff = -diff;
+	                signal_drop = (uint32_t)diff * 100 / g_baseline_signal[z];
+	            }
+
+	            if (signal_drop > INSECT5CX_THRESHOLD_PCT)
+	            {
+	                affected_zones[affected_count] = z;
+	                affected_drop[affected_count] = signal_drop;
+	                affected_count++;
+	                insect_found = 1;
+	            }
+	        }
+
+	        /* ---- Report results ---- */
+	        if (insect_found)
+	        {
+	            /* Build zone list string */
+	            char zone_list[64] = {0};
+	            for (uint8_t k = 0; k < affected_count; k++)
+	            {
+	                char tmp[16];
+	                sprintf(tmp, "Z%u", affected_zones[k]);
+	                if (k == 0)
+	                    strcpy(zone_list, tmp);
+	                else
+	                    strcat(zone_list, ",");
+	                    strcat(zone_list, tmp);
+	            }
+
+	            printf(">>> INSECT DETECTED! Zones: [%s] (%u zone(s))\r\n",
+	                   zone_list, affected_count);
+
+	            /* Print details for each affected zone */
+	            for (uint8_t k = 0; k < affected_count; k++)
+	            {
+	                uint8_t z = affected_zones[k];
+	                uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+	                printf("    Z%2d: dist=%4dmm  signal=%6d  baseline=%6d  (drop=%u%%)\r\n",
+	                       z,
+	                       Results.distance_mm[idx],
+	                       Results.signal_per_spad[idx],
+	                       g_baseline_signal[z],
+	                       affected_drop[k]);
+	            }
+	            printf("\r\n");
+	        }
+	        else
+	        {
+	            /* Compact status: show min/max distance and signal across valid zones */
+	            uint16_t min_d = 9999, max_d = 0;
+	            uint32_t min_s = 999999, max_s = 0;
+	            uint8_t  frame_valid = 0;
+
+	            for (int z = 0; z < NUM_ZONES; z++)
+	            {
+	                if (!g_zone_valid[z]) continue;
+	                uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+	                if (Results.target_status[idx] != 0 && Results.target_status[idx] != 5 && Results.target_status[idx] != 9) continue;
+
+	                frame_valid++;
+	                if (Results.distance_mm[idx] < min_d) min_d = Results.distance_mm[idx];
+	                if (Results.distance_mm[idx] > max_d) max_d = Results.distance_mm[idx];
+	                if (Results.signal_per_spad[idx] < min_s) min_s = Results.signal_per_spad[idx];
+	                if (Results.signal_per_spad[idx] > max_s) max_s = Results.signal_per_spad[idx];
+	            }
+
+	            if (frame_valid > 0)
+	            {
+	                printf(". zones=%2d  dist=%4d-%4dmm  signal=%5d-%5d\r\n",
+	                       frame_valid, min_d, max_d, min_s, max_s);
+	            }
+	        }
+	    }
+}
+
+
+/**
+ * @brief  VL53L5CX Motion + Insect Detection with Hardware Motion Indicator
+ *
+ *         Uses both software signal-drop detection AND hardware-accelerated
+ *         motion indicator for robust insect detection.
+ *
+ *         Zone mask (g_zone_mask) can be configured at runtime to narrow
+ *         the effective FOV. Call VL53L5CX_SetZoneMask() before this function.
+ */
+static void VL53L5CX_MotionTest(void)
+{
+    VL53L5CX_Motion_Configuration motion_config;
+    uint8_t  ready;
+
+    printf("\r\n=== VL53L5CX Insect + Motion Detection (4x4 zones) ===\r\n");
+
+    /* ---- Configuration ---- */
+    status = vl53l5cx_set_resolution(&Dev, VL53L5CX_RESOLUTION_4X4);
     status = vl53l5cx_set_integration_time_ms(&Dev, 800);
-
-    /* Ranging frequency: 15 Hz (maximum for 8x8 resolution) */
     status = vl53l5cx_set_ranging_frequency_hz(&Dev, 15);
-
-    /* Always report the closest object */
     status = vl53l5cx_set_target_order(&Dev, VL53L5CX_TARGET_ORDER_CLOSEST);
-
-    /* Sharpener at 10% to reduce pixel blurring */
     status = vl53l5cx_set_sharpener_percent(&Dev, 10);
-
-    /* Continuous ranging mode */
     status = vl53l5cx_set_ranging_mode(&Dev, VL53L5CX_RANGING_MODE_CONTINUOUS);
 
-    /* Start ranging measurements */
+    /* ---- Init hardware motion indicator ---- */
+    status = vl53l5cx_motion_indicator_init(&Dev, &motion_config, VL53L5CX_RESOLUTION_4X4);
+    if (status)
+        printf("[WARN] Motion indicator init failed: %d\r\n", status);
+
+    status = vl53l5cx_motion_indicator_set_distance_motion(&Dev, &motion_config, 1000, 2000);
+
+    /* ---- Start ranging ---- */
     status = vl53l5cx_start_ranging(&Dev);
     VL53L5CX_WaitMs(&(Dev.platform), 200);
 
-    /* Read 6 sample frames */
-    for (int i = 0; i < 6; i++) {
-        vl53l5cx_check_data_ready(&Dev, &isReady);
-        if (isReady) {
+    /* ---- BASELINE ---- */
+    printf("\r\n[BASELINE] Learning %d frames...\r\n", BASELINE5CX_SAMPLES);
+
+    uint32_t baseline_signal_zone[16]  = {0};
+    uint16_t baseline_distance_zone[16] = {0};
+    uint8_t  valid_baseline_zones[16] = {0};
+    uint8_t  baseline_samples_zone[16] = {0};
+
+    for (uint8_t sample = 0; sample < BASELINE5CX_SAMPLES; sample++)
+    {
+        uint32_t timeout = 0;
+        while (!ready && timeout < 100) {
+            vl53l5cx_check_data_ready(&Dev, &ready);
+            if (!ready) { VL53L5CX_WaitMs(&(Dev.platform), 10); timeout++; }
+        }
+        if (ready) {
             vl53l5cx_get_ranging_data(&Dev, &Results);
+            for (int z = 0; z < 16; z++)
+            {
+                if (!is_zone_enabled(z)) continue;  /* Zone mask filter */
+                uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+                uint8_t s = Results.target_status[idx];
+                if (s == 0 || s == 5 || s == 9) {
+                    uint16_t dist = Results.distance_mm[idx];
+                    if (dist > 20 && dist < 4000) {
+                        valid_baseline_zones[z] = 1;
+                        baseline_signal_zone[z] += Results.signal_per_spad[idx];
+                        baseline_distance_zone[z] = dist;
+                        baseline_samples_zone[z]++;
+                    }
+                }
+            }
+        }
+        ready = 0;
+        VL53L5CX_WaitMs(&(Dev.platform), 70);
+    }
 
-            /* Print frame header for easy parsing */
-            printf("FRAME");
+    /* Compute averages */
+    uint8_t valid_zone_count = 0;
+    for (int z = 0; z < 16; z++)
+    {
+        if (baseline_samples_zone[z] > 0) {
+            baseline_signal_zone[z] /= baseline_samples_zone[z];
+            valid_zone_count++;
+        } else {
+            valid_baseline_zones[z] = 0;
+        }
+    }
 
-            /* Output all 64 zones: distance_mm, target_status */
-            for (int i = 0; i < 64; i++) {
-                printf(",%d,%d",
-                    Results.distance_mm[VL53L5CX_NB_TARGET_PER_ZONE * i],
-                    Results.target_status[VL53L5CX_NB_TARGET_PER_ZONE * i]);
+    printf("\r\n[BASELINE] Valid Zones: %d/16\r\n", valid_zone_count);
+    printf("[BASELINE] Insect threshold: >%d%% signal drop\r\n", INSECT5CX_THRESHOLD_PCT);
+    printf("[BASELINE] Motion threshold: >%d motion power\r\n", MOTION_INDICATOR_THRESH);
+
+    /* ---- MONITORING ---- */
+    printf("\r\n[MONITORING] Watching %d zones...\r\n\r\n", valid_zone_count);
+
+    uint32_t frame_count = 0, insect_count = 0, motion_count = 0;
+
+    for (;;)
+    {
+        uint32_t timeout = 0;
+        while (!ready && timeout < 100) {
+            vl53l5cx_check_data_ready(&Dev, &ready);
+            if (!ready) { VL53L5CX_WaitMs(&(Dev.platform), 10); timeout++; }
+        }
+        if (!ready) { VL53L5CX_WaitMs(&(Dev.platform), 20); continue; }
+
+        vl53l5cx_get_ranging_data(&Dev, &Results);
+        frame_count++;
+
+        uint8_t insect_found = 0, motion_found = 0;
+        uint8_t insect_zones[16] = {0}, motion_zones[16] = {0};
+        uint8_t insect_zone_count = 0, motion_zone_count = 0;
+        uint8_t valid_measurements = 0;
+
+        for (int z = 0; z < 16; z++)
+        {
+            if (!is_zone_enabled(z)) continue;  /* Zone mask filter */
+            if (!valid_baseline_zones[z]) continue;
+
+            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+            if (Results.target_status[idx] != 0 &&
+                Results.target_status[idx] != 5 &&
+                Results.target_status[idx] != 9) continue;
+
+            uint16_t dist = Results.distance_mm[idx];
+            if (dist < 20 || dist > 4000) continue;
+
+            valid_measurements++;
+
+            /* Signal-drop insect detection */
+            if (baseline_signal_zone[z] > 0) {
+                int32_t diff = (int32_t)baseline_signal_zone[z] -
+                               (int32_t)Results.signal_per_spad[idx];
+                if (diff > 0) {
+                    uint32_t drop = (uint32_t)diff * 100 / baseline_signal_zone[z];
+                    if (drop > INSECT5CX_THRESHOLD_PCT) {
+                        insect_zones[z] = 1;
+                        insect_zone_count++;
+                        insect_found = 1;
+                    }
+                }
             }
 
-            printf("\r\n");
+            /* Hardware motion indicator */
+            if (Results.motion_indicator.motion[motion_config.map_id[z]] >= MOTION_INDICATOR_THRESH) {
+                motion_zones[z] = 1;
+                motion_zone_count++;
+                motion_found = 1;
+            }
+        }
+
+        /* Report insect */
+        if (insect_found && valid_measurements > 5) {
+            printf(">>> INSECT DETECTED! Frame %d (%d zones)\r\n",
+                   frame_count, insect_zone_count);
+            insect_count++;
+        }
+
+        /* Report motion */
+        if (motion_found) {
+            printf(">>> MOTION DETECTED! Frame %d (%d zones)\r\n",
+                   frame_count, motion_zone_count);
+            motion_count++;
+        }
+
+        /* Periodic status */
+        if (!insect_found && !motion_found && valid_measurements > 0 && frame_count % 50 == 0) {
+            printf(". frame=%d zones=%d (insect:%d motion:%d)\r\n",
+                   frame_count, valid_measurements, insect_count, motion_count);
         }
 
         VL53L5CX_WaitMs(&(Dev.platform), 20);
     }
 }
-
 
 /* ================================================================
    SECTION 22: ASSERT CALLBACK
