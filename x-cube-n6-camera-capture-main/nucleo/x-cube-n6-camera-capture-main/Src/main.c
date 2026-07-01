@@ -78,8 +78,8 @@
 #include "FreeRTOS.h"
 #include "task.h"
 
-#define BASELINE5CX_SAMPLES      10      /* Frames to learn baseline per zone */
-#define INSECT5CX_THRESHOLD_PCT  10      /* Signal drop % to trigger detection */
+#define BASELINE5CX_SAMPLES      25      /* Frames to learn baseline per zone */
+#define INSECT5CX_THRESHOLD_PCT  8      /* Signal drop % to trigger detection */
 #define NUM_ZONES             16      /* 4x4 resolution = 16 zones */
 #define MOTION_INDICATOR_THRESH  20
 
