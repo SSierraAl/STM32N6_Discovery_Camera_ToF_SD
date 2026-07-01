@@ -1,37 +1,33 @@
 /**
  * *****************************************************************************
  * @file    main.c
- * @brief   Standalone Camera + ToF Snapshot Capture — NUCLEO-N657X0-Q
+ * @brief   Insect Detection + Auto-Capture — NUCLEO-N657X0-Q
  *
- *   Captures images from the CMW-IMX335 camera module and stores them as
- *   raw YUV422 frames on a microSD card.  Includes VL53L5CX Time-of-Flight
- *   sensor integration for distance measurements.
+ *   VL53L5CX Time-of-Flight sensor monitors for insect passage using per-zone
+ *   signal-drop detection. When an insect is detected, the camera auto-captures
+ *   a YUV422 frame and saves it directly to microSD card.
  *
  *   No USB/UVC, no FileX/fatfs, no PC connection required after flashing.
  *
  *   Hardware:
  *     - MCU:      STM32N657 (NUCLEO-N657X0-Q / MB1940)
  *     - Camera:   CMW-IMX335 (5 MP, YUV422 output via CSI-2)
- *     - ToF:      VL53L5CX (8x8 resolution, continuous mode)
+ *     - ToF:      VL53L5CX (4x4 resolution, continuous mode)
  *     - Storage:  microSD card (SDMMC2, 4-bit bus)
- *     - Button:   USER B1 = PC13 (active HIGH, external pull-down)
  *     - LEDs:     RED = PG10, GREEN = PG0
  *     - Illumination: WS2812 (GPDMA1 + TIM1 PWM)
  *
- *   Flow (OPTIMIZED - Sleep Mode):
+ *   Flow:
  *     1. Boot → init clocks, MPU, PSRAM, SD card
- *     2. Init camera + warmup frames (one-time cost at boot)
- *     3. STOP camera pipe (sleep = low power, fast wakeup)
- *     4. GREEN LED on (system ready)
- *     5. User presses USER button (PC13)
- *     6. START pipe → 3 frames → capture → STOP pipe (~100ms total)
- *     7. Frame saved to SD card
- *     8. Back to sleep → wait for next press
+ *     2. GREEN LED on (system ready)
+ *     3. ToF sensor learns baseline (10 samples)
+ *     4. Monitoring loop watches 16 zones for signal drop
+ *     5. Insect detected → flash WS2812 → capture → save to SD → cooldown
+ *     6. Repeat monitoring
  *
  *   Two FreeRTOS tasks:
- *     - main_thread: board init, SD card init, camera sleep mode init,
- *                    then deletes itself
- *     - btn_thread:  polls USER button, triggers fast capture + SD write
+ *     - main_thread:     board init, SD card init, then deletes itself
+ *     - insect_task:     ToF monitoring + auto-capture (runs forever)
  *
  *   All configurable parameters are in Inc/app_config.h.
  * *****************************************************************************
@@ -50,9 +46,6 @@
 #include "stm32n6xx_hal.h"
 #include "stm32n6xx_hal_sd.h"
 #include "stm32n6xx_hal_rif.h"
-//#include "stm32n6xx_nucleo.h"
-//#include "stm32n6xx_nucleo_bus.h"
-//#include "stm32n6xx_nucleo_xspi.h"
 
 #include "stm32n6570_discovery.h"
 #include "stm32n6570_discovery_bus.h"
@@ -77,7 +70,7 @@
 /* ---- FreeRTOS ---- */
 #include "FreeRTOS.h"
 #include "task.h"
-
+#include "semphr.h"
 
 /* ================================================================
    SECTION 2: GLOBAL PERIPHERAL HANDLES
@@ -105,6 +98,17 @@ uint8_t                 status;
 uint8_t                 isAlive;
 uint8_t                 isReady;
 
+/* ---- Insect detection parameters ---- */
+#define BASELINE5CX_SAMPLES      10
+#define INSECT5CX_THRESHOLD_PCT  10
+#define NUM_ZONES                16
+#define MOTION_INDICATOR_THRESH  20
+#define CAPTURE_COOLDOWN_FRAMES  60   /* ~4 seconds at 15 Hz */
+
+static uint32_t  g_baseline_signal[NUM_ZONES] = {0};
+static uint16_t  g_baseline_distance[NUM_ZONES] = {0};
+static uint8_t   g_zone_valid[NUM_ZONES] = {0};
+static uint8_t   g_baseline_ready = 0;
 
 /* ================================================================
    SECTION 3: FREERTOS TASK CONTROL BLOCKS AND STACKS
@@ -113,9 +117,8 @@ uint8_t                 isReady;
 static StaticTask_t    main_thread_cb;
 static StackType_t     main_thread_stack[configMINIMAL_STACK_SIZE];
 
-static StaticTask_t    btn_thread_cb;
-static StackType_t     btn_thread_stack[4 * configMINIMAL_STACK_SIZE];
-
+static StaticTask_t    insect_thread_cb;
+static StackType_t     insect_thread_stack[8 * configMINIMAL_STACK_SIZE];
 
 /* ================================================================
    SECTION 4: FORWARD DECLARATIONS
@@ -131,7 +134,7 @@ static void Setup_Mpu(void);
 /* ---- FreeRTOS Entry Points ---- */
 static int   main_freertos(void);
 static void  main_thread_fct(void *arg);
-static void  btn_thread_fct(void *arg);
+static void  insect_detection_task(void *arg);
 
 /* ---- SD Card Operations ---- */
 static void  SD_Benchmarks(void);
@@ -150,35 +153,29 @@ static void VL53L5CX_GPIO_Init(void);
 static void VL53L5CX_StartSequence(void);
 static void VL53L5CX_Validate(void);
 static void VL53L5CX_ReadingTest(void);
-
+static void VL53L5CX_MotionTest(void);
 
 /* ---- External References ---- */
 extern void  vPortSetupTimerInterrupt(void);
 extern int   __uncached_bss_start__;
 extern int   __uncached_bss_end__;
 
-
 /* ================================================================
    SECTION 5: RUNTIME STATE AND BUFFERS
    ================================================================ */
 
-/* System readiness flag (set by main_thread, polled by btn_thread) */
 static volatile int system_ready = 0;
 
-/* Snapshot counter and base block tracking */
-static uint32_t snap_count = 0;
+/* Global snapshot counter — increments after each successful SD write.
+   Used to compute unique SD block offsets so images never overwrite each other. */
+static uint32_t snap_count      = 0;
 static uint32_t snap_base_block = SD_SNAP_BASE_BLOCK;
 
 /** Camera frame buffer — allocated in PSRAM for DMA access */
 static uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
 
-/** SD batch-write buffer — allocated in PSRAM for multi-block writes.
-    Size = SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE = 64 * 512 = 32 KB.
-    This buffer holds multiple 512-byte SD blocks so we can write them
-    in a single HAL_SD_WriteBlocks() call, drastically reducing the
-    number of HAL API calls per snapshot (~307 instead of ~19,643). */
+/** SD batch-write buffer — allocated in PSRAM for multi-block writes */
 static uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
-
 
 /* ================================================================
    SD CARD IMAGE HEADER FORMAT
@@ -198,11 +195,8 @@ typedef struct {
 
 #define SD_HEADER_TAG       0x49444745U
 
-/* Starting SD block for snapshot storage.
-   Must match SD_SNAP_BASE_BLOCK in app_config.h (3072).
-   The Python reader also uses SNAP_BASE = 3072. */
+/* SD_IMG_BASE_BLOCK is updated per-capture to ensure each image goes to a unique block */
 static uint32_t SD_IMG_BASE_BLOCK = SD_SNAP_BASE_BLOCK;
-
 
 /* ================================================================
    SECTION 6: ENTRY POINT
@@ -218,13 +212,6 @@ int main(void)
     /* Basic HAL initialization */
     HAL_Init();
     Setup_Mpu();
-
-
-
-
-
-
-
     SCB_EnableICache();
 
 #if defined(USE_DCACHE)
@@ -232,34 +219,23 @@ int main(void)
     SCB_EnableDCache();
 #endif
 
-
-    //VL53L5CX_Validate();
     /* Start FreeRTOS scheduler */
     return main_freertos();
 }
-
 
 /* ================================================================
    SECTION 7: MPU SETUP
    ================================================================ */
 
-/**
- * @brief  Configure Memory Protection Unit
- *
- *         Sets up a non-cacheable region for the .uncached_bss section
- *         to ensure proper access for peripherals that require it.
- */
 static void Setup_Mpu(void)
 {
     MPU_Attributes_InitTypeDef attr;
     MPU_Region_InitTypeDef     region;
 
-    /* Configure non-cacheable memory attribute */
     attr.Number     = MPU_ATTRIBUTES_NUMBER0;
     attr.Attributes = MPU_NOT_CACHEABLE;
     HAL_MPU_ConfigMemoryAttributes(&attr);
 
-    /* Map attribute to .uncached_bss region */
     region.Enable           = MPU_REGION_ENABLE;
     region.Number           = MPU_REGION_NUMBER0;
     region.BaseAddress      = (uint32_t)&__uncached_bss_start__;
@@ -274,19 +250,10 @@ static void Setup_Mpu(void)
     memset(&__uncached_bss_start__, 0, &__uncached_bss_end__ - &__uncached_bss_start__);
 }
 
-
 /* ================================================================
    SECTION 8: SECURITY CONFIGURATION
    ================================================================ */
 
-/**
- * @brief  Configure RIF (Resource Identification and Firewall) settings
- *
- *         Sets master and slave security attributes for various
- *         peripherals (NPU, DMA2D, CSI, DCMIPP, LTDC, USB OTG).
- *         Also configures DMA and GPIO attributes for illumination
- *         and I2C peripherals.
- */
 static void Security_Config(void)
 {
     __HAL_RCC_RIFSC_CLK_ENABLE();
@@ -298,7 +265,6 @@ static void Security_Config(void)
     RIMC_master.MasterCID = RIF_CID_1;
     RIMC_master.SecPriv   = RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV;
 
-    /* Configure master attributes for secure peripherals */
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_NPU,    &RIMC_master);
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_DMA2D,  &RIMC_master);
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_DCMIPP, &RIMC_master);
@@ -306,7 +272,6 @@ static void Security_Config(void)
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_LTDC2,  &RIMC_master);
     HAL_RIF_RIMC_ConfigMasterAttributes(RIF_MASTER_INDEX_OTG1,   &RIMC_master);
 
-    /* Configure slave secure attributes */
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_NPU,    RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_DMA2D,  RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_CSI,    RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
@@ -317,27 +282,20 @@ static void Security_Config(void)
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_JPEG,   RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
     HAL_RIF_RISC_SetSlaveSecureAttributes(RIF_RISC_PERIPH_INDEX_OTG1HS, RIF_ATTRIBUTE_SEC | RIF_ATTRIBUTE_PRIV);
 
-    /* ---- Illumination (WS2812) DMA + GPIO attributes ---- */
     if (HAL_DMA_ConfigChannelAttributes(&handle_GPDMA1_Channel1,
                                         DMA_CHANNEL_SEC | DMA_CHANNEL_PRIV |
                                         DMA_CHANNEL_SRC_SEC | DMA_CHANNEL_DEST_SEC) != HAL_OK) {
         //Error_Handler();
     }
     HAL_GPIO_ConfigPinAttributes(GPIOE, GPIO_PIN_9, GPIO_PIN_SEC | GPIO_PIN_NPRIV);
-
-    /* ---- I2C GPIO attributes (VL53L5CX) ---- */
     HAL_GPIO_ConfigPinAttributes(GPIOC, GPIO_PIN_1, GPIO_PIN_SEC | GPIO_PIN_NPRIV);
     HAL_GPIO_ConfigPinAttributes(GPIOH, GPIO_PIN_9, GPIO_PIN_SEC | GPIO_PIN_NPRIV);
 }
-
 
 /* ================================================================
    SECTION 9: IAC CONFIGURATION
    ================================================================ */
 
-/**
- * @brief  Initialize Illegal Access Controller
- */
 static void IAC_Config(void)
 {
     __HAL_RCC_IAC_CLK_ENABLE();
@@ -345,22 +303,12 @@ static void IAC_Config(void)
     __HAL_RCC_IAC_RELEASE_RESET();
 }
 
-/** IAC Interrupt Handler — traps into infinite loop on illegal access */
 void IAC_IRQHandler(void) { while (1) {} }
-
 
 /* ================================================================
    SECTION 10: SYSTEM CLOCK CONFIGURATION
    ================================================================ */
 
-/**
- * @brief  Configure system clocks using PLL1-4
- *
- *         PLL1: IC1 (CPU)    — 200 MHz
- *         PLL2: IC6          — 125 MHz (CSI/DCMIPP)
- *         PLL3: IC11         — 225 MHz
- *         PLL4: USB          —  480 MHz / 32 = 15 MHz → USB 480M
- */
 static void SystemClock_Config(void)
 {
     RCC_ClkInitTypeDef              RCC_ClkInitStruct      = {0};
@@ -370,7 +318,6 @@ static void SystemClock_Config(void)
     BSP_SMPS_Init(SMPS_VOLTAGE_OVERDRIVE);
     HAL_Delay(1);
 
-    /* ---- PLL1: CPU Core Clock (200 MHz via IC1) ---- */
     RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_NONE;
     RCC_OscInitStruct.PLL1.PLLState  = RCC_PLL_ON;
     RCC_OscInitStruct.PLL1.PLLSource = RCC_PLLSOURCE_HSI;
@@ -380,7 +327,6 @@ static void SystemClock_Config(void)
     RCC_OscInitStruct.PLL1.PLLP1     = 1;
     RCC_OscInitStruct.PLL1.PLLP2     = 1;
 
-    /* ---- PLL2: IC6 Clock (125 MHz) ---- */
     RCC_OscInitStruct.PLL2.PLLState  = RCC_PLL_ON;
     RCC_OscInitStruct.PLL2.PLLSource = RCC_PLLSOURCE_HSI;
     RCC_OscInitStruct.PLL2.PLLM      = 8;
@@ -389,7 +335,6 @@ static void SystemClock_Config(void)
     RCC_OscInitStruct.PLL2.PLLP1     = 1;
     RCC_OscInitStruct.PLL2.PLLP2     = 1;
 
-    /* ---- PLL3: IC11 Clock (225 MHz) ---- */
     RCC_OscInitStruct.PLL3.PLLState  = RCC_PLL_ON;
     RCC_OscInitStruct.PLL3.PLLSource = RCC_PLLSOURCE_HSI;
     RCC_OscInitStruct.PLL3.PLLM      = 16;
@@ -398,7 +343,6 @@ static void SystemClock_Config(void)
     RCC_OscInitStruct.PLL3.PLLP1     = 1;
     RCC_OscInitStruct.PLL3.PLLP2     = 1;
 
-    /* ---- PLL4: USB Clock ---- */
     RCC_OscInitStruct.PLL4.PLLState  = RCC_PLL_ON;
     RCC_OscInitStruct.PLL4.PLLSource = RCC_PLLSOURCE_HSI;
     RCC_OscInitStruct.PLL4.PLLM      = 32;
@@ -409,7 +353,6 @@ static void SystemClock_Config(void)
 
     if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) { while (1); }
 
-    /* ---- Clock Tree Distribution ---- */
     RCC_ClkInitStruct.ClockType = (RCC_CLOCKTYPE_CPUCLK | RCC_CLOCKTYPE_SYSCLK |
                                    RCC_CLOCKTYPE_HCLK   | RCC_CLOCKTYPE_PCLK1 |
                                    RCC_CLOCKTYPE_PCLK2   | RCC_CLOCKTYPE_PCLK4 |
@@ -432,7 +375,6 @@ static void SystemClock_Config(void)
 
     if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct) != HAL_OK) { while (1); }
 
-    /* ---- Peripheral Clocks ---- */
     RCC_PeriphCLKInitStruct.PeriphClockSelection = 0;
     RCC_PeriphCLKInitStruct.PeriphClockSelection |= RCC_PERIPHCLK_XSPI1;
     RCC_PeriphCLKInitStruct.Xspi1ClockSelection  = RCC_XSPI1CLKSOURCE_HCLK;
@@ -444,16 +386,10 @@ static void SystemClock_Config(void)
     if (HAL_RCCEx_PeriphCLKConfig(&RCC_PeriphCLKInitStruct) != HAL_OK) { while (1); }
 }
 
-
 /* ================================================================
    SECTION 11: DEBUG CONSOLE (UART)
    ================================================================ */
 
-/**
- * @brief  Initialize USART1 for debug output
- *
- *         PE5 = TX, PE6 = RX, 115200 baud, 8N1
- */
 static void CONSOLE_Config(void)
 {
     GPIO_InitTypeDef gpio_init;
@@ -479,7 +415,6 @@ static void CONSOLE_Config(void)
     if (HAL_UART_Init(&huart1) != HAL_OK) { while (1); }
 }
 
-
 /* ================================================================
    SECTION 12: SD CARD BENCHMARK
    ================================================================ */
@@ -490,11 +425,6 @@ static void CONSOLE_Config(void)
 static uint8_t sd_wbuf[SD_BENCH_BYTES];
 static uint8_t sd_rbuf[SD_BENCH_BYTES];
 
-/**
- * @brief  Run SD card read/write speed benchmark
- *
- *         Writes and reads 64 blocks (32 KB), reports speed and integrity.
- */
 static void SD_Benchmarks(void)
 {
     uint32_t          t0, t1;
@@ -511,7 +441,6 @@ static void SD_Benchmarks(void)
            (hsd1.Init.BusWide == SDMMC_BUS_WIDE_4B) ? "4B" : "1B",
            (unsigned long)hsd1.Init.ClockDiv);
 
-    /* Write benchmark */
     printf("[W] ");
     t0 = HAL_GetTick();
     st = HAL_SD_WriteBlocks(&hsd1, sd_wbuf, blk, SD_BENCH_BLOCKS, HAL_MAX_DELAY);
@@ -526,7 +455,6 @@ static void SD_Benchmarks(void)
         return;
     }
 
-    /* Read benchmark */
     printf("[R] ");
     t0 = HAL_GetTick();
     st = HAL_SD_ReadBlocks(&hsd1, sd_rbuf, blk, SD_BENCH_BLOCKS, HAL_MAX_DELAY);
@@ -548,24 +476,10 @@ static void SD_Benchmarks(void)
     printf(" ==== Done ====\n");
 }
 
-
 /* ================================================================
    SECTION 13: SD CARD IMAGE STORAGE (BATCHED)
    ================================================================ */
 
-/**
- * @brief  Store a raw image frame to SD card with header metadata
- *
- *         Uses batched writes (SD_BATCH_WRITE_BLOCKS per HAL call) for
- *         much faster throughput than single-block writes.
- *
- * @param  img_buf       Pointer to image data buffer
- * @param  img_size      Size of image data in bytes
- * @param  w             Image width in pixels
- * @param  h             Image height in pixels
- * @param  pixel_format  Pixel format identifier
- * @return 0 on success, -1 on failure
- */
 static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
                             uint32_t w, uint32_t h, uint32_t pixel_format)
 {
@@ -573,7 +487,6 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
     uint32_t         total_blocks = (SD_IMG_HEADER_SIZE + img_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
     uint32_t         i, checksum = 0;
 
-    /* ---- Overflow protection: check if this snapshot fits on the card ---- */
     if (hsd1.SdCard.BlockNbr > 0) {
         uint32_t last_block = base + total_blocks - 1;
         if (last_block >= hsd1.SdCard.BlockNbr) {
@@ -583,11 +496,9 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
         }
     }
 
-    /* Compute XOR checksum of image data */
     for (i = 0; i < img_size; i++)
         checksum ^= img_buf[i];
 
-    /* Build image header */
     sd_image_header_t hdr;
     hdr.magic        = SD_HEADER_TAG;
     hdr.width        = w;
@@ -596,29 +507,23 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
     hdr.data_size    = img_size;
     hdr.timestamp    = HAL_GetTick();
     hdr.checksum     = checksum;
-    hdr.snap_id      = 0;
+    hdr.snap_id      = snap_count;  /* Store capture index in header */
     memset(hdr.reserved, 0, sizeof(hdr.reserved));
 
-    /* ---- Use the PSRAM batch buffer (sd_batch_buf) for all writes ---- */
     uint32_t batch_size = SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE;
 
-    printf("\n[SD Store] %lux%lu fmt=%lu  %lu bytes  %lu blocks  (batch=%lu blocks/call)\n",
-           (unsigned long)w, (unsigned long)h, pixel_format,
-           img_size, total_blocks, (unsigned long)SD_BATCH_WRITE_BLOCKS);
+    printf("\n[SD Store] snap_id=%lu  %lux%lu fmt=%lu  %lu bytes  %lu blocks\n",
+           (unsigned long)snap_count, (unsigned long)w, (unsigned long)h, pixel_format,
+           img_size, total_blocks);
 
-    /* --- Step 1: Write header block (block 0 of this snapshot) ---
-       The header is 64 bytes at offset 0; image data starts at offset 64.
-       Fill the rest of the first block with image data, then pad
-       remaining batch slots with zeros. */
     memset(sd_batch_buf, 0, batch_size);
     memcpy(sd_batch_buf, &hdr, SD_IMG_HEADER_SIZE);
     uint32_t first_chunk = SD_BLOCK_SIZE - SD_IMG_HEADER_SIZE;
     if (first_chunk > img_size) first_chunk = img_size;
     memcpy(sd_batch_buf + SD_IMG_HEADER_SIZE, img_buf, first_chunk);
 
-    /* If image has more data, also pre-fill batch slots 2..N */
-    uint32_t img_offset = first_chunk;          /* bytes of image already in block 0 */
-    uint32_t batch_blk  = 1;                    /* next block index within batch (0 = header) */
+    uint32_t img_offset = first_chunk;
+    uint32_t batch_blk  = 1;
     while (img_offset < img_size && batch_blk < SD_BATCH_WRITE_BLOCKS) {
         uint32_t chunk = SD_BLOCK_SIZE;
         if (chunk > img_size - img_offset) chunk = img_size - img_offset;
@@ -629,7 +534,6 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
         batch_blk++;
     }
 
-    /* Write however many blocks we filled (at least 1 for the header) */
     uint32_t blocks_to_write = batch_blk;
 
     HAL_StatusTypeDef st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, base, blocks_to_write, HAL_MAX_DELAY);
@@ -641,33 +545,24 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
 
     uint32_t current_block = base + blocks_to_write;
 
-    /* --- Step 2: Write remaining image data in full batches --- */
     while (img_offset < img_size) {
         uint32_t remaining_bytes = img_size - img_offset;
         uint32_t remaining_blocks_full = (remaining_bytes + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
         uint32_t blocks_in_batch = (remaining_blocks_full < SD_BATCH_WRITE_BLOCKS)
                                     ? remaining_blocks_full : SD_BATCH_WRITE_BLOCKS;
 
-        /* Fill the batch buffer */
         for (uint32_t b = 0; b < blocks_in_batch; b++) {
             uint32_t src = img_offset + b * SD_BLOCK_SIZE;
             uint32_t dst = b * SD_BLOCK_SIZE;
             if (src + SD_BLOCK_SIZE <= img_size) {
-                /* Full block — direct copy */
                 memcpy(sd_batch_buf + dst, img_buf + src, SD_BLOCK_SIZE);
             } else {
-                /* Last block — copy partial + zero-pad */
                 uint32_t partial = img_size - src;
                 memcpy(sd_batch_buf + dst, img_buf + src, partial);
                 memset(sd_batch_buf + dst + partial, 0, SD_BLOCK_SIZE - partial);
             }
         }
 
-        /* Wait for SD card to be ready before next batch.
-           SDXC cards (128GB+) need significant time between multi-block write
-           operations to complete internal flash programming. A tight loop is
-           insufficient — we use TaskYIELD to let the SDMMC interrupt handler
-           process and update the card state machine. */
         {
             uint32_t wait_ms = 0;
             while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 2000) {
@@ -675,10 +570,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
                 wait_ms++;
             }
             if (wait_ms >= 2000) {
-                printf("[SD Store] Card timeout before block %lu (state=%lu after %lu ms)\n",
-                       (unsigned long)current_block,
-                       (unsigned long)HAL_SD_GetCardState(&hsd1),
-                       (unsigned long)wait_ms);
+                printf("[SD Store] Card timeout before block %lu\n", (unsigned long)current_block);
             }
         }
 
@@ -693,145 +585,286 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
         current_block += blocks_in_batch;
     }
 
-    printf("[SD Store] OK (blocks %lu..%lu, %lu HAL calls vs %lu original)\n",
-           (unsigned long)base, (unsigned long)(current_block - 1),
-           (unsigned long)((total_blocks + SD_BATCH_WRITE_BLOCKS - 1) / SD_BATCH_WRITE_BLOCKS),
-           (unsigned long)total_blocks);
+    printf("[SD Store] OK (blocks %lu..%lu)\n", (unsigned long)base, (unsigned long)(current_block - 1));
     return 0;
 }
 
-
 /* ================================================================
-   SECTION 14: BUTTON THREAD (runs forever)
+   SECTION 14: INSECT DETECTION + AUTO-CAPTURE TASK (runs forever)
    ================================================================ */
 
 /**
- * @brief  Button polling task (highest priority)
- *
- *         Waits for the system_ready flag, then enters a loop polling
- *         the USER button (PC13). On press: activates WS2812 illumination,
- *         captures a single camera frame, and saves it to SD card.
+ * Helper: capture one frame and store to SD with sequential block numbering.
+ * Uses the global snap_count so each image gets a unique location.
  */
-static void btn_thread_fct(void *arg)
+static int capture_and_store_frame(void)
 {
-    (void)arg;
+    uint32_t frame_size   = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
+    uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
 
-    /* Wait until main_thread completes initialization */
-    while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
+    /* Compute unique block for this capture using current snap_count */
+    uint32_t target_block = snap_base_block + (snap_count * total_blocks);
+    SD_IMG_BASE_BLOCK = target_block;
 
-    /* ---- Initialize VL53L5CX ToF Sensor ---- */
-    VL53L5CX_Validate();
-    VL53L5CX_ReadingTest();
+    uint32_t t_capture_start = HAL_GetTick();
 
-    printf("\n============================================\n");
-    printf("  STANDALONE SNAPSHOT MODE\n");
-    printf("  Resolution: %d x %d @ %d FPS\n",
-           SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
-    printf("  Camera: ON-DEMAND (init per capture)\n");
-    printf("  Press USER button (PC13) to capture.\n");
-    printf("============================================\n\n");
+    int rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
+                                    SNAP_WIDTH, SNAP_HEIGHT,
+                                    SNAP_FPS, SNAP_WARMUP_FRAMES);
 
-    BSP_LED_On(LED_GREEN);
+    uint32_t t_capture_end   = HAL_GetTick();
+    uint32_t capture_elapsed = t_capture_end - t_capture_start;
 
-    while (1) {
-        if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
-            vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
-            if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) != GPIO_PIN_SET)
-                continue;
+    if (rc != 0) {
+        printf("[CAP] Camera capture FAILED (rc=%d)!\n", rc);
+        return -1;
+    }
 
+    printf("[CAP] Captured in %lu ms\n", (unsigned long)capture_elapsed);
 
-            VL53L5CX_ReadingTest();
-            /* Activate illumination and status LEDs */
-            WS2812_TurnOn();
-            BSP_LED_Off(LED_GREEN);
-            BSP_LED_On(LED_RED);
+    uint32_t t_sd_start = HAL_GetTick();
 
-            uint32_t t_capture_start = HAL_GetTick();
-            uint32_t snap_num = snap_count + 1;
-            printf("[BTN] >>> Button pressed! Capturing #%lu...\n", (unsigned long)snap_num);
-
-            /* Full init + capture + deinit (safe - CMW doesn't support pipe restart) */
-            int rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                            SNAP_WIDTH, SNAP_HEIGHT,
-                                            SNAP_FPS, SNAP_WARMUP_FRAMES);
-
-            uint32_t t_capture_end = HAL_GetTick();
-            uint32_t capture_elapsed = t_capture_end - t_capture_start;
-
-            if (rc != 0) {
-                printf("[BTN] >>> Camera capture FAILED (rc=%d)!\n", rc);
-                BSP_LED_Off(LED_RED);
-                BSP_LED_On(LED_GREEN);
-                while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
-                    vTaskDelay(pdMS_TO_TICKS(50));
-                continue;
-            }
-
-            /* Calculate SD block offsets for this snapshot */
-            uint32_t frame_size   = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
-            uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
-            uint32_t target_block = snap_base_block + (snap_count * total_blocks);
-            uint32_t saved_base   = SD_IMG_BASE_BLOCK;
-            SD_IMG_BASE_BLOCK     = target_block;
-
-            printf("[CAM] Captured in %lu ms!\n", (unsigned long)capture_elapsed);
-
-            uint32_t t_sd_start = HAL_GetTick();
-
-            if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
-                snap_count++;
-                uint32_t t_sd_end = HAL_GetTick();
-                printf("[BTN] >>> Snapshot #%lu SAVED (block %lu)\n",
-                       (unsigned long)snap_num, (unsigned long)target_block);
-                printf("[PERF] Capture=%lums + SD=%lums = Total=%lums\n",
-                       (unsigned long)capture_elapsed,
-                       (unsigned long)(t_sd_end - t_sd_start),
-                       (unsigned long)(t_sd_end - t_capture_start));
-            } else {
-                printf("[BTN] >>> SD write FAILED!\n");
-            }
-
-            /* Deactivate illumination and restore status LEDs */
-            BSP_LED_Off(LED_RED);
-            BSP_LED_On(LED_GREEN);
-            WS2812_TurnOff();
-
-            /* Wait for button release */
-            while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
-                vTaskDelay(pdMS_TO_TICKS(50));
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(BTN_POLL_DELAY_MS));
+    if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
+        snap_count++;  /* Increment global counter AFTER successful write */
+        uint32_t t_sd_end = HAL_GetTick();
+        printf("[CAP] Snapshot #%lu SAVED at block %lu\n",
+               (unsigned long)snap_count, (unsigned long)target_block);
+        printf("[PERF] capture=%lums + sd=%lums = total=%lums\n",
+               (unsigned long)capture_elapsed,
+               (unsigned long)(t_sd_end - t_sd_start),
+               (unsigned long)(t_sd_end - t_capture_start));
+        return 0;
+    } else {
+        printf("[CAP] SD write FAILED at block %lu!\n", (unsigned long)target_block);
+        return -1;
     }
 }
 
+static void insect_detection_task(void *arg)
+{
+    (void)arg;
+
+    uint8_t status_local;
+    uint8_t isAlive;
+    uint8_t is_ready;
+    uint8_t i;
+
+    /* ---- Wait for system to be ready ---- */
+    while (!system_ready) {
+        vTaskDelay(pdMS_TO_TICKS(500));
+    }
+
+    printf("\n============================================\n");
+    printf("  INSECT DETECTION MODE (VL53L5CX)\n");
+    printf("  4x4 zone-based signal drop detection\n");
+    printf("  Auto-capture on detection\n");
+    printf("============================================\n\n");
+
+    /* ---- Properly initialize the sensor FIRST ---- */
+    printf("[ToF] Initializing VL53L5CX...\n");
+
+    VL53L5CX_GPIO_Init();
+    VL53L5CX_StartSequence();
+
+    Dev.platform.address = 0x29;
+
+    status_local = vl53l5cx_is_alive(&Dev, &isAlive);
+    if (!isAlive || status_local) {
+        printf("[ERROR] VL53L5CX sensor not detected!\n");
+        printf("  Status: %d, Alive: %d\n", status_local, isAlive);
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    printf("[ToF] Sensor detected!\n");
+
+    status_local = vl53l5cx_init(&Dev);
+    if (status_local) {
+        printf("[ERROR] VL53L5CX init failed: %d\n", status_local);
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    printf("[ToF] Sensor initialized\n");
+
+    /* ---- Configuration ---- */
+    status_local = vl53l5cx_set_resolution(&Dev, VL53L5CX_RESOLUTION_4X4);
+
+    memset(g_baseline_signal, 0, sizeof(g_baseline_signal));
+    memset(g_baseline_distance, 0, sizeof(g_baseline_distance));
+    memset(g_zone_valid, 0, sizeof(g_zone_valid));
+    g_baseline_ready = 0;
+
+    status_local = vl53l5cx_set_integration_time_ms(&Dev, 800);
+    status_local = vl53l5cx_set_ranging_frequency_hz(&Dev, 15);
+    status_local = vl53l5cx_set_target_order(&Dev, VL53L5CX_TARGET_ORDER_CLOSEST);
+    status_local = vl53l5cx_set_sharpener_percent(&Dev, 10);
+    status_local = vl53l5cx_set_ranging_mode(&Dev, VL53L5CX_RANGING_MODE_CONTINUOUS);
+
+    vl53l5cx_start_ranging(&Dev);
+    VL53L5CX_WaitMs(&(Dev.platform), 200);
+    printf("[ToF] Ranging started...\n");
+
+    /* ================================================================ */
+    /*  Phase 1: Learn per-zone baseline signal                         */
+    /* ================================================================ */
+    printf("\r\n[BASELINE] Taking %d samples per zone...\r\n", BASELINE5CX_SAMPLES);
+
+    for (i = 0; i < BASELINE5CX_SAMPLES; i++)
+    {
+        do {
+            vl53l5cx_check_data_ready(&Dev, &is_ready);
+            if (!is_ready) vTaskDelay(pdMS_TO_TICKS(10));
+        } while (!is_ready);
+
+        if (vl53l5cx_get_ranging_data(&Dev, &Results) != 0)
+            continue;
+
+        for (int z = 0; z < NUM_ZONES; z++)
+        {
+            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+            if (Results.target_status[idx] == 0 ||
+                Results.target_status[idx] == 5 ||
+                Results.target_status[idx] == 9)
+            {
+                g_baseline_signal[z] += Results.signal_per_spad[idx];
+                g_baseline_distance[z] += Results.distance_mm[idx];
+                g_zone_valid[z] = 1;
+            }
+        }
+
+        printf("  [%d/%d]\r", i + 1, BASELINE5CX_SAMPLES);
+    }
+
+    printf("\r\n[BASELINE] Zone | Distance(mm) | Signal(kcps/spad)\r\n");
+    printf("----------|----------------|----------------------\r\n");
+
+    uint8_t valid_zone_count = 0;
+
+    for (int z = 0; z < NUM_ZONES; z++)
+    {
+        if (g_zone_valid[z])
+        {
+            g_baseline_signal[z] /= BASELINE5CX_SAMPLES;
+            g_baseline_distance[z] /= BASELINE5CX_SAMPLES;
+            valid_zone_count++;
+            printf("  Z%2d    |    %8d     |    %10d\r\n",
+                   z, g_baseline_distance[z], g_baseline_signal[z]);
+        }
+    }
+
+    printf("\r\n[BASELINE] Valid zones: %d/%d\r\n", valid_zone_count, NUM_ZONES);
+    printf("[BASELINE] Insect threshold: >%d%% drop in any zone\r\n",
+           INSECT5CX_THRESHOLD_PCT);
+
+    if (valid_zone_count < 2) {
+        printf("[ERROR] Not enough valid zones for baseline (%d/%d)\n", valid_zone_count, NUM_ZONES);
+        printf("  Please check sensor connection and ensure objects are in range.\n");
+        while (1) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+
+    g_baseline_ready = 1;
+
+    /* ================================================================ */
+    /*  Phase 2: Monitor + Auto-Capture                                  */
+    /* ================================================================ */
+    printf("[MONITOR] %d zones active. Waiting for insect...\n", valid_zone_count);
+
+    uint32_t cooldown_frames = 0;
+    volatile uint8_t is_capturing = 0;
+
+    BSP_LED_On(LED_GREEN);
+
+    while (1)
+    {
+        if (is_capturing) {
+            do {
+                vl53l5cx_check_data_ready(&Dev, &is_ready);
+                if (!is_ready) vTaskDelay(pdMS_TO_TICKS(10));
+            } while (!is_ready);
+            vl53l5cx_get_ranging_data(&Dev, &Results);
+            continue;
+        }
+
+        do {
+            vl53l5cx_check_data_ready(&Dev, &is_ready);
+            if (!is_ready) vTaskDelay(pdMS_TO_TICKS(10));
+        } while (!is_ready);
+
+        if (vl53l5cx_get_ranging_data(&Dev, &Results) != 0)
+            continue;
+
+        uint8_t insect_found = 0;
+
+        for (int z = 0; z < NUM_ZONES; z++)
+        {
+            if (!g_zone_valid[z]) continue;
+            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+            if (Results.target_status[idx] != 0 &&
+                Results.target_status[idx] != 5 &&
+                Results.target_status[idx] != 9) continue;
+
+            uint32_t signal_drop = 0;
+            if (g_baseline_signal[z] > 0)
+            {
+                int32_t diff = (int32_t)g_baseline_signal[z] -
+                               (int32_t)Results.signal_per_spad[idx];
+                if (diff < 0) diff = -diff;
+                signal_drop = (uint32_t)diff * 100 / g_baseline_signal[z];
+            }
+
+            if (signal_drop > INSECT5CX_THRESHOLD_PCT) {
+                insect_found = 1;
+                break;
+            }
+        }
+
+        if (cooldown_frames > 0) cooldown_frames--;
+
+        if (insect_found && cooldown_frames == 0)
+        {
+            printf("[!] INSECT -> capture #%lu\n", (unsigned long)(snap_count + 1));
+
+            BSP_LED_Off(LED_GREEN);
+            BSP_LED_On(LED_RED);
+            WS2812_TurnOn();
+            vTaskDelay(pdMS_TO_TICKS(100));
+            WS2812_TurnOff();
+
+            is_capturing = 1;
+            capture_and_store_frame();
+            is_capturing = 0;
+
+            BSP_LED_Off(LED_RED);
+            BSP_LED_On(LED_GREEN);
+
+            cooldown_frames = CAPTURE_COOLDOWN_FRAMES;
+        }
+    }
+}
 
 /* ================================================================
    SECTION 15: FREERTOS INITIALIZATION
    ================================================================ */
 
-/**
- * @brief  Create and start FreeRTOS tasks
- *
- *         Creates two static tasks:
- *         - main_thread (priority 2): Board initialization, then deletes itself
- *         - btn_thread  (priority 3): Button polling and capture loop
- */
 static int main_freertos(void)
 {
     TaskHandle_t hdl;
 
+    /* main_thread: board init (priority 1) */
     hdl = xTaskCreateStatic(main_thread_fct, "main",
                             configMINIMAL_STACK_SIZE, NULL,
                             tskIDLE_PRIORITY + 1,
                             main_thread_stack, &main_thread_cb);
     assert(hdl != NULL);
 
-    /* Button task at HIGHER priority for immediate response */
-    hdl = xTaskCreateStatic(btn_thread_fct, "btn",
-                            4 * configMINIMAL_STACK_SIZE, NULL,
+    /* insect_detection_task: ToF monitoring + auto-capture (priority 2) */
+    hdl = xTaskCreateStatic(insect_detection_task, "insect",
+                            8 * configMINIMAL_STACK_SIZE, NULL,
                             tskIDLE_PRIORITY + 2,
-                            btn_thread_stack, &btn_thread_cb);
+                            insect_thread_stack, &insect_thread_cb);
     assert(hdl != NULL);
 
     vTaskStartScheduler();
@@ -839,28 +872,10 @@ static int main_freertos(void)
     return -1;
 }
 
-
 /* ================================================================
    SECTION 16: MAIN THREAD (runs once: board init, then deletes)
    ================================================================ */
 
-/**
- * @brief  Main initialization task
- *
- *         Performs all hardware initialization in sequence:
- *         1. NVIC priorities
- *         2. System clock
- *         3. Debug console
- *         4. Fuse programming
- *         5. WS2812 illumination (DMA + TIM)
- *         6. VL53L5CX ToF sensor (I2C + GPIO)
- *         7. PSRAM (XSPI RAM + NOR)
- *         8. LEDs + User button
- *         9. Security + IAC config
- *         10. Low-power clock gates
- *         11. SD card init + benchmark
- *         12. Set system_ready flag, delete task
- */
 static void main_thread_fct(void *arg)
 {
     (void)arg;
@@ -876,56 +891,35 @@ static void main_thread_fct(void *arg)
 
     /* ---- Clocks + Console + Fuses ---- */
     SystemClock_Config();
-
-
-
-
     vPortSetupTimerInterrupt();
     CONSOLE_Config();
     Fuse_Programming();
 
-
-
-
-
     HAL_Delay(10);
-
     printf("[PWR] All VDDIO domains enabled for Arduino I/O\n");
 
-
-
-
-
-
-
-
-
-    /* === FORCE CONTROL PINS EARLY === */
+    /* === FORCE CONTROL PINS EARLY (ToF power) === */
     __HAL_RCC_GPIOD_CLK_ENABLE();
     __HAL_RCC_GPIOH_CLK_ENABLE();
 
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    // PWR_EN (PD0) HIGH
     GPIO_InitStruct.Pin   = GPIO_PIN_0;
     GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull  = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);  // PWR_EN
 
-    // LPn (PD6) HIGH
     GPIO_InitStruct.Pin = GPIO_PIN_6;
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);  // LPn
 
-    // RST (PH5) HIGH
     GPIO_InitStruct.Pin = GPIO_PIN_5;
     HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
-    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);  // RST
 
-    HAL_Delay(100);  // Give sensor time to stabilize with proper levels
-
+    HAL_Delay(100);
     printf("[EARLY GPIO] Control pins forced HIGH before I2C init\n");
 
     /* ---- Illumination System (WS2812) ---- */
@@ -938,7 +932,6 @@ static void main_thread_fct(void *arg)
     VL53L5CX_I2C_Init();
     VL53L5CX_GPIO_Init();
     VL53L5CX_StartSequence();
-
 
     /* ---- PSRAM Initialization ---- */
 #ifdef STM32N6570_DK_REV
@@ -985,21 +978,6 @@ static void main_thread_fct(void *arg)
 
     HAL_PWREx_EnableVddIO5();
     for (volatile uint32_t d = 0; d < 500000; d++);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
     RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
     PeriphClkInit.PeriphClockSelection  = RCC_PERIPHCLK_SDMMC2;
@@ -1048,7 +1026,6 @@ static void main_thread_fct(void *arg)
         printf("  Bus Width: %s\n",
                (hsd1.Init.BusWide == SDMMC_BUS_WIDE_4B) ? "4-bit" : "1-bit");
 
-        /* Storage capacity info */
         uint32_t blocks_per_snap = (SD_IMG_HEADER_SIZE + SNAP_FRAME_SIZE + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
         uint32_t available_blocks = hsd1.SdCard.BlockNbr - SD_SNAP_BASE_BLOCK;
         uint32_t max_snaps = available_blocks / blocks_per_snap;
@@ -1065,25 +1042,18 @@ static void main_thread_fct(void *arg)
     /* ---- System Ready ---- */
     printf("\n===========================================\n");
     printf("[INFO] System READY!\n");
-    printf("[INFO] Camera: ON-DEMAND (init per capture)\n");
-    printf("[INFO] Press USER button (PC13) to capture + save.\n");
+    printf("[INFO] Insect detection + auto-capture enabled.\n");
+    printf("[INFO] GREEN LED = monitoring, RED LED = capturing.\n");
     printf("===========================================\n\n");
 
     system_ready = 1;
     vTaskDelete(NULL);
 }
 
-
 /* ================================================================
    SECTION 17: DCMIPP CLOCK CONFIGURATION
    ================================================================ */
 
-/**
- * @brief  Configure DCMIPP and CSI clock sources
- *
- *         DCMIPP → IC17 from PLL2/3
- *         CSI    → IC18 from PLL1/40
- */
 HAL_StatusTypeDef MX_DCMIPP_ClockConfig(DCMIPP_HandleTypeDef *hdcmipp)
 {
     (void)hdcmipp;
@@ -1106,14 +1076,10 @@ HAL_StatusTypeDef MX_DCMIPP_ClockConfig(DCMIPP_HandleTypeDef *hdcmipp)
     return HAL_OK;
 }
 
-
 /* ================================================================
    SECTION 18: USB MSP INIT
    ================================================================ */
 
-/**
- * @brief  USB OTG HS MSP initialization (called by HAL when USB is used)
- */
 void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
 {
     assert(hpcd->Instance == USB1_OTG_HS);
@@ -1129,18 +1095,10 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
     HAL_NVIC_EnableIRQ(USB1_OTG_HS_IRQn);
 }
 
-
 /* ================================================================
    SECTION 19: PERIPHERAL INITIALIZATION (TIM1, GPDMA1, CLOCK)
    ================================================================ */
 
-/**
- * @brief  TIM1 initialization for WS2812 PWM signal generation
- *
- *         Prescaler = 5 → 200 MHz / 6 = 33.33 MHz timer clock
- *         Period    = 500 → PWM frequency ≈ 66.67 kHz
- *         Channel 1, PWM1 mode
- */
 static void MX_TIM1_Init(void)
 {
     TIM_ClockConfigTypeDef sClockSourceConfig = {0};
@@ -1149,7 +1107,7 @@ static void MX_TIM1_Init(void)
     TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
 
     htim1.Instance = TIM1;
-    htim1.Init.Prescaler = 5;      /* 200 MHz / 6 = 33.33 MHz */
+    htim1.Init.Prescaler = 5;
     htim1.Init.CounterMode = TIM_COUNTERMODE_UP;
     htim1.Init.Period = 500;
     htim1.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
@@ -1181,9 +1139,6 @@ static void MX_TIM1_Init(void)
     HAL_TIM_MspPostInit(&htim1);
 }
 
-/**
- * @brief  Configure peripheral common clock (TIM prescaler)
- */
 void PeriphCommonClock_Config(void)
 {
     RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
@@ -1194,11 +1149,6 @@ void PeriphCommonClock_Config(void)
     }
 }
 
-/**
- * @brief  GPDMA1 initialization for WS2812 data transmission
- *
- *         Enables GPDMA1 clock and configures Channel1 IRQ.
- */
 static void MX_GPDMA1_Init(void)
 {
     __HAL_RCC_GPDMA1_CLK_ENABLE();
@@ -1206,19 +1156,10 @@ static void MX_GPDMA1_Init(void)
     HAL_NVIC_EnableIRQ(GPDMA1_Channel1_IRQn);
 }
 
-
 /* ================================================================
    SECTION 20: I2C1 INITIALIZATION (VL53L5CX ToF Sensor)
    ================================================================ */
 
-/**
- * @brief  I2C1 initialization for VL53L5CX Time-of-Flight sensor
- *
- *         Timing: 0x00401242 (100 kHz standard mode)
- *         Addressing: 7-bit
- *         Analog filter: enabled
- *         Fast mode plus: enabled
- */
 static void VL53L5CX_I2C_Init(void)
 {
     hi2c1.Instance = I2C1;
@@ -1235,169 +1176,82 @@ static void VL53L5CX_I2C_Init(void)
         //Error_Handler();
     }
 
-    /* Configure Analog filter */
     if (HAL_I2CEx_ConfigAnalogFilter(&hi2c1, I2C_ANALOGFILTER_ENABLE) != HAL_OK) {
         //Error_Handler();
     }
 
-    /* Configure Digital filter */
     if (HAL_I2CEx_ConfigDigitalFilter(&hi2c1, 0) != HAL_OK) {
         //Error_Handler();
     }
 
-    /* I2C Fast mode Plus enable */
     if (HAL_I2CEx_ConfigFastModePlus(&hi2c1, I2C_FASTMODEPLUS_ENABLE) != HAL_OK) {
         //Error_Handler();
     }
 
     printf("Testing I2C bus...\n");
 
-    // Test simple write to sensor address
     status = HAL_I2C_IsDeviceReady(&hi2c1, (0x29 << 1), 10, 100);
     printf("VL53L5CX at 0x29 ready? %s (status=%d)\n",
            (status == HAL_OK) ? "YES" : "NO", status);
 
-    // Scanner más lento
     for (uint8_t addr = 0x08; addr < 0x78; addr++) {
         if (HAL_I2C_IsDeviceReady(&hi2c1, (addr << 1), 3, 50) == HAL_OK) {
             printf("Device found at 0x%02X\n", addr);
         }
     }
-
-
-
 }
-
 
 /* ================================================================
    SECTION 21: VL53L5CX TIME-OF-FLIGHT SENSOR FUNCTIONS
    ================================================================ */
 
-
-
-
-
-
-
-
-/**
- * @brief  Initialize GPIO pins for VL53L5CX control signals
- *
- *         Pin Mapping:
- *           - PD0  → PWR_EN  (Power Enable, active HIGH)
- *           - PE7  → I2C_RST (Reset, active LOW pulse)
- *           - PD6  → LPn     (Low Power disable, active HIGH)
- */
 static void VL53L5CX_GPIO_Init(void)
 {
-//    GPIO_InitTypeDef GPIO_InitStruct = {0};
-//
-//    /* PWR_EN (PD0) - Power Enable output */
-//    GPIO_InitStruct.Pin = GPIO_PIN_0;
-//    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-//    GPIO_InitStruct.Pull = GPIO_NOPULL;
-//    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-//    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-//
-//    /* I2C_RST (PE7) - Reset output */
-//    GPIO_InitStruct.Pin = GPIO_PIN_5;
-//    HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
-//
-//    /* LPn (PD6) - Low Power mode disable output */
-//    GPIO_InitStruct.Pin = GPIO_PIN_6;
-//    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-//
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
 
+   __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOH_CLK_ENABLE();
 
-	GPIO_InitTypeDef GPIO_InitStruct = {0};
+    GPIO_InitStruct.Pin   = GPIO_PIN_0;
+    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull  = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
 
-	__HAL_RCC_GPIOD_CLK_ENABLE();
-	__HAL_RCC_GPIOH_CLK_ENABLE();
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
 
-	// PWR_EN
-	GPIO_InitStruct.Pin   = GPIO_PIN_0;
-	GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
-	GPIO_InitStruct.Pull  = GPIO_NOPULL;
-	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
-	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+    GPIO_InitStruct.Pin = GPIO_PIN_5;
+    HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
 
-	// LPn
-	GPIO_InitStruct.Pin = GPIO_PIN_6;
-	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
-
-	// RST (PH5)
-	GPIO_InitStruct.Pin = GPIO_PIN_5;
-	HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
-	HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
-
-	printf("GPIO control pins forced to 3.3V\n");
-
+    printf("GPIO control pins forced to 3.3V\n");
 }
 
-/**
- * @brief  Execute VL53L5CX power-up sequence
- *
- *         Sequence:
- *           1. Assert PWR_EN (PD0 HIGH)
- *           2. Pulse reset (PE7 LOW → HIGH)
- *           3. Disable low-power mode (PD6 HIGH)
- *           4. Wait for sensor stabilization
- */
 static void VL53L5CX_StartSequence(void)
 {
-//    printf("\n=== ToF Sensor Power Up ===\n");
-//
-//    /* Step 1: Enable power (PWR_EN = HIGH) */
-//    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
-//    HAL_Delay(10);  /* Power stabilization delay */
-//
-//    /* Step 2: Reset pulse (active LOW) */
-//    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_RESET);
-//    HAL_Delay(10);
-//    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
-//    HAL_Delay(10);
-//
-//    /* Step 3: Disable Low Power mode (LPn = HIGH) */
-//    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
-//    HAL_Delay(100);
-//
-//    printf("[OK] Sensor power-up complete\n\n");
-
-
     printf("\n=== ToF Sensor Power Up ===\n");
 
-	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);  // PWR_EN
-	HAL_Delay(20);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);  // PWR_EN
+    HAL_Delay(20);
 
-	// Reset pulse on PH5
-	HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_RESET);
-	HAL_Delay(20);
-	HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
-	HAL_Delay(20);
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_RESET);
+    HAL_Delay(20);
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
+    HAL_Delay(20);
 
-	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);  // LPn
-	HAL_Delay(100);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);  // LPn
+    HAL_Delay(100);
 
-	printf("[OK] Sensor power-up complete\n");
-
-
-
+    printf("[OK] Sensor power-up complete\n");
 }
 
-/**
- * @brief  Validate VL53L5CX sensor presence and initialize
- *
- *         Checks if the sensor is alive at I2C address 0x29,
- *         initializes the device, and scans the I2C bus for
- *         all connected devices.
- */
 static void VL53L5CX_Validate(void)
 {
     Dev.platform.address = 0x29;
 
-    /* Check if sensor is alive */
     status = vl53l5cx_is_alive(&Dev, &isAlive);
     printf("ALIVE %i and status %i\r\n", isAlive, status);
 
@@ -1416,7 +1270,6 @@ static void VL53L5CX_Validate(void)
     }
     HAL_Delay(1000);
 
-    /* Scan I2C bus for all connected devices */
     for (uint8_t addr = 0; addr < 128; addr++) {
         if (HAL_I2C_IsDeviceReady(&hi2c1, addr << 1, 1, 10) == HAL_OK) {
             printf("I2C device found at 0x%02X\r\n", addr);
@@ -1424,83 +1277,195 @@ static void VL53L5CX_Validate(void)
     }
 }
 
-/**
- * @brief  Configure VL53L5CX for high-performance continuous ranging
- *
- *         Settings:
- *           - Resolution:    8x8 (64 zones)
- *           - Integration:   800 ms
- *           - Frequency:     15 Hz
- *           - Target order:  Closest object
- *           - Sharpener:     10%
- *           - Mode:          Continuous
- *
- *         After configuration, reads 6 sample frames and prints
- *         distance + target status for all 64 zones.
- */
 static void VL53L5CX_ReadingTest(void)
 {
-    /* ---- High-Performance Configuration ---- */
+    (void)status;
+    uint8_t is_ready;
+    uint8_t i;
 
-    /* Resolution: 8x8 (64 zones) */
-    status = vl53l5cx_set_resolution(&Dev, VL53L5CX_RESOLUTION_8X8);
+    status = vl53l5cx_set_resolution(&Dev, VL53L5CX_RESOLUTION_4X4);
+    memset(g_baseline_signal, 0, sizeof(g_baseline_signal));
+    memset(g_baseline_distance, 0, sizeof(g_baseline_distance));
+    memset(g_zone_valid, 0, sizeof(g_zone_valid));
+    g_baseline_ready = 0;
 
-    /* Integration time: 800 ms */
     status = vl53l5cx_set_integration_time_ms(&Dev, 800);
-
-    /* Ranging frequency: 15 Hz (maximum for 8x8 resolution) */
     status = vl53l5cx_set_ranging_frequency_hz(&Dev, 15);
-
-    /* Always report the closest object */
     status = vl53l5cx_set_target_order(&Dev, VL53L5CX_TARGET_ORDER_CLOSEST);
-
-    /* Sharpener at 10% to reduce pixel blurring */
     status = vl53l5cx_set_sharpener_percent(&Dev, 10);
-
-    /* Continuous ranging mode */
     status = vl53l5cx_set_ranging_mode(&Dev, VL53L5CX_RANGING_MODE_CONTINUOUS);
 
-    /* Start ranging measurements */
-    status = vl53l5cx_start_ranging(&Dev);
+    vl53l5cx_start_ranging(&Dev);
     VL53L5CX_WaitMs(&(Dev.platform), 200);
+    printf("Ranging started...\r\n");
 
-    /* Read 6 sample frames */
-    for (int i = 0; i < 6; i++) {
-    //while(1)
+    printf("\r\n[BASELINE] Taking %d samples per zone...\r\n", BASELINE5CX_SAMPLES);
 
-        vl53l5cx_check_data_ready(&Dev, &isReady);
-        if (isReady) {
-            vl53l5cx_get_ranging_data(&Dev, &Results);
+    for (i = 0; i < BASELINE5CX_SAMPLES; i++)
+    {
+        do {
+            vl53l5cx_check_data_ready(&Dev, &is_ready);
+            if (!is_ready) HAL_Delay(10);
+        } while (!is_ready);
 
-            /* Print frame header for easy parsing */
-            printf("FRAME");
+        if (vl53l5cx_get_ranging_data(&Dev, &Results) != 0)
+            continue;
 
-            /* Output all 64 zones: distance_mm, target_status */
-            for (int i = 0; i < 64; i++) {
-                printf(",%d,%d",
-                    Results.distance_mm[VL53L5CX_NB_TARGET_PER_ZONE * i],
-                    Results.target_status[VL53L5CX_NB_TARGET_PER_ZONE * i]);
+        for (int z = 0; z < NUM_ZONES; z++)
+        {
+            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+            if (Results.target_status[idx] == 0 ||
+                Results.target_status[idx] == 5 ||
+                Results.target_status[idx] == 9)
+            {
+                g_baseline_signal[z] += Results.signal_per_spad[idx];
+                g_baseline_distance[z] += Results.distance_mm[idx];
+                g_zone_valid[z] = 1;
             }
-
-            printf("\r\n");
         }
 
-        VL53L5CX_WaitMs(&(Dev.platform), 20);
+        printf("  [%d/%d]\r", i + 1, BASELINE5CX_SAMPLES);
+    }
+
+    printf("\r\n[BASELINE] Zone | Distance(mm) | Signal(kcps/spad)\r\n");
+    printf("----------|----------------|----------------------\r\n");
+
+    uint8_t valid_zone_count = 0;
+
+    for (int z = 0; z < NUM_ZONES; z++)
+    {
+        if (g_zone_valid[z])
+        {
+            g_baseline_signal[z] /= BASELINE5CX_SAMPLES;
+            g_baseline_distance[z] /= BASELINE5CX_SAMPLES;
+            valid_zone_count++;
+            printf("  Z%2d    |    %8d     |    %10d\r\n",
+                   z, g_baseline_distance[z], g_baseline_signal[z]);
+        }
+    }
+
+    printf("\r\n[BASELINE] Valid zones: %d/%d\r\n", valid_zone_count, NUM_ZONES);
+    printf("[BASELINE] Insect threshold: >%d%% drop in any zone\r\n",
+           INSECT5CX_THRESHOLD_PCT);
+    g_baseline_ready = 1;
+
+    printf("\r\n[MONITORING] Watching %d zones...\r\n", valid_zone_count);
+    printf("  (Wave hand or blow air to simulate)\r\n\n");
+
+    while (1)
+    {
+        do {
+            vl53l5cx_check_data_ready(&Dev, &is_ready);
+            if (!is_ready) HAL_Delay(10);
+        } while (!is_ready);
+
+        if (vl53l5cx_get_ranging_data(&Dev, &Results) != 0)
+            continue;
+
+        uint8_t  insect_found = 0;
+        uint8_t  affected_zones[NUM_ZONES] = {0};
+        uint32_t affected_drop[NUM_ZONES] = {0};
+        uint8_t  affected_count = 0;
+
+        for (int z = 0; z < NUM_ZONES; z++)
+        {
+            if (!g_zone_valid[z])
+                continue;
+
+            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+
+            if (Results.target_status[idx] != 0 &&
+                Results.target_status[idx] != 5 &&
+                Results.target_status[idx] != 9)
+                continue;
+
+            uint32_t signal_drop = 0;
+            if (g_baseline_signal[z] > 0)
+            {
+                int32_t diff = (int32_t)g_baseline_signal[z] -
+                               (int32_t)Results.signal_per_spad[idx];
+                if (diff < 0) diff = -diff;
+                signal_drop = (uint32_t)diff * 100 / g_baseline_signal[z];
+            }
+
+            if (signal_drop > INSECT5CX_THRESHOLD_PCT)
+            {
+                affected_zones[affected_count] = z;
+                affected_drop[affected_count] = signal_drop;
+                affected_count++;
+                insect_found = 1;
+            }
+        }
+
+        if (insect_found)
+        {
+            char zone_list[64] = {0};
+            for (uint8_t k = 0; k < affected_count; k++)
+            {
+                char tmp[16];
+                sprintf(tmp, "Z%u", affected_zones[k]);
+                if (k == 0)
+                    strcpy(zone_list, tmp);
+                else {
+                    strcat(zone_list, ",");
+                    strcat(zone_list, tmp);
+                }
+            }
+
+            printf(">>> INSECT DETECTED! Zones: [%s] (%u zone(s))\r\n",
+                   zone_list, affected_count);
+
+            for (uint8_t k = 0; k < affected_count; k++)
+            {
+                uint8_t z = affected_zones[k];
+                uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+                printf("    Z%2d: dist=%4dmm  signal=%6d  baseline=%6d  (drop=%u%%)\r\n",
+                       z, Results.distance_mm[idx], Results.signal_per_spad[idx],
+                       g_baseline_signal[z], affected_drop[k]);
+            }
+            printf("\r\n");
+        }
+        else
+        {
+            uint16_t min_d = 9999, max_d = 0;
+            uint32_t min_s = 999999, max_s = 0;
+            uint8_t  frame_valid = 0;
+
+            for (int z = 0; z < NUM_ZONES; z++)
+            {
+                if (!g_zone_valid[z]) continue;
+                uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+                if (Results.target_status[idx] != 0 &&
+                    Results.target_status[idx] != 5 &&
+                    Results.target_status[idx] != 9) continue;
+
+                frame_valid++;
+                if (Results.distance_mm[idx] < min_d) min_d = Results.distance_mm[idx];
+                if (Results.distance_mm[idx] > max_d) max_d = Results.distance_mm[idx];
+                if (Results.signal_per_spad[idx] < min_s) min_s = Results.signal_per_spad[idx];
+                if (Results.signal_per_spad[idx] > max_s) max_s = Results.signal_per_spad[idx];
+            }
+
+            if (frame_valid > 0)
+            {
+                printf(". zones=%2d  dist=%4d-%4dmm  signal=%5d-%5d\r\n",
+                       frame_valid, min_d, max_d, min_s, max_s);
+            }
+        }
     }
 }
 
+static void VL53L5CX_MotionTest(void)
+{
+    (void)MOTION_INDICATOR_THRESH;
+    // Reserved for future hardware motion indicator integration
+}
 
 /* ================================================================
    SECTION 22: ASSERT CALLBACK
    ================================================================ */
 
 #ifdef USE_FULL_ASSERT
-/**
- * @brief  Report an assertion failure
- *
- *         Breaks into debugger (if attached) otherwise traps
- *         in an infinite loop.
- */
 void assert_failed(uint8_t *file, uint32_t line)
 {
     UNUSED(file);
@@ -1510,19 +1475,23 @@ void assert_failed(uint8_t *file, uint32_t line)
 }
 #endif
 
-
 /* ================================================================
    SECTION 23: DEBUG HELPER
    ================================================================ */
 
-/**
- * @brief  Clean and invalidate the entire D-Cache
- *
- *         Placed in .keep_me section to prevent linker removal.
- *         Useful for debugging DMA/cache coherency issues.
- */
 __attribute__((section(".keep_me")))
 void app_clean_invalidate_dbg(void)
 {
     SCB_CleanInvalidateDCache();
+}
+
+/* ================================================================
+   SECTION 24: UNUSED FORWARD DECLARATION SUPPRESSION
+   ================================================================ */
+
+/* SD_ReadRawImage is declared but not used — suppress warning */
+static int SD_ReadRawImage(uint8_t *img_buf, uint32_t *data_size_p)
+{
+    (void)img_buf; (void)data_size_p;
+    return -1;
 }
