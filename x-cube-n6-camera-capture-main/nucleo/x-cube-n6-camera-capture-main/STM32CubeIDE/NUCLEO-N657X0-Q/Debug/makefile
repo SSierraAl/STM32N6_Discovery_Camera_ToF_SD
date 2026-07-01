@@ -73,6 +73,9 @@ default.size.stdout \
 OBJDUMP_LIST += \
 x-cube-n6-camera-capture-nucleo.list \
 
+OBJCOPY_HEX += \
+x-cube-n6-camera-capture-nucleo.hex \
+
 OBJCOPY_BIN += \
 x-cube-n6-camera-capture-nucleo.bin \
 
@@ -99,6 +102,11 @@ x-cube-n6-camera-capture-nucleo.list: $(EXECUTABLES) makefile objects.list $(OPT
 	@echo 'Finished building: $@'
 	@echo ' '
 
+x-cube-n6-camera-capture-nucleo.hex: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
+	arm-none-eabi-objcopy  -O ihex $(EXECUTABLES) "x-cube-n6-camera-capture-nucleo.hex"
+	@echo 'Finished building: $@'
+	@echo ' '
+
 x-cube-n6-camera-capture-nucleo.bin: $(EXECUTABLES) makefile objects.list $(OPTIONAL_TOOL_DEPS)
 	arm-none-eabi-objcopy  -O binary $(EXECUTABLES) "x-cube-n6-camera-capture-nucleo.bin"
 	@echo 'Finished building: $@'
@@ -106,10 +114,10 @@ x-cube-n6-camera-capture-nucleo.bin: $(EXECUTABLES) makefile objects.list $(OPTI
 
 # Other Targets
 clean:
-	-$(RM) default.size.stdout x-cube-n6-camera-capture-nucleo.bin x-cube-n6-camera-capture-nucleo.elf x-cube-n6-camera-capture-nucleo.list x-cube-n6-camera-capture-nucleo.map
+	-$(RM) default.size.stdout x-cube-n6-camera-capture-nucleo.bin x-cube-n6-camera-capture-nucleo.elf x-cube-n6-camera-capture-nucleo.hex x-cube-n6-camera-capture-nucleo.list x-cube-n6-camera-capture-nucleo.map
 	-@echo ' '
 
-secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST) $(OBJCOPY_BIN)
+secondary-outputs: $(SIZE_OUTPUT) $(OBJDUMP_LIST) $(OBJCOPY_HEX) $(OBJCOPY_BIN)
 
 fail-specified-linker-script-missing:
 	@echo 'Error: Cannot find the specified linker script. Check the linker settings in the build configuration.'

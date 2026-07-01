@@ -151,6 +151,7 @@ static void VL53L5CX_StartSequence(void);
 static void VL53L5CX_Validate(void);
 static void VL53L5CX_ReadingTest(void);
 
+
 /* ---- External References ---- */
 extern void  vPortSetupTimerInterrupt(void);
 extern int   __uncached_bss_start__;
@@ -214,6 +215,13 @@ int main(void)
     /* Basic HAL initialization */
     HAL_Init();
     Setup_Mpu();
+
+
+
+
+
+
+
     SCB_EnableICache();
 
 #if defined(USE_DCACHE)
@@ -221,6 +229,8 @@ int main(void)
     SCB_EnableDCache();
 #endif
 
+
+    //VL53L5CX_Validate();
     /* Start FreeRTOS scheduler */
     return main_freertos();
 }
@@ -726,6 +736,8 @@ static void btn_thread_fct(void *arg)
             if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) != GPIO_PIN_SET)
                 continue;
 
+
+            VL53L5CX_ReadingTest();
             /* Activate illumination and status LEDs */
             WS2812_TurnOn();
             BSP_LED_Off(LED_GREEN);
@@ -861,9 +873,62 @@ static void main_thread_fct(void *arg)
 
     /* ---- Clocks + Console + Fuses ---- */
     SystemClock_Config();
+
+
+
+
     vPortSetupTimerInterrupt();
     CONSOLE_Config();
     Fuse_Programming();
+
+
+
+
+
+    HAL_Delay(10);
+
+    printf("[PWR] All VDDIO domains enabled for Arduino I/O\n");
+
+
+
+
+
+
+
+
+
+    /* === FORCE CONTROL PINS EARLY === */
+    __HAL_RCC_GPIOD_CLK_ENABLE();
+    __HAL_RCC_GPIOH_CLK_ENABLE();
+
+    GPIO_InitTypeDef GPIO_InitStruct = {0};
+
+    // PWR_EN (PD0) HIGH
+    GPIO_InitStruct.Pin   = GPIO_PIN_0;
+    GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+    GPIO_InitStruct.Pull  = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_HIGH;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+
+    // LPn (PD6) HIGH
+    GPIO_InitStruct.Pin = GPIO_PIN_6;
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+
+    // RST (PH5) HIGH
+    GPIO_InitStruct.Pin = GPIO_PIN_5;
+    HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
+
+    HAL_Delay(100);  // Give sensor time to stabilize with proper levels
+
+    printf("[EARLY GPIO] Control pins forced HIGH before I2C init\n");
+
+
+
+
+
 
     /* ---- Illumination System (WS2812) ---- */
     printf("[INIT] Light system\n");
@@ -874,7 +939,26 @@ static void main_thread_fct(void *arg)
     /* ---- VL53L5CX ToF Sensor (I2C1 + GPIO) ---- */
     VL53L5CX_I2C_Init();
     VL53L5CX_GPIO_Init();
+
+
+    /* Enable ALL VDDIO domains for Arduino pins stability */
+    //HAL_PWREx_EnableVddIO1();
+    HAL_PWREx_EnableVddIO2();
+    for (volatile uint32_t d = 0; d < 500000; d++);
+    HAL_PWREx_EnableVddIO3();
+    for (volatile uint32_t d = 0; d < 500000; d++);
+    HAL_PWREx_EnableVddIO4();
+    for (volatile uint32_t d = 0; d < 500000; d++);
+
+
+
+
+
+
+
     VL53L5CX_StartSequence();
+
+
 
     /* ---- PSRAM Initialization ---- */
 #ifdef STM32N6570_DK_REV
@@ -921,6 +1005,21 @@ static void main_thread_fct(void *arg)
 
     HAL_PWREx_EnableVddIO5();
     for (volatile uint32_t d = 0; d < 500000; d++);
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
     RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
     PeriphClkInit.PeriphClockSelection  = RCC_PERIPHCLK_SDMMC2;
@@ -1170,12 +1269,36 @@ static void VL53L5CX_I2C_Init(void)
     if (HAL_I2CEx_ConfigFastModePlus(&hi2c1, I2C_FASTMODEPLUS_ENABLE) != HAL_OK) {
         //Error_Handler();
     }
+
+    printf("Testing I2C bus...\n");
+
+    // Test simple write to sensor address
+    status = HAL_I2C_IsDeviceReady(&hi2c1, (0x29 << 1), 10, 100);
+    printf("VL53L5CX at 0x29 ready? %s (status=%d)\n",
+           (status == HAL_OK) ? "YES" : "NO", status);
+
+    // Scanner más lento
+    for (uint8_t addr = 0x08; addr < 0x78; addr++) {
+        if (HAL_I2C_IsDeviceReady(&hi2c1, (addr << 1), 3, 50) == HAL_OK) {
+            printf("Device found at 0x%02X\n", addr);
+        }
+    }
+
+
+
 }
 
 
 /* ================================================================
    SECTION 21: VL53L5CX TIME-OF-FLIGHT SENSOR FUNCTIONS
    ================================================================ */
+
+
+
+
+
+
+
 
 /**
  * @brief  Initialize GPIO pins for VL53L5CX control signals
@@ -1187,22 +1310,50 @@ static void VL53L5CX_I2C_Init(void)
  */
 static void VL53L5CX_GPIO_Init(void)
 {
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+//    GPIO_InitTypeDef GPIO_InitStruct = {0};
+//
+//    /* PWR_EN (PD0) - Power Enable output */
+//    GPIO_InitStruct.Pin = GPIO_PIN_0;
+//    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+//    GPIO_InitStruct.Pull = GPIO_NOPULL;
+//    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+//    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+//
+//    /* I2C_RST (PE7) - Reset output */
+//    GPIO_InitStruct.Pin = GPIO_PIN_5;
+//    HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+//
+//    /* LPn (PD6) - Low Power mode disable output */
+//    GPIO_InitStruct.Pin = GPIO_PIN_6;
+//    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+//
 
-    /* PWR_EN (PD0) - Power Enable output */
-    GPIO_InitStruct.Pin = GPIO_PIN_0;
-    GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-    /* I2C_RST (PE7) - Reset output */
-    GPIO_InitStruct.Pin = GPIO_PIN_7;
-    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    /* LPn (PD6) - Low Power mode disable output */
-    GPIO_InitStruct.Pin = GPIO_PIN_6;
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+	__HAL_RCC_GPIOD_CLK_ENABLE();
+	__HAL_RCC_GPIOH_CLK_ENABLE();
+
+	// PWR_EN
+	GPIO_InitStruct.Pin   = GPIO_PIN_0;
+	GPIO_InitStruct.Mode  = GPIO_MODE_OUTPUT_PP;
+	GPIO_InitStruct.Pull  = GPIO_NOPULL;
+	GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+
+	// LPn
+	GPIO_InitStruct.Pin = GPIO_PIN_6;
+	HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+
+	// RST (PH5)
+	GPIO_InitStruct.Pin = GPIO_PIN_5;
+	HAL_GPIO_Init(GPIOH, &GPIO_InitStruct);
+	HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
+
+	printf("GPIO control pins forced to 3.3V\n");
+
 }
 
 /**
@@ -1216,23 +1367,43 @@ static void VL53L5CX_GPIO_Init(void)
  */
 static void VL53L5CX_StartSequence(void)
 {
+//    printf("\n=== ToF Sensor Power Up ===\n");
+//
+//    /* Step 1: Enable power (PWR_EN = HIGH) */
+//    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+//    HAL_Delay(10);  /* Power stabilization delay */
+//
+//    /* Step 2: Reset pulse (active LOW) */
+//    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_RESET);
+//    HAL_Delay(10);
+//    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
+//    HAL_Delay(10);
+//
+//    /* Step 3: Disable Low Power mode (LPn = HIGH) */
+//    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+//    HAL_Delay(100);
+//
+//    printf("[OK] Sensor power-up complete\n\n");
+
+
     printf("\n=== ToF Sensor Power Up ===\n");
 
-    /* Step 1: Enable power (PWR_EN = HIGH) */
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
-    HAL_Delay(10);  /* Power stabilization delay */
+	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);  // PWR_EN
+	HAL_Delay(20);
 
-    /* Step 2: Reset pulse (active LOW) */
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
-    HAL_Delay(10);
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_SET);
-    HAL_Delay(10);
+	// Reset pulse on PH5
+	HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_RESET);
+	HAL_Delay(20);
+	HAL_GPIO_WritePin(GPIOH, GPIO_PIN_5, GPIO_PIN_SET);
+	HAL_Delay(20);
 
-    /* Step 3: Disable Low Power mode (LPn = HIGH) */
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
-    HAL_Delay(100);
+	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);  // LPn
+	HAL_Delay(100);
 
-    printf("[OK] Sensor power-up complete\n\n");
+	printf("[OK] Sensor power-up complete\n");
+
+
+
 }
 
 /**
@@ -1315,6 +1486,8 @@ static void VL53L5CX_ReadingTest(void)
 
     /* Read 6 sample frames */
     for (int i = 0; i < 6; i++) {
+    //while(1)
+
         vl53l5cx_check_data_ready(&Dev, &isReady);
         if (isReady) {
             vl53l5cx_get_ranging_data(&Dev, &Results);

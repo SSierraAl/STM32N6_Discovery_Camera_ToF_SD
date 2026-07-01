@@ -29,7 +29,7 @@ extern "C" {
    ================================================================ */
 
 /** Number of WS2812 LEDs in the chain (MUST match your hardware) */
-#define WS2812_NUM_LEDS             2
+#define WS2812_NUM_LEDS             12
 
 /** Default brightness (0-100%) */
 #define WS2812_BRIGHTNESS_DEFAULT   10
