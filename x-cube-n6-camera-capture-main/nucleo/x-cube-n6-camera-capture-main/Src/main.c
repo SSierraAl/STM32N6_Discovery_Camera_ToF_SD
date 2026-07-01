@@ -198,7 +198,10 @@ typedef struct {
 
 #define SD_HEADER_TAG       0x49444745U
 
-static uint32_t SD_IMG_BASE_BLOCK = 1000;
+/* Starting SD block for snapshot storage.
+   Must match SD_SNAP_BASE_BLOCK in app_config.h (3072).
+   The Python reader also uses SNAP_BASE = 3072. */
+static uint32_t SD_IMG_BASE_BLOCK = SD_SNAP_BASE_BLOCK;
 
 
 /* ================================================================
