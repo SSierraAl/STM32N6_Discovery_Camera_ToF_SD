@@ -925,11 +925,6 @@ static void main_thread_fct(void *arg)
 
     printf("[EARLY GPIO] Control pins forced HIGH before I2C init\n");
 
-
-
-
-
-
     /* ---- Illumination System (WS2812) ---- */
     printf("[INIT] Light system\n");
     MX_GPDMA1_Init();
@@ -939,25 +934,7 @@ static void main_thread_fct(void *arg)
     /* ---- VL53L5CX ToF Sensor (I2C1 + GPIO) ---- */
     VL53L5CX_I2C_Init();
     VL53L5CX_GPIO_Init();
-
-
-    /* Enable ALL VDDIO domains for Arduino pins stability */
-    //HAL_PWREx_EnableVddIO1();
-    HAL_PWREx_EnableVddIO2();
-    for (volatile uint32_t d = 0; d < 500000; d++);
-    HAL_PWREx_EnableVddIO3();
-    for (volatile uint32_t d = 0; d < 500000; d++);
-    HAL_PWREx_EnableVddIO4();
-    for (volatile uint32_t d = 0; d < 500000; d++);
-
-
-
-
-
-
-
     VL53L5CX_StartSequence();
-
 
 
     /* ---- PSRAM Initialization ---- */
