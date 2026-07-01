@@ -1,4 +1,0 @@
-D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Middlewares/ST/filex/common/drivers/fx_stm32_sd_driver.c:258:13:sd_read_data	48	static,ignoring_inline_asm
-D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Middlewares/ST/filex/common/drivers/fx_stm32_sd_driver.c:342:13:sd_write_data	40	static,ignoring_inline_asm
-D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Middlewares/ST/filex/common/drivers/fx_stm32_sd_driver.c:36:12:check_sd_status.constprop	16	static
-D:/STM_CODES/Discovery/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32Cube_FW_N6/Middlewares/ST/filex/common/drivers/fx_stm32_sd_driver.c:57:7:fx_stm32_sd_driver	32	static
