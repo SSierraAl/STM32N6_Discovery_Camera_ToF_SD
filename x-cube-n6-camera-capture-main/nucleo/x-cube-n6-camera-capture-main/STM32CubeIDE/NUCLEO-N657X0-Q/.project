@@ -272,6 +272,11 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/vd66gy_isp_param_conf.h</locationURI>
 		</link>
 		<link>
+			<name>Inc/vl53l5cx_detection.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Inc/vl53l5cx_detection.h</locationURI>
+		</link>
+		<link>
 			<name>Inc/ws2812.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/ws2812.h</locationURI>
@@ -350,6 +355,11 @@
 			<name>Src/stm32n6xx_ll_sdmmc.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Src/stm32n6xx_ll_sdmmc.c</locationURI>
+		</link>
+		<link>
+			<name>Src/vl53l5cx_detection.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Src/vl53l5cx_detection.c</locationURI>
 		</link>
 		<link>
 			<name>Src/ws2812.c</name>
