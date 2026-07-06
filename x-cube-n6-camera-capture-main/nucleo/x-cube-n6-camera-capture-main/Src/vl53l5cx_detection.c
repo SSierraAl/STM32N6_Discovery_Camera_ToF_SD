@@ -24,6 +24,8 @@
 static I2C_HandleTypeDef *s_hi2c = NULL;
 static VL53L5CX_Configuration  s_dev;
 static VL53L5CX_ResultsData    s_results;
+static VL53L5CX_Motion_Configuration s_motion_config;
+static uint8_t s_motion_initialized = 0;
 
 static uint32_t  s_baseline_signal[VL53L5CX_DET_NUM_ZONES] = {0};
 static uint16_t  s_baseline_distance[VL53L5CX_DET_NUM_ZONES] = {0};
@@ -161,6 +163,22 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
     vl53l5cx_set_target_order(&s_dev, VL53L5CX_TARGET_ORDER_CLOSEST);
     vl53l5cx_set_sharpener_percent(&s_dev, 10);
     vl53l5cx_set_ranging_mode(&s_dev, VL53L5CX_RANGING_MODE_CONTINUOUS);
+
+    /* Initialize motion indicator plugin */
+#ifndef VL53L5CX_DISABLE_MOTION_INDICATOR
+    int motion_st = vl53l5cx_motion_indicator_init(&s_dev, &s_motion_config, resolution);
+    if (motion_st) {
+        printf("[ToF] WARN: Motion indicator init failed: %d\n", motion_st);
+        s_motion_initialized = 0;
+    } else {
+        s_motion_initialized = 1;
+        printf("[ToF] Motion indicator enabled\n");
+    }
+#else
+    s_motion_initialized = 0;
+    printf("[ToF] Motion indicator disabled (compile flag)\n");
+#endif
+
     printf("[ToF] Configured: res=%d, int=%dms, freq=%dHz\n",
            resolution, integration_ms, freq_hz);
 }
@@ -322,10 +340,22 @@ int VL53L5CX_Update(void)
             signal_drop = (uint32_t)diff * 100 / s_baseline_signal[z];
         }
 
-        if (signal_drop > VL53L5CX_DET_THRESHOLD_PCT) {
+        /* Check signal drop threshold */
+        int signal_triggered = (signal_drop > VL53L5CX_DET_THRESHOLD_PCT);
+
+        /* Check motion indicator threshold */
+        int motion_triggered = 0;
+        if (s_motion_initialized) {
+            uint32_t motion_val = s_results.motion_indicator.motion[s_motion_config.map_id[z]];
+            motion_triggered = (motion_val >= VL53L5CX_DET_MOTION_THRESH);
+        }
+
+        /* Detection triggers if EITHER signal drop OR motion exceeds threshold */
+        if (signal_triggered || motion_triggered) {
             uint8_t k = s_last_result.affected_count;
             s_last_result.affected_zones[k] = (uint8_t)z;
-            s_last_result.affected_drop[k] = signal_drop;
+            /* Store drop% for signal trigger, or motion value for motion trigger */
+            s_last_result.affected_drop[k] = signal_triggered ? signal_drop : s_results.motion_indicator.motion[s_motion_config.map_id[z]];
             s_last_result.affected_count++;
             s_last_insect_detected = 1;
             s_last_result.insect_detected = 1;

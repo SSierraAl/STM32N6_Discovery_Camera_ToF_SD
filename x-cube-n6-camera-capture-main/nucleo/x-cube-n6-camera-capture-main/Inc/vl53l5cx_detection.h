@@ -32,10 +32,22 @@
    Configuration Constants
    ================================================================ */
 
-#define VL53L5CX_DET_NUM_ZONES        16      /* 4x4 resolution = 16 zones */
+/* Resolution selector:
+   - 4 = VL53L5CX_RESOLUTION_4X4  (16 zones, faster, lower granularity)
+   - 8 = VL53L5CX_RESOLUTION_8X8  (64 zones, slower, higher granularity) */
+#define VL53L5CX_DET_RESOLUTION       8
+
+#if VL53L5CX_DET_RESOLUTION == 8
+#define VL53L5CX_DET_NUM_ZONES        64
+#elif VL53L5CX_DET_RESOLUTION == 4
+#define VL53L5CX_DET_NUM_ZONES        16
+#else
+#error "VL53L5CX_DET_RESOLUTION must be 4 or 8"
+#endif
+
 #define VL53L5CX_DET_BASELINE_SAMPLES 10      /* Frames to learn baseline */
 #define VL53L5CX_DET_THRESHOLD_PCT    6       /* Signal drop % for detection */
-#define VL53L5CX_DET_MOTION_THRESH    20      /* Motion indicator threshold */
+#define VL53L5CX_DET_MOTION_THRESH    40      /* Motion indicator threshold (per zone) */
 
 /* Adaptive baseline filter:
    When enabled, slowly updates baseline using EMA for zones NOT
@@ -45,22 +57,20 @@
 #define VL53L5CX_DET_EMA_DIVIDER      256     /* Smoothing factor */
 
 /* Debug output for Python visualization:
-   Prints ZFRAME line every N frames. Set to 0 to disable. */
-#define VL53L5CX_DET_DEBUG_FRAME_INTERVAL 2
+   Set to 0 because debug prints are now in main.c insect_detection_task.
+   The task calls VL53L5CX_PrintZFrame() and VL53L5CX_PrintAllZoneParams() directly. */
+#define VL53L5CX_DET_DEBUG_FRAME_INTERVAL 0
 
 /* Debug: Print ALL ToF parameters per zone (detailed table)
-   Set to 1 to enable, 0 to disable. */
-#define VL53L5CX_DET_DEBUG_ALLPARAMS    0
+   Set to 1 to enable, 0 to disable. Only affects console verbosity. */
+#define VL53L5CX_DET_DEBUG_ALLPARAMS    1
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 10
 
-/* Zone mask presets */
-#define VL53L5CX_DET_ZONES_ALL        0xFFFF
-#define VL53L5CX_DET_ZONES_CENTER_4   0x0660
-#define VL53L5CX_DET_ZONES_TOP_ROW    0x000F
-#define VL53L5CX_DET_ZONES_BOTTOM_ROW 0xF000
-#define VL53L5CX_DET_ZONES_LEFT_COL   0x1111
-#define VL53L5CX_DET_ZONES_RIGHT_COL  0x8888
-#define VL53L5CX_DET_ZONES_CORNERS    0x8009
+/* Enable extended ZFRAME with ALL parameters:
+   1 = 209 fields per line (all params + motion)
+   0 = 65 fields per line (legacy: sig, base, dist, bdist only)
+   Python auto-detects both formats. */
+#define VL53L5CX_DET_DEBUG_EXTENDED_ZFRAME 1
 
 /* ================================================================
    Detection Result Structure
@@ -69,8 +79,8 @@
 typedef struct {
     uint8_t  insect_detected;       /* 1 if insect detected this frame */
     uint8_t  affected_count;        /* Number of affected zones */
-    uint8_t  affected_zones[16];    /* Zone indices */
-    uint32_t affected_drop[16];     /* Drop % per affected zone */
+    uint8_t  affected_zones[VL53L5CX_DET_NUM_ZONES];  /* Zone indices */
+    uint32_t affected_drop[VL53L5CX_DET_NUM_ZONES];   /* Drop % per affected zone */
     uint8_t  valid_measurements;    /* Number of valid zone readings */
 } VL53L5CX_DetectionResult_t;
 
@@ -104,12 +114,6 @@ void VL53L5CX_ResetBaseline(void);
 int  VL53L5CX_Update(void);                          /* Returns 1 if new data processed */
 int  VL53L5CX_IsInsectDetected(void);                /* Returns 1 if insect detected */
 VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void); /* Get last detection result */
-
-/* --- Zone Mask --- */
-void VL53L5CX_SetZoneMask(uint16_t mask);
-void VL53L5CX_EnableZoneFilter(uint8_t enable);
-void VL53L5CX_PrintZoneMask(void);
-uint16_t VL53L5CX_GetZoneMask(void);
 
 /* --- Debug / Diagnostics --- */
 void VL53L5CX_PrintAllZoneParams(void);
