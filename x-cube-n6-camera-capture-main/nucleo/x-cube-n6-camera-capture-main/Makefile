@@ -62,6 +62,7 @@ C_SOURCES += Src/app_cam.c
 C_SOURCES += Src/freertos_bsp.c
 C_SOURCES += Src/app_filex.c
 C_SOURCES += Src/app_sdcard.c
+C_SOURCES += Src/vlc5_tof.c
 
 # ASM sources
 ASM_SOURCES =
