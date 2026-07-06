@@ -156,6 +156,9 @@ extern int   __uncached_bss_end__;
 /* System readiness flag (set by main_thread, polled by btn_thread) */
 static volatile int system_ready = 0;
 
+/* ToF readiness flag (set by main_thread after full ToF init, polled by insect_task) */
+static volatile int tof_ready = 0;
+
 /* Snapshot counter and base block tracking */
 static uint32_t snap_count = 0;
 static uint32_t snap_base_block = SD_SNAP_BASE_BLOCK;
@@ -754,6 +757,9 @@ static void btn_thread_fct(void *arg)
 
             printf("[CAM] Captured in %lu ms!\n", (unsigned long)capture_elapsed);
 
+            /* Turn off illumination immediately after capture (before SD write) */
+            WS2812_TurnOff();
+
             uint32_t t_sd_start = HAL_GetTick();
 
             if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
@@ -769,10 +775,9 @@ static void btn_thread_fct(void *arg)
                 printf("[BTN] >>> SD write FAILED!\n");
             }
 
-            /* Deactivate illumination and restore status LEDs */
+            /* Restore status LEDs */
             BSP_LED_Off(LED_RED);
             BSP_LED_On(LED_GREEN);
-            WS2812_TurnOff();
 
             /* Wait for button release */
             while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
@@ -787,53 +792,22 @@ static void insect_detection_task(void *arg)
 {
     (void)arg;
 
-    /* ---- Wait for system to be ready ---- */
-    while (!system_ready) {
+    /* ---- Wait for ToF sensor to be fully initialized by main_thread ---- */
+    while (!tof_ready) {
         vTaskDelay(pdMS_TO_TICKS(500));
     }
 
     printf("\n============================================\n");
-    printf("  INSECT DETECTION MODE (VL53L5CX)\n");
-    printf("  Using vl53l5cx_detection module\n");
+    printf("  INSECT DETECTION TASK — STARTING\n");
+    printf("  ToF sensor already initialized.\n");
     printf("============================================\n\n");
-
-    /* ---- Initialize ToF sensor (already powered up by main_thread) ---- */
-    if (VL53L5CX_Init(&hi2c1) != 0) {
-        printf("[ERROR] VL53L5CX_Init failed! Scanning I2C bus...\n");
-        VL53L5CX_ScanI2CBus();
-        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    /* ---- Configure resolution, integration time, frequency ---- */
-#if VL53L5CX_DET_RESOLUTION == 8
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 800, 15);
-    printf("  Resolution: 8x8 (64 zones)\n");
-#else
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 800, 15);
-    printf("  Resolution: 4x4 (16 zones)\n");
-#endif
-
-    /* ---- Start continuous ranging ---- */
-    VL53L5CX_StartRanging();
-
-    /* ---- Learn baseline ---- */
-    VL53L5CX_LearnBaseline();
-
-    if (!VL53L5CX_IsBaselineReady()) {
-        printf("[ERROR] Baseline learning failed!\n");
-        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    printf("\n[MONITORING] Watching zones for insect passage...\n");
-    printf("  Camera will auto-capture on insect detection.\n\n");
 
     uint32_t capture_count = 0;
     uint32_t cooldown_frames = 0;
     const uint32_t COOLDOWN_FRAMES_VALUE = 30;
 
-    /* ---- Debug output counters (controlled from here) ---- */
+    /* ---- Debug output counter ---- */
     static uint32_t debug_frame_count = 0;
-    static uint32_t allparam_count    = 0;
 
     while (1) {
         /* ---- Update detection module ---- */
@@ -843,19 +817,12 @@ static void insect_detection_task(void *arg)
         }
 
         /* ---- Continuous debug output for Python monitor ---- */
+        /* Emit ZFRAME every 5 frames to reduce UART load */
         debug_frame_count++;
-        if (debug_frame_count >= 1) {
+        if (debug_frame_count >= 5) {
             debug_frame_count = 0;
             VL53L5CX_PrintZFrame();
         }
-
-#if VL53L5CX_DET_DEBUG_ALLPARAMS > 0
-        allparam_count++;
-        if (allparam_count >= VL53L5CX_DET_DEBUG_ALLPARAM_INT) {
-            allparam_count = 0;
-            VL53L5CX_PrintAllZoneParams();
-        }
-#endif
 
         /* ---- Check cooldown ---- */
         if (cooldown_frames > 0) cooldown_frames--;
@@ -864,29 +831,17 @@ static void insect_detection_task(void *arg)
         if (VL53L5CX_IsInsectDetected() && cooldown_frames == 0) {
             VL53L5CX_DetectionResult_t result = VL53L5CX_GetResult();
 
-            /* Build zone list string */
-            char zone_list[64] = {0};
-            for (uint8_t k = 0; k < result.affected_count; k++) {
-                char tmp[16];
-                sprintf(tmp, "Z%u", result.affected_zones[k]);
-                if (k == 0) strcpy(zone_list, tmp);
-                else { strcat(zone_list, ","); strcat(zone_list, tmp); }
+            /* Determine trigger source string */
+            const char *trig_str;
+            switch (result.trigger_source) {
+                case VL53L5CX_TRIG_SIGNAL: trig_str = "signal"; break;
+                case VL53L5CX_TRIG_MOTION: trig_str = "motion"; break;
+                case VL53L5CX_TRIG_BOTH:   trig_str = "signal+motion"; break;
+                default:                    trig_str = "unknown"; break;
             }
 
-            printf(">>> INSECT DETECTED! Zones: [%s] (%u zone(s))\n",
-                   zone_list, result.affected_count);
-
-            for (uint8_t k = 0; k < result.affected_count; k++) {
-                uint32_t sig; uint16_t dist; uint8_t st;
-                VL53L5CX_GetZoneData(result.affected_zones[k], &sig, &dist, &st);
-                uint32_t base_sig; uint16_t base_dist;
-                VL53L5CX_GetBaselineData(result.affected_zones[k], &base_sig, &base_dist);
-                printf("    Z%2d: dist=%4dmm  signal=%6d  baseline=%6d  (drop=%lu%%)\n",
-                       result.affected_zones[k], dist, sig, base_sig,
-                       (unsigned long)result.affected_drop[k]);
-            }
-
-            printf("\n");
+            printf(">>> INSECT DETECTED! Trigger: %s (%u zones)\n",
+                   trig_str, result.affected_count);
 
             /* ---- TRIGGER CAMERA CAPTURE ---- */
             printf("    Triggering camera capture...\n");
@@ -1014,9 +969,39 @@ static void main_thread_fct(void *arg)
     MX_TIM1_Init();
     WS2812_Init();
 
-    /* ---- VL53L5CX ToF Sensor (I2C1 + Power-Up) ---- */
+    /* ---- VL53L5CX ToF Sensor (I2C1 + Power-Up + Full Init) ---- */
     VL53L5CX_I2C_Init();
     VL53L5CX_PowerUp();
+
+    /* Initialize ToF sensor */
+    if (VL53L5CX_Init(&hi2c1) != 0) {
+        printf("[ERROR] VL53L5CX_Init failed! Scanning I2C bus...\n");
+        VL53L5CX_ScanI2CBus();
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    /* Configure resolution, integration time, frequency */
+#if VL53L5CX_DET_RESOLUTION == 8
+    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 800, 15);
+    printf("  ToF Resolution: 8x8 (64 zones)\n");
+#else
+    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 800, 15);
+    printf("  ToF Resolution: 4x4 (16 zones)\n");
+#endif
+
+    /* Start continuous ranging */
+    VL53L5CX_StartRanging();
+
+    /* Learn baseline */
+    VL53L5CX_LearnBaseline();
+
+    if (!VL53L5CX_IsBaselineReady()) {
+        printf("[ERROR] ToF baseline learning failed!\n");
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+
+    printf("[ToF] Ready — monitoring zones for insect passage.\n");
+    tof_ready = 1;
 
     /* ---- PSRAM Initialization ---- */
 #ifdef STM32N6570_DK_REV
