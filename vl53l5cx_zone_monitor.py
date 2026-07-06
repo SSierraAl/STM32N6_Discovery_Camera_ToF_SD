@@ -53,18 +53,23 @@ from collections import deque
 # ================================================================
 SERIAL_PORT = 'COM6'   # <-- Change to your port
 BAUD_RATE   = 115200    # Must match STM32 UART baud rate
-MAX_POINTS  = 150       # History length on plots
+MAX_POINTS  = 80        # History length on plots (reduced for speed)
 
 # Resolution: set manually to match firmware (VL53L5CX_DET_RESOLUTION in header)
 #   4 = 4x4 (16 zones), 8 = 8x8 (64 zones)
-RESOLUTION  = 8         # MUST match firmware setting!
+RESOLUTION  = 4         # MUST match firmware setting!
 
-# Data saving configuration
-SAVE_DATA = True        # Enable/disable data saving to CSV
+# Data saving configuration (disabled for performance - CSV I/O is slow)
+SAVE_DATA = False        # Enable/disable data saving to CSV
 DATA_FOLDER = 'zone_data'  # Folder to store data files
 
-# Field count per zone in extended ZFRAME
-ZONE_FIELDS = 12  # sig, base, dist, bdist, amb, sigma, refl, status, spads, targs, drop, valid
+# PERFORMANCE: Only plot these zones on line charts (heatmaps still show all)
+# For 8x8: plot first 8 zones (one row) to avoid 512 curve updates/frame
+# For 4x4: plot all 16 zones
+PLOT_ZONES_LINE = 8      # Number of zones to show on line charts
+
+# Compact ZFRAME format: temp + 4 fields per zone (sig, base, dist, motion)
+COMPACT_ZONE_FIELDS = 4  # sig, base, dist, motion
 
 # Derived from RESOLUTION (do not change manually)
 if RESOLUTION == 8:
@@ -74,19 +79,11 @@ else:
     NUM_ZONES = 16
     GRID_SIZE = 4
 
-# Zone field indices
+# Compact zone field indices
 F_SIG    = 0  # signal_per_spad
 F_BASE   = 1  # baseline signal_per_spad
 F_DIST   = 2  # distance_mm
-F_BDIST  = 3  # baseline distance_mm
-F_AMB    = 4  # ambient_per_spad
-F_SIGMA  = 5  # range_sigma_mm
-F_REFL   = 6  # reflectance %
-F_STATUS = 7  # target_status
-F_SPADS  = 8  # nb_spads_enabled
-F_TARGS  = 9  # nb_target_detected
-F_DROP   = 10 # signal drop %
-F_VALID  = 11 # zone valid flag
+F_MOTION = 3  # motion indicator
 
 # Color map for zones (viridis palette, extended for 8x8 = 64 zones)
 ZONE_COLORS_16 = [
@@ -153,11 +150,14 @@ def setup_data_saving():
 # SERIAL CONNECTION
 # ================================================================
 try:
-    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=0.1)
+    ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1.0)
     print(f"Connected to {SERIAL_PORT} @ {BAUD_RATE} baud")
 except Exception as e:
     print(f"Serial error: {e}")
     sys.exit(1)
+
+# Line accumulator for long ZFRAME lines (8x8 = ~4500 chars at 115200 baud)
+serial_buffer = ""
 
 # Initialize data saving
 data_file = setup_data_saving()
@@ -271,10 +271,10 @@ plot_motion.showGrid(x=True, y=True, alpha=0.3)
 plot_motion.addLegend(offset=(10, 10))
 
 motion_threshold_line = pg.InfiniteLine(
-    pos=20,
+    pos=40,
     angle=0,
     pen=pg.mkPen(color='orange', width=1.5, style=QtCore.Qt.DashLine),
-    label='Motion Threshold (20)',
+    label='Motion Threshold (40)',
     labelOpts={'color': 'orange', 'position': 0.95}
 )
 plot_motion.addItem(motion_threshold_line, ignoreBounds=True)
@@ -421,11 +421,12 @@ reflect_curves = {}
 spads_curves = {}
 motion_curves = {}
 
-for z in range(NUM_ZONES):
+# Only create curves for PLOT_ZONES_LINE zones (not all 64) to avoid lag
+for z in range(PLOT_ZONES_LINE):
     color = ZONE_COLORS[z % len(ZONE_COLORS)]
-    pen_main = pg.mkPen(color=color, width=2 if z < GRID_SIZE else 1, style=QtCore.Qt.SolidLine)
+    pen_main = pg.mkPen(color=color, width=2, style=QtCore.Qt.SolidLine)
     pen_base = pg.mkPen(color=color, width=1, style=QtCore.Qt.DotLine)
-    label = f'Z{z}' if z < GRID_SIZE else None
+    label = f'Z{z}'
 
     # Tab 1: Signal & Distance
     signal_curves[z] = plot_signal.plot(name=label, pen=pen_main)
@@ -485,23 +486,33 @@ def save_frame_to_csv(zones, motion, temp, detections):
 # PARSING FUNCTIONS
 # ================================================================
 
-def parse_extended_zframe_line(line):
+def parse_compact_zframe_line(line):
     """
-    Parse extended ZFRAME format:
-    ZFRAME,temp,sig0,base0,dist0,bdist0,amb0,sigma0,refl0,status0,spads0,targs0,drop0,valid0,...,motion0,...,motionN
+    Parse compact ZFRAME format:
+    ZFRAME,temp,sig0,base0,dist0,motion0,sig1,base1,dist1,motion1,...
 
     Layout after split:
       parts[0]   = "ZFRAME" (label)
       parts[1]   = temp
-      parts[2:]  = zone data (12 fields per zone × N zones)
-      last N     = motion data
+      parts[2:]  = zone data (4 fields per zone: sig, base, dist, motion)
 
-    Resolution is set manually via RESOLUTION config (4 or 8).
+    Auto-detects resolution from field count:
+      (total_fields - 2) / 4 = number of zones
     """
     parts = line.split(',')
 
-    min_parts = 2 + NUM_ZONES * ZONE_FIELDS + 1
-    if len(parts) < min_parts:
+    # Expected: 1 (label) + 1 (temp) + NUM_ZONES * 4
+    expected_parts = 2 + NUM_ZONES * COMPACT_ZONE_FIELDS
+
+    # Auto-detect resolution from actual field count
+    actual_zones = (len(parts) - 2) // COMPACT_ZONE_FIELDS
+    if actual_zones not in (16, 64):
+        return None
+    if actual_zones != NUM_ZONES:
+        print(f"\n[WARN] Resolution mismatch: firmware={actual_zones} zones, script={NUM_ZONES}. Adjust RESOLUTION config.")
+        return None
+
+    if len(parts) != expected_parts:
         return None
 
     try:
@@ -510,39 +521,36 @@ def parse_extended_zframe_line(line):
         return None
 
     zones = []
-    for z in range(NUM_ZONES):
-        base_idx = 2 + z * ZONE_FIELDS   # offset by 2: label + temp
-        if base_idx + ZONE_FIELDS > len(parts):
-            return None
+    for z in range(actual_zones):
+        base_idx = 2 + z * COMPACT_ZONE_FIELDS
         try:
-            zone_data = {
-                'sig':    int(parts[base_idx + F_SIG]),
-                'base':   int(parts[base_idx + F_BASE]),
-                'dist':   int(parts[base_idx + F_DIST]),
-                'bdist':  int(parts[base_idx + F_BDIST]),
-                'amb':    int(parts[base_idx + F_AMB]),
-                'sigma':  int(parts[base_idx + F_SIGMA]),
-                'refl':   int(parts[base_idx + F_REFL]),
-                'status': int(parts[base_idx + F_STATUS]),
-                'spads':  int(parts[base_idx + F_SPADS]),
-                'targs':  int(parts[base_idx + F_TARGS]),
-                'drop':   int(parts[base_idx + F_DROP]),
-                'valid':  int(parts[base_idx + F_VALID]),
-            }
-            zones.append(zone_data)
+            sig  = int(parts[base_idx + F_SIG])
+            base = int(parts[base_idx + F_BASE])
+            dist = int(parts[base_idx + F_DIST])
+            mot  = int(parts[base_idx + F_MOTION])
+
+            # Compute drop% from signal vs baseline
+            drop_pct = 0
+            if base > 0:
+                drop_pct = abs(base - sig) * 100 // base
+
+            zones.append({
+                'sig': sig, 'base': base,
+                'dist': dist, 'bdist': 0,
+                'amb': 0, 'sigma': 0, 'refl': 0,
+                'status': 0, 'spads': 0, 'targs': 0,
+                'drop': drop_pct, 'valid': 1 if sig > 0 else 0
+            })
         except (ValueError, IndexError):
             return None
 
-    # Parse motion data (last NUM_ZONES fields)
-    motion_start = 2 + NUM_ZONES * ZONE_FIELDS
+    # Extract motion from zone data
     motion = []
-    for m in range(NUM_ZONES):
-        if motion_start + m < len(parts):
-            try:
-                motion.append(int(parts[motion_start + m]))
-            except ValueError:
-                motion.append(0)
-        else:
+    for z in range(actual_zones):
+        base_idx = 2 + z * COMPACT_ZONE_FIELDS
+        try:
+            motion.append(int(parts[base_idx + F_MOTION]))
+        except (ValueError, IndexError):
             motion.append(0)
 
     return {'temp': temp, 'zones': zones, 'motion': motion}
@@ -550,13 +558,16 @@ def parse_extended_zframe_line(line):
 
 def parse_legacy_zframe_line(line):
     """
-    Parse legacy ZFRAME format (backward compatible):
+    Parse legacy ZFRAME format (backward compatible, no temp):
     ZFRAME,sig0,base0,dist0,bdist0,...,sig15,base15,dist15,bdist15
 
-    parts[0] = "ZFRAME", parts[1..64] = zone data (4 fields × 16 zones)
+    parts[0] = "ZFRAME", parts[1..] = zone data (4 fields × N zones)
+    No temp field, no motion field.
     """
     parts = line.split(',')
-    if len(parts) != 1 + NUM_ZONES * 4:
+    # Expected: 1 (label) + NUM_ZONES * 4
+    expected = 1 + NUM_ZONES * 4
+    if len(parts) != expected:
         return None
 
     zones = []
@@ -568,9 +579,9 @@ def parse_legacy_zframe_line(line):
             dist  = int(parts[base_idx + 2])
             bdist = int(parts[base_idx + 3])
 
-            drop_pct = 0.0
+            drop_pct = 0
             if base > 0:
-                drop_pct = abs(base - sig) * 100.0 / base
+                drop_pct = abs(base - sig) * 100 // base
 
             zones.append({
                 'sig': sig, 'base': base,
@@ -583,18 +594,6 @@ def parse_legacy_zframe_line(line):
             return None
 
     return {'temp': 0, 'zones': zones, 'motion': [0] * NUM_ZONES}
-
-
-def parse_allparam_line(line):
-    """
-    Parse ALLPARAM format (same as extended ZFRAME but prefixed with ALLPARAM):
-    ALLPARAM,temp,sig0,base0,dist0,bdist0,amb0,sigma0,refl0,status0,spads0,targs0,drop0,valid0,...
-
-    parts[0] = "ALLPARAM", parts[1] = temp, parts[2:] = zone data
-    """
-    # Replace "ALLPARAM" with "ZFRAME" so the extended parser handles it
-    zframe_line = "ZFRAME" + line[9:]  # "ALLPARAM" is 8 chars, "ZFRAME" is 6 → line[9:] skips "ALLPARAM,"
-    return parse_extended_zframe_line(zframe_line)
 
 
 def parse_motion_line(line):
@@ -623,11 +622,18 @@ def parse_motion_line(line):
 # UPDATE FUNCTION
 # ================================================================
 def update_data():
-    global frame_count, total_detections, current_temp
+    global frame_count, total_detections, current_temp, serial_buffer
 
     try:
+        # Read all available bytes into buffer (handles long 8x8 ZFRAME lines)
         while ser.in_waiting > 0:
-            chunk = ser.readline().decode('utf-8', errors='ignore').strip()
+            raw = ser.read(ser.in_waiting)
+            serial_buffer += raw.decode('utf-8', errors='ignore')
+
+        # Process complete lines from buffer
+        while '\n' in serial_buffer:
+            line, serial_buffer = serial_buffer.split('\n', 1)
+            chunk = line.strip().rstrip('\r')
             if not chunk:
                 continue
 
@@ -662,19 +668,10 @@ def update_data():
                     motion_global2_history.append(motion_data['global2'])
                 continue
 
-            # Handle ALLPARAM lines (richer data, same structure)
-            if chunk.startswith("ALLPARAM,"):
-                data = parse_allparam_line(chunk)
-                if data is None:
-                    continue
-                # Process same as ZFRAME but don't increment frame_count
-                process_zone_data(data)
-                continue
-
             # Handle ZFRAME lines (per-zone data)
             if chunk.startswith("ZFRAME"):
-                # Try extended format first, fall back to legacy
-                data = parse_extended_zframe_line(chunk)
+                # Try compact format first, fall back to legacy
+                data = parse_compact_zframe_line(chunk)
                 if data is None:
                     data = parse_legacy_zframe_line(chunk)
                 if data is None:
@@ -705,7 +702,7 @@ def process_zone_data(data):
     else:
         temp_text.setColor('#00FF00')
 
-    # Update all zone data
+    # Store data for ALL zones (needed for heatmaps)
     for z in range(NUM_ZONES):
         zone_signal_data[z].append(zones[z]['sig'])
         zone_baseline_data[z].append(zones[z]['base'])
@@ -721,18 +718,20 @@ def process_zone_data(data):
         zone_valid_data[z].append(zones[z]['valid'])
         zone_motion_data[z].append(motion[z] if z < len(motion) else 0)
 
-        # Update curves - Tab 1: Signal & Distance
+    # Update curves ONLY for PLOT_ZONES_LINE zones (not all 64 - too slow)
+    for z in range(PLOT_ZONES_LINE):
+        # Tab 1: Signal & Distance
         signal_curves[z].setData(list(zone_signal_data[z]))
         signal_baseline_curves[z].setData(list(zone_baseline_data[z]))
         distance_curves[z].setData(list(zone_distance_data[z]))
         distance_baseline_curves[z].setData(list(zone_bdistance_data[z]))
 
-        # Update curves - Tab 2: Detection Metrics
+        # Tab 2: Detection Metrics
         drop_curves[z].setData(list(zone_drop_data[z]))
         ambient_curves[z].setData(list(zone_ambient_data[z]))
         sigma_curves[z].setData(list(zone_sigma_data[z]))
 
-        # Update curves - Tab 3: Advanced
+        # Tab 3: Advanced
         reflect_curves[z].setData(list(zone_reflect_data[z]))
         spads_curves[z].setData(list(zone_spads_data[z]))
         motion_curves[z].setData(list(zone_motion_data[z]))
@@ -862,7 +861,7 @@ app.aboutToQuit.connect(close_app)
 
 timer = QtCore.QTimer()
 timer.timeout.connect(update_data)
-timer.start(10)
+timer.start(50)  # 50ms = 20Hz update (was 10ms, reduced for performance)
 
 print("=" * 70)
 print(f"VL53L5CX {GRID_SIZE}x{GRID_SIZE} Zone Monitor - ALL PARAMETERS ENABLED")
