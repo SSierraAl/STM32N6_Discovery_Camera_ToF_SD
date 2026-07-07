@@ -45,9 +45,26 @@
 #error "VL53L5CX_DET_RESOLUTION must be 4 or 8"
 #endif
 
-#define VL53L5CX_DET_BASELINE_SAMPLES 10      /* Frames to learn baseline */
-#define VL53L5CX_DET_THRESHOLD_PCT    6       /* Signal drop % for detection */
-#define VL53L5CX_DET_MOTION_THRESH    40      /* Motion indicator threshold (per zone) */
+/* Resolution-specific baseline samples:
+   8x8 zones are smaller and noisier, need more samples for stable baseline. */
+#if VL53L5CX_DET_RESOLUTION == 8
+#define VL53L5CX_DET_BASELINE_SAMPLES 30      /* 8x8: more samples for stability */
+#else
+#define VL53L5CX_DET_BASELINE_SAMPLES 10      /* 4x4: 10 samples enough */
+#endif
+
+/* Resolution-specific thresholds:
+   8x8 zones are 1/4 the area of 4x4 zones, so signal is noisier and
+   motion indicator is more sensitive. Use higher thresholds for 8x8. */
+#if VL53L5CX_DET_RESOLUTION == 8
+#define VL53L5CX_DET_THRESHOLD_PCT    15      /* 8x8: higher signal drop threshold (noisier) */
+#define VL53L5CX_DET_MOTION_THRESH    100     /* 8x8: higher motion threshold (more sensitive) */
+#define VL53L5CX_DET_MIN_AFFECTED_ZONES 1     /* 8x8: require 2 zones (reduce false triggers) */
+#else
+#define VL53L5CX_DET_THRESHOLD_PCT     6      /* 4x4: lower signal drop threshold */
+#define VL53L5CX_DET_MOTION_THRESH    40      /* 4x4: lower motion threshold */
+#define VL53L5CX_DET_MIN_AFFECTED_ZONES 1     /* 4x4: single zone triggers */
+#endif
 
 /* Motion indicator tuning (applied at ST API level):
    These are set in VL53L5CX_Configure() after motion init.
@@ -59,9 +76,15 @@
    - MOTION_EXTRA_NOISE_SIGMA: extra noise floor to ignore small fluctuations.
      ST API: extra_noise_sigma. Higher = more tolerant of ambient noise.
      Set to 0 to disable. */
-#define VL53L5CX_DET_MOTION_MIN_ZONES       2     /* min zones for detection */
-#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  2     /* temporal accumulations */
-#define VL53L5CX_DET_MOTION_EXTRA_NOISE     0     /* extra noise sigma (0=disabled) */
+#if VL53L5CX_DET_RESOLUTION == 8
+#define VL53L5CX_DET_MOTION_MIN_ZONES       2     /* 8x8: require 2 zones for ST motion API */
+#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  3     /* 8x8: more persistence (3 frames) */
+#define VL53L5CX_DET_MOTION_EXTRA_NOISE     50    /* 8x8: add noise floor */
+#else
+#define VL53L5CX_DET_MOTION_MIN_ZONES       1     /* 4x4: single zone for ST motion API */
+#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  2     /* 4x4: 2 frame persistence */
+#define VL53L5CX_DET_MOTION_EXTRA_NOISE     0     /* 4x4: no extra noise */
+#endif
 
 /* Adaptive baseline filter:
    When enabled, slowly updates baseline using EMA for zones NOT

@@ -276,9 +276,23 @@ void VL53L5CX_LearnBaseline(void)
 
     VL53L5CX_ResetBaseline();
 
-    printf("[BASELINE] Learning %d samples...\n", VL53L5CX_DET_BASELINE_SAMPLES);
+    /* Number of samples to average for baseline */
+    const uint8_t baseline_samples = VL53L5CX_DET_BASELINE_SAMPLES;
 
-    for (uint8_t i = 0; i < VL53L5CX_DET_BASELINE_SAMPLES; i++) {
+    /* Settling frames: discard these frames AFTER baseline to let
+       the motion indicator plugin stabilize its internal state.
+       8x8 needs more settling (smaller zones = noisier motion). */
+#if VL53L5CX_DET_RESOLUTION == 8
+    const uint8_t settle_frames = 20;
+#else
+    const uint8_t settle_frames = 5;
+#endif
+
+    printf("[BASELINE] Learning %d samples + %d settle frames...\n",
+           baseline_samples, settle_frames);
+
+    /* ---- Phase 1: Collect baseline samples ---- */
+    for (uint8_t i = 0; i < baseline_samples; i++) {
         if (!VL53L5CX_WaitForDataReady(1000)) continue;
         if (VL53L5CX_GetData() != 0) continue;
 
@@ -293,17 +307,24 @@ void VL53L5CX_LearnBaseline(void)
                 s_zone_valid[z] = 1;
             }
         }
-        printf("  [%d/%d]\r", i + 1, VL53L5CX_DET_BASELINE_SAMPLES);
+        printf("  [BASELINE %d/%d]\r", i + 1, baseline_samples);
     }
 
     /* Compute averages */
     uint8_t valid_count = 0;
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
         if (is_zone_enabled(z) && s_zone_valid[z]) {
-            s_baseline_signal[z] /= VL53L5CX_DET_BASELINE_SAMPLES;
-            s_baseline_distance[z] /= VL53L5CX_DET_BASELINE_SAMPLES;
+            s_baseline_signal[z] /= baseline_samples;
+            s_baseline_distance[z] /= baseline_samples;
             valid_count++;
         }
+    }
+
+    /* ---- Phase 2: Settle frames (discard, let motion indicator stabilize) ---- */
+    for (uint8_t i = 0; i < settle_frames; i++) {
+        if (!VL53L5CX_WaitForDataReady(1000)) continue;
+        if (VL53L5CX_GetData() != 0) continue;
+        printf("  [SETTLE %d/%d]\r", i + 1, settle_frames);
     }
 
     s_baseline_ready = 1;
@@ -376,10 +397,16 @@ int VL53L5CX_Update(void)
 
             if (signal_triggered) frame_trig_signal = 1;
             if (motion_triggered) frame_trig_motion = 1;
+
+            /* Debug: print which zone triggered and why */
+            printf("[DBG] Z%02d drop=%lu%%(>%d=%d) motion=%lu(>%d=%d)\n",
+                   z, (unsigned long)signal_drop, VL53L5CX_DET_THRESHOLD_PCT, signal_triggered,
+                   (unsigned long)s_results.motion_indicator.motion[s_motion_config.map_id[z]],
+                   VL53L5CX_DET_MOTION_THRESH, motion_triggered);
         }
 
         /* Only set insect_detected if enough zones are affected (min-zones filter) */
-        if (s_last_result.affected_count >= VL53L5CX_DET_MOTION_MIN_ZONES) {
+        if (s_last_result.affected_count >= VL53L5CX_DET_MIN_AFFECTED_ZONES) {
             s_last_insect_detected = 1;
             s_last_result.insect_detected = 1;
             s_last_result.trigger_source = (frame_trig_signal | frame_trig_motion)
