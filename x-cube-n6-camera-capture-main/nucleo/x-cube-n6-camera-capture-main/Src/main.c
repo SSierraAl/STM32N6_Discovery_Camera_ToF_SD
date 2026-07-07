@@ -129,7 +129,7 @@ static void  btn_thread_fct(void *arg);
 static void  insect_detection_task(void *arg);
 
 /* ---- SD Card Operations ---- */
-static void  SD_Benchmarks(void);
+static int   SD_Benchmarks(void);
 static int   SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
                               uint32_t w, uint32_t h, uint32_t pixel_format);
 static int   SD_ReadRawImage(uint8_t *img_buf, uint32_t *data_size_p);
@@ -160,8 +160,9 @@ static volatile int system_ready = 0;
 static uint32_t snap_count = 0;
 static uint32_t snap_base_block = SD_SNAP_BASE_BLOCK;
 
-/** Camera frame buffer — allocated in PSRAM for DMA access */
-static uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
+/** Camera frame buffer — allocated in PSRAM for DMA access.
+    NOTE: Not static — referenced via extern by app_cam.c (CAM_ContinuousSnap). */
+uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
 
 /** SD batch-write buffer — allocated in PSRAM for multi-block writes.
     Size = SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE = 64 * 512 = 32 KB.
@@ -169,6 +170,20 @@ static uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
     in a single HAL_SD_WriteBlocks() call, drastically reducing the
     number of HAL API calls per snapshot (~307 instead of ~19,643). */
 static uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
+
+/** Save buffer for continuous mode — allocated in PSRAM.
+    In CONTINUOUS mode (CAPTURE_MODE=1), the camera writes continuously
+    to capture_buf. On ToF trigger, we stop the pipe, copy the frame
+    to save_buf, restart the pipe, then write save_buf to SD card.
+    This prevents buffer corruption during the SD write. */
+#if CAPTURE_MODE == 1
+static uint8_t save_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
+#endif
+
+/** Capture-in-progress guard — prevents simultaneous captures.
+    When set to 1, new detection events are ignored until the current
+    capture + SD write is complete. */
+static volatile int capture_in_progress = 0;
 
 
 /* ================================================================
@@ -473,8 +488,9 @@ static uint8_t sd_rbuf[SD_BENCH_BYTES];
  * @brief  Run SD card read/write speed benchmark
  *
  *         Writes and reads 64 blocks (32 KB), reports speed and integrity.
+ *         Returns 0 on success (both write + read pass), -1 on any failure.
  */
-static void SD_Benchmarks(void)
+static int SD_Benchmarks(void)
 {
     uint32_t          t0, t1;
     HAL_StatusTypeDef st;
@@ -502,7 +518,8 @@ static void SD_Benchmarks(void)
     } else {
         printf("FAIL HAL=0x%08lX STA=0x%08lX\n",
                (unsigned long)st, (unsigned long)SDMMC2->STA);
-        return;
+        printf(" ==== Done ====\n");
+        return -1;
     }
 
     /* Read benchmark */
@@ -522,9 +539,12 @@ static void SD_Benchmarks(void)
     } else {
         printf("FAIL HAL=0x%08lX STA=0x%08lX\n",
                (unsigned long)st, (unsigned long)SDMMC2->STA);
+        printf(" ==== Done ====\n");
+        return -1;
     }
 
     printf(" ==== Done ====\n");
+    return 0;
 }
 
 
@@ -825,6 +845,11 @@ static void insect_detection_task(void *arg)
     }
 
     printf("\n[MONITORING] Watching zones for insect passage...\n");
+#if CAPTURE_MODE == 1
+    printf("  Capture Mode: CONTINUOUS (camera always running, fast snap)\n");
+#else
+    printf("  Capture Mode: ON-DEMAND (full init per capture)\n");
+#endif
     printf("  Camera will auto-capture on insect detection.\n\n");
 
     uint32_t capture_count = 0;
@@ -846,14 +871,14 @@ static void insect_detection_task(void *arg)
         debug_frame_count++;
         if (debug_frame_count >= 1) {
             debug_frame_count = 0;
-            VL53L5CX_PrintZFrame();
+            //VL53L5CX_PrintZFrame();
         }
 
 #if VL53L5CX_DET_DEBUG_ALLPARAMS > 0
         allparam_count++;
         if (allparam_count >= VL53L5CX_DET_DEBUG_ALLPARAM_INT) {
             allparam_count = 0;
-            VL53L5CX_PrintAllZoneParams();
+            //VL53L5CX_PrintAllZoneParams();
         }
 #endif
 
@@ -862,64 +887,115 @@ static void insect_detection_task(void *arg)
 
         /* ---- Insect detected? ---- */
         if (VL53L5CX_IsInsectDetected() && cooldown_frames == 0) {
+            /* Guard: skip if a capture is already in progress */
+            if (capture_in_progress) {
+                printf("    [SKIP] Capture already in progress, ignoring detection.\n");
+                continue;
+            }
+            capture_in_progress = 1;
+
             VL53L5CX_DetectionResult_t result = VL53L5CX_GetResult();
 
-            /* Build zone list string */
-            char zone_list[64] = {0};
-            for (uint8_t k = 0; k < result.affected_count; k++) {
-                char tmp[16];
-                sprintf(tmp, "Z%u", result.affected_zones[k]);
-                if (k == 0) strcpy(zone_list, tmp);
-                else { strcat(zone_list, ","); strcat(zone_list, tmp); }
+            const char *trig_str;
+            switch (result.trigger_source) {
+                case VL53L5CX_TRIG_SIGNAL: trig_str = "signal"; break;
+                case VL53L5CX_TRIG_MOTION: trig_str = "motion"; break;
+                case VL53L5CX_TRIG_BOTH:   trig_str = "signal+motion"; break;
+                default:                    trig_str = "unknown"; break;
             }
 
-            printf(">>> INSECT DETECTED! Zones: [%s] (%u zone(s))\n",
-                   zone_list, result.affected_count);
+            printf(">>> INSECT DETECTED! Trigger: %s (%u zones)\n",
+                   trig_str, result.affected_count);
 
-            for (uint8_t k = 0; k < result.affected_count; k++) {
-                uint32_t sig; uint16_t dist; uint8_t st;
-                VL53L5CX_GetZoneData(result.affected_zones[k], &sig, &dist, &st);
-                uint32_t base_sig; uint16_t base_dist;
-                VL53L5CX_GetBaselineData(result.affected_zones[k], &base_sig, &base_dist);
-                printf("    Z%2d: dist=%4dmm  signal=%6d  baseline=%6d  (drop=%lu%%)\n",
-                       result.affected_zones[k], dist, sig, base_sig,
-                       (unsigned long)result.affected_drop[k]);
-            }
-
-            printf("\n");
 
             /* ---- TRIGGER CAMERA CAPTURE ---- */
-            printf("    Triggering camera capture...\n");
+            uint32_t t_total_start = HAL_GetTick();
+            uint32_t t_cam_start, t_cam_end, t_sd_start, t_sd_end;
+            uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
+            const uint8_t *frame_to_save = NULL;
+
+#if CAPTURE_MODE == 1
+            /* CONTINUOUS MODE: Snap FIRST (frame already in capture_buf), 
+               then illuminate + save. Zero delay before snap! */
+            printf("    [CONTINUOUS] Snapping current frame (IMMEDIATE)...\n");
+            BSP_LED_Off(LED_GREEN);
+            BSP_LED_On(LED_RED);
+
+            /* SNAP FIRST — memcpy the frame that's already sitting in capture_buf */
+            t_cam_start = HAL_GetTick();
+            int rc = CAM_ContinuousSnap(save_buf, frame_size);
+            t_cam_end = HAL_GetTick();
+
+            /* NOW illuminate (after snap, no delay) */
+            WS2812_TurnOn();
+            WS2812_TurnOff();
+
+            if (rc == 0) {
+                frame_to_save = save_buf;
+                printf("    [CONTINUOUS] Frame snapped in %lu ms\n", (unsigned long)(t_cam_end - t_cam_start));
+            } else {
+                printf("    [ERROR] ContinuousSnap failed (rc=%d)!\n", rc);
+                BSP_LED_Off(LED_RED);
+                BSP_LED_On(LED_GREEN);
+                capture_in_progress = 0;
+                continue;
+            }
+#else
+            /* ON-DEMAND MODE: Full init + warmup + capture + deinit */
+            printf("    [ON-DEMAND] Full camera init + capture...\n");
             BSP_LED_Off(LED_GREEN);
             BSP_LED_On(LED_RED);
             WS2812_TurnOn();
             vTaskDelay(pdMS_TO_TICKS(100));
             WS2812_TurnOff();
 
+            t_cam_start = HAL_GetTick();
             int rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
                                             SNAP_WIDTH, SNAP_HEIGHT,
                                             SNAP_FPS, SNAP_WARMUP_FRAMES);
+            t_cam_end = HAL_GetTick();
 
             if (rc == 0) {
-                uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
-                uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
-                uint32_t target_block = snap_base_block + (capture_count * total_blocks);
-                uint32_t saved_base = SD_IMG_BASE_BLOCK;
-                SD_IMG_BASE_BLOCK = target_block;
-
-                if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
-                    capture_count++;
-                    printf("    >>> Snapshot #%lu SAVED!\n", (unsigned long)capture_count);
-                } else {
-                    printf("    [ERROR] SD write failed!\n");
-                }
-                SD_IMG_BASE_BLOCK = saved_base;
+                frame_to_save = capture_buf;
+                printf("    [ON-DEMAND] Captured in %lu ms\n", (unsigned long)(t_cam_end - t_cam_start));
             } else {
                 printf("    [ERROR] Camera capture failed (rc=%d)!\n", rc);
+                BSP_LED_Off(LED_RED);
+                BSP_LED_On(LED_GREEN);
+                capture_in_progress = 0;
+                continue;
+            }
+#endif
+
+            /* ---- SAVE TO SD CARD ---- */
+            t_sd_start = HAL_GetTick();
+            uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+            uint32_t target_block = snap_base_block + (capture_count * total_blocks);
+            uint32_t saved_base = SD_IMG_BASE_BLOCK;
+            SD_IMG_BASE_BLOCK = target_block;
+
+            if (SD_StoreRawImage(frame_to_save, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
+                capture_count++;
+                snap_count++;
+                t_sd_end = HAL_GetTick();
+                printf("    >>> Snapshot #%lu SAVED (block %lu)\n",
+                       (unsigned long)capture_count, (unsigned long)target_block);
+                printf("    [PERF] Camera=%lums + SD=%lums = Total=%lums\n",
+                       (unsigned long)(t_cam_end - t_cam_start),
+                       (unsigned long)(t_sd_end - t_sd_start),
+                       (unsigned long)(t_sd_end - t_total_start));
+            } else {
+                t_sd_end = HAL_GetTick();
+                printf("    [ERROR] SD write failed! (SD took %lu ms)\n",
+                       (unsigned long)(t_sd_end - t_sd_start));
             }
 
+            SD_IMG_BASE_BLOCK = saved_base;
+
+            /* ---- Restore LEDs and enter cooldown ---- */
             BSP_LED_Off(LED_RED);
             BSP_LED_On(LED_GREEN);
+            capture_in_progress = 0;
             cooldown_frames = COOLDOWN_FRAMES_VALUE;
             printf("    Cooldown: %d frames (%.1f seconds)\n\n",
                    COOLDOWN_FRAMES_VALUE, (float)COOLDOWN_FRAMES_VALUE / 15.0f);
@@ -1058,77 +1134,127 @@ static void main_thread_fct(void *arg)
     LL_APB5_GRP1_EnableClockLowPower(~0);
     LL_MISC_EnableClockLowPower(~0);
 
-    /* ---- SD Card Initialization ---- */
+    /* ---- SD Card Initialization (with retry loop) ----
+       SD card detection can be flaky on first attempt due to:
+       - Card power-up timing (some cards need 1-2 seconds to stabilize)
+       - Signal integrity on SDIO lines
+       - Card state machine not ready after reset
+
+       We retry the full init sequence up to SD_MAX_RETRIES times until success. */
+    #define SD_MAX_RETRIES  5
+    #define SD_RETRY_DELAY_MS 500
+
     printf("\n=== SD Card Detection Test ===\n");
 
     HAL_PWREx_EnableVddIO5();
     for (volatile uint32_t d = 0; d < 500000; d++);
 
-    RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
-    PeriphClkInit.PeriphClockSelection  = RCC_PERIPHCLK_SDMMC2;
-    PeriphClkInit.Sdmmc2ClockSelection  = RCC_SDMMC2CLKSOURCE_HCLK;
-    HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit);
+    int sd_ok = 0;
+    for (int attempt = 1; attempt <= SD_MAX_RETRIES && !sd_ok; attempt++) {
+        printf("[SD] Init attempt %d/%d ...\n", attempt, SD_MAX_RETRIES);
 
-    __HAL_RCC_SDMMC2_FORCE_RESET();
-    for (volatile uint32_t d = 0; d < 1000; d++);
-    __HAL_RCC_SDMMC2_RELEASE_RESET();
-    for (volatile uint32_t d = 0; d < 1000; d++);
+        RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+        PeriphClkInit.PeriphClockSelection  = RCC_PERIPHCLK_SDMMC2;
+        PeriphClkInit.Sdmmc2ClockSelection  = RCC_SDMMC2CLKSOURCE_HCLK;
+        HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit);
 
-    hsd1.Instance             = SDMMC2;
-    hsd1.Init.ClockEdge       = SDMMC_CLOCK_EDGE_RISING;
-    hsd1.Init.ClockPowerSave  = SDMMC_CLOCK_POWER_SAVE_DISABLE;
-    hsd1.Init.BusWide         = SDMMC_BUS_WIDE_4B;
-    hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-    hsd1.Init.ClockDiv        = 2;
-    hsd1.State                = HAL_SD_STATE_RESET;
+        /* Full peripheral reset between attempts */
+        __HAL_RCC_SDMMC2_FORCE_RESET();
+        HAL_Delay(10);
+        __HAL_RCC_SDMMC2_RELEASE_RESET();
+        HAL_Delay(10);
 
-    HAL_SD_MspInit(&hsd1);
-    HAL_StatusTypeDef status = HAL_SD_Init(&hsd1);
+        hsd1.Instance             = SDMMC2;
+        hsd1.Init.ClockEdge       = SDMMC_CLOCK_EDGE_RISING;
+        hsd1.Init.ClockPowerSave  = SDMMC_CLOCK_POWER_SAVE_DISABLE;
+        hsd1.Init.BusWide         = SDMMC_BUS_WIDE_4B;
+        hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
+        hsd1.Init.ClockDiv        = 2;
+        hsd1.State                = HAL_SD_STATE_RESET;
 
-    if (status == HAL_OK) {
-        printf("[SD] Switching to 4-bit bus width...\n");
-        status = HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B);
+        HAL_SD_MspInit(&hsd1);
+        HAL_StatusTypeDef status = HAL_SD_Init(&hsd1);
+
         if (status == HAL_OK) {
-            hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
-            printf("[SD] 4-bit bus width configured successfully\n");
+            printf("[SD] Switching to 4-bit bus width...\n");
+            status = HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B);
+            if (status == HAL_OK) {
+                hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
+                printf("[SD] 4-bit bus width configured successfully\n");
+            } else {
+                printf("[SD] Wide bus config failed (%lu), staying in 1-bit\n", (unsigned long)status);
+                status = HAL_OK;
+            }
+        }
+
+        if (status == HAL_OK) {
+            uint64_t     total_bytes = (uint64_t)hsd1.SdCard.BlockNbr * (uint64_t)hsd1.SdCard.BlockSize;
+            unsigned long size_mb    = (unsigned long)(total_bytes / 1048576UL);
+            unsigned long size_gb    = (unsigned long)(total_bytes / 1073741824UL);
+
+            printf("\n*** SD CARD DETECTED SUCCESSFULLY! (attempt %d) ***\n\n", attempt);
+            printf("  Card Size: %lu GB (%lu MB)\n", size_gb, size_mb);
+            printf("  Blocks:    %lu x %lu bytes\n",
+                   (unsigned long)hsd1.SdCard.BlockNbr, (unsigned long)hsd1.SdCard.BlockSize);
+            printf("  Card Type: %s\n",
+                   (hsd1.SdCard.CardType == CARD_SDHC_SDXC) ? "SDHC/SDXC" : "SDSC");
+            printf("  Bus Width: %s\n",
+                   (hsd1.Init.BusWide == SDMMC_BUS_WIDE_4B) ? "4-bit" : "1-bit");
+
+            /* Storage capacity info */
+            uint32_t blocks_per_snap = (SD_IMG_HEADER_SIZE + SNAP_FRAME_SIZE + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+            uint32_t available_blocks = hsd1.SdCard.BlockNbr - SD_SNAP_BASE_BLOCK;
+            uint32_t max_snaps = available_blocks / blocks_per_snap;
+            printf("  Blocks/snapshot: %lu\n", (unsigned long)blocks_per_snap);
+            printf("  Max snapshots: ~%lu (from block %lu onward)\n",
+                   (unsigned long)max_snaps, (unsigned long)SD_SNAP_BASE_BLOCK);
+            printf("\n");
+
+            /* Benchmark: both write AND read must pass.
+               Common failure: [W] OK but [R] FAIL — card detected but not stable.
+               Treat benchmark failure as init failure and retry. */
+            int bench_rc = SD_Benchmarks();
+            if (bench_rc == 0) {
+                sd_ok = 1;
+            } else {
+                printf("[SD] Benchmark FAILED on attempt %d (retrying full init)\n", attempt);
+                HAL_SD_DeInit(&hsd1);
+                if (attempt < SD_MAX_RETRIES)
+                    HAL_Delay(SD_RETRY_DELAY_MS);
+            }
         } else {
-            printf("[SD] Wide bus config failed (%lu), staying in 1-bit\n", (unsigned long)status);
-            status = HAL_OK;
+            printf("[SD] Init failed: HAL=0x%08lX (retrying in %d ms)\n",
+                   (unsigned long)status, SD_RETRY_DELAY_MS);
+            /* Deinit to clean up state before retry */
+            HAL_SD_DeInit(&hsd1);
+            if (attempt < SD_MAX_RETRIES)
+                HAL_Delay(SD_RETRY_DELAY_MS);
         }
     }
 
-    if (status == HAL_OK) {
-        uint64_t     total_bytes = (uint64_t)hsd1.SdCard.BlockNbr * (uint64_t)hsd1.SdCard.BlockSize;
-        unsigned long size_mb    = (unsigned long)(total_bytes / 1048576UL);
-        unsigned long size_gb    = (unsigned long)(total_bytes / 1073741824UL);
-
-        printf("\n*** SD CARD DETECTED SUCCESSFULLY! ***\n\n");
-        printf("  Card Size: %lu GB (%lu MB)\n", size_gb, size_mb);
-        printf("  Blocks:    %lu x %lu bytes\n",
-               (unsigned long)hsd1.SdCard.BlockNbr, (unsigned long)hsd1.SdCard.BlockSize);
-        printf("  Card Type: %s\n",
-               (hsd1.SdCard.CardType == CARD_SDHC_SDXC) ? "SDHC/SDXC" : "SDSC");
-        printf("  Bus Width: %s\n",
-               (hsd1.Init.BusWide == SDMMC_BUS_WIDE_4B) ? "4-bit" : "1-bit");
-
-        /* Storage capacity info */
-        uint32_t blocks_per_snap = (SD_IMG_HEADER_SIZE + SNAP_FRAME_SIZE + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
-        uint32_t available_blocks = hsd1.SdCard.BlockNbr - SD_SNAP_BASE_BLOCK;
-        uint32_t max_snaps = available_blocks / blocks_per_snap;
-        printf("  Blocks/snapshot: %lu\n", (unsigned long)blocks_per_snap);
-        printf("  Max snapshots: ~%lu (from block %lu onward)\n",
-               (unsigned long)max_snaps, (unsigned long)SD_SNAP_BASE_BLOCK);
-        printf("\n");
-
-        SD_Benchmarks();
-    } else {
-        printf("[ERROR] SD card init failed: %lu\n", (unsigned long)status);
+    if (!sd_ok) {
+        printf("\n[ERROR] SD card NOT detected after %d attempts! Camera captures will fail.\n", SD_MAX_RETRIES);
     }
 
     /* ---- System Ready ---- */
     printf("\n===========================================\n");
     printf("[INFO] System READY!\n");
-    printf("[INFO] Camera: ON-DEMAND (init per capture)\n");
+
+#if CAPTURE_MODE == 1
+    /* CONTINUOUS MODE: Start camera at boot so it's always capturing */
+    printf("[INFO] Capture Mode: CONTINUOUS (camera always running)\n");
+    printf("[INFO] Starting camera + warmup at boot...\n");
+    int cam_rc = CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE,
+                                     SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
+    if (cam_rc != 0) {
+        printf("[ERROR] CAM_ContinuousStart failed (rc=%d)! Camera not ready.\n", cam_rc);
+    } else {
+        printf("[INFO] Camera is RUNNING and capturing continuously.\n");
+    }
+#else
+    printf("[INFO] Capture Mode: ON-DEMAND (init per capture)\n");
+#endif
+
     printf("[INFO] Press USER button (PC13) to capture + save.\n");
     printf("===========================================\n\n");
 
@@ -1144,8 +1270,8 @@ static void main_thread_fct(void *arg)
 /**
  * @brief  Configure DCMIPP and CSI clock sources
  *
- *         DCMIPP → IC17 from PLL2/3
- *         CSI    → IC18 from PLL1/40
+ *         DCMIPP → IC17 from PLL2/3 = 125/3 ≈ 41.7 MHz
+ *         CSI    → IC18 from PLL1/40 = 200/40 = 5 MHz
  */
 HAL_StatusTypeDef MX_DCMIPP_ClockConfig(DCMIPP_HandleTypeDef *hdcmipp)
 {

@@ -171,8 +171,19 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
         printf("[ToF] WARN: Motion indicator init failed: %d\n", motion_st);
         s_motion_initialized = 0;
     } else {
+        /* Apply ST-level anti-false-trigger parameters:
+           - min_nb_for_global_detection: require N zones before global motion fires
+           - nb_of_temporal_accumulations: accumulate N frames before motion fires
+           - extra_noise_sigma: add noise floor to ignore small fluctuations */
+        s_motion_config.min_nb_for_global_detection = VL53L5CX_DET_MOTION_MIN_ZONES;
+        s_motion_config.nb_of_temporal_accumulations = VL53L5CX_DET_MOTION_PERSIST_FRAMES;
+        s_motion_config.extra_noise_sigma = VL53L5CX_DET_MOTION_EXTRA_NOISE;
+
         s_motion_initialized = 1;
-        printf("[ToF] Motion indicator enabled\n");
+        printf("[ToF] Motion indicator enabled (min_zones=%d, persist=%d, extra_noise=%d)\n",
+               VL53L5CX_DET_MOTION_MIN_ZONES,
+               VL53L5CX_DET_MOTION_PERSIST_FRAMES,
+               VL53L5CX_DET_MOTION_EXTRA_NOISE);
     }
 #else
     s_motion_initialized = 0;
@@ -315,8 +326,13 @@ int VL53L5CX_Update(void)
     /* Reset detection result */
     s_last_insect_detected = 0;
     s_last_result.insect_detected = 0;
+    s_last_result.trigger_source = 0;
     s_last_result.affected_count = 0;
     s_last_result.valid_measurements = 0;
+
+    /* Track which methods triggered across all zones */
+    uint8_t frame_trig_signal = 0;
+    uint8_t frame_trig_motion = 0;
 
     /* Check each enabled zone */
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
@@ -343,7 +359,7 @@ int VL53L5CX_Update(void)
         /* Check signal drop threshold */
         int signal_triggered = (signal_drop > VL53L5CX_DET_THRESHOLD_PCT);
 
-        /* Check motion indicator threshold */
+        /* Check motion indicator threshold (ST API handles persistence internally) */
         int motion_triggered = 0;
         if (s_motion_initialized) {
             uint32_t motion_val = s_results.motion_indicator.motion[s_motion_config.map_id[z]];
@@ -357,8 +373,19 @@ int VL53L5CX_Update(void)
             /* Store drop% for signal trigger, or motion value for motion trigger */
             s_last_result.affected_drop[k] = signal_triggered ? signal_drop : s_results.motion_indicator.motion[s_motion_config.map_id[z]];
             s_last_result.affected_count++;
+
+            if (signal_triggered) frame_trig_signal = 1;
+            if (motion_triggered) frame_trig_motion = 1;
+        }
+
+        /* Only set insect_detected if enough zones are affected (min-zones filter) */
+        if (s_last_result.affected_count >= VL53L5CX_DET_MOTION_MIN_ZONES) {
             s_last_insect_detected = 1;
             s_last_result.insect_detected = 1;
+            s_last_result.trigger_source = (frame_trig_signal | frame_trig_motion)
+                ? (frame_trig_signal && frame_trig_motion ? VL53L5CX_TRIG_BOTH
+                                                          : (frame_trig_signal ? VL53L5CX_TRIG_SIGNAL : VL53L5CX_TRIG_MOTION))
+                : 0;
         }
     }
 
@@ -590,98 +617,49 @@ void VL53L5CX_PrintAllZoneParams(void)
 }
 
 /**
- * @brief  PrintZFrame - emits ZFRAME line for Python monitoring
+ * @brief  PrintZFrame - emits compact ZFRAME line for Python monitoring
  *
- * EXTENDED FORMAT (when VL53L5CX_DET_DEBUG_EXTENDED_ZFRAME == 1):
- *   ZFRAME,temp,sig0,base0,dist0,bdist0,amb0,sigmm0,refl0,status0,spads0,targs0,drop0,valid0,...,sig15,...,valid15,motion0,...,motion15
+ * COMPACT FORMAT (when VL53L5CX_DET_ZFRAME_COMPACT == 1):
+ *   ZFRAME,temp,sig0,base0,dist0,motion0,sig1,base1,dist1,motion1,...
+ *   Per zone: 4 fields (signal, baseline_signal, distance, motion)
+ *   8x8 total: 1 + 64*4 = 257 values (~1500 chars at 115200 baud = ~13ms)
  *
- * LEGACY FORMAT (when VL53L5CX_DET_DEBUG_EXTENDED_ZFRAME == 0):
+ * LEGACY FORMAT (when VL53L5CX_DET_ZFRAME_COMPACT == 0):
  *   ZFRAME,sig0,base0,dist0,bdist0,...,sig15,base15,dist15,bdist15
+ *   Per zone: 4 fields (signal, baseline, distance, baseline_distance)
  */
 void VL53L5CX_PrintZFrame(void)
 {
-#if VL53L5CX_DET_DEBUG_EXTENDED_ZFRAME
-    /* Extended ZFRAME with ALL parameters */
+#if VL53L5CX_DET_ZFRAME_COMPACT
+    /* Compact ZFRAME: temp + 4 fields per zone (sig, base, dist, motion) */
     int8_t temp = s_results.silicon_temp_degc;
-    printf("ZFRAME,%d,", temp);
+    printf("ZFRAME,%d", temp);
 
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
+        uint32_t cur_sig = 0;
+        uint16_t cur_dist = 0;
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-
-        uint32_t cur_sig    = 0;
-        int16_t  cur_dist   = 0;
-        uint8_t  cur_stat   = 0;
-        uint32_t cur_ambient = 0;
-        uint16_t cur_sigma  = 0;
-        uint8_t  cur_reflect = 0;
-        uint32_t cur_spads  = 0;
-        uint8_t  cur_targets = 0;
-        uint8_t  cur_valid  = 0;
 
         if (s_zone_valid[z] && is_zone_enabled(z) &&
             (s_results.target_status[idx] == 0 ||
              s_results.target_status[idx] == 5 ||
              s_results.target_status[idx] == 9)) {
-            cur_sig    = s_results.signal_per_spad[idx];
-            cur_dist   = s_results.distance_mm[idx];
-            cur_stat   = s_results.target_status[idx];
-            cur_valid  = 1;
-
-#ifndef VL53L5CX_DISABLE_AMBIENT_PER_SPAD
-            cur_ambient = s_results.ambient_per_spad[idx];
-#endif
-#ifndef VL53L5CX_DISABLE_RANGE_SIGMA_MM
-            cur_sigma = s_results.range_sigma_mm[idx];
-#endif
-#ifndef VL53L5CX_DISABLE_REFLECTANCE_PERCENT
-            cur_reflect = s_results.reflectance[idx];
-#endif
-#ifndef VL53L5CX_DISABLE_NB_SPADS_ENABLED
-            cur_spads = s_results.nb_spads_enabled[idx];
-#endif
-#ifndef VL53L5CX_DISABLE_NB_TARGET_DETECTED
-            cur_targets = s_results.nb_target_detected[idx];
-#endif
+            cur_sig  = s_results.signal_per_spad[idx];
+            cur_dist = s_results.distance_mm[idx];
         }
 
-        uint32_t base_sig = s_baseline_signal[z];
-        uint16_t base_dist = s_baseline_distance[z];
-        uint32_t drop_pct = 0;
-        if (base_sig > 0) {
-            int32_t diff = (int32_t)base_sig - (int32_t)cur_sig;
-            if (diff < 0) diff = -diff;
-            drop_pct = (uint32_t)diff * 100 / base_sig;
-        }
-
-        if (z > 0) printf(",");
-        printf("%lu,%lu,%d,%d,%lu,%lu,%lu,%lu,%lu,%lu,%lu,%lu",
-               (unsigned long)cur_sig,
-               (unsigned long)base_sig,
-               cur_dist,
-               base_dist,
-               (unsigned long)cur_ambient,
-               (unsigned long)cur_sigma,
-               (unsigned long)cur_reflect,
-               (unsigned long)cur_stat,
-               (unsigned long)cur_spads,
-               (unsigned long)cur_targets,
-               (unsigned long)drop_pct,
-               (unsigned long)cur_valid);
-    }
-
-    /* Append motion indicator data */
 #ifndef VL53L5CX_DISABLE_MOTION_INDICATOR
-    printf(",");
-    for (int m = 0; m < VL53L5CX_DET_NUM_ZONES; m++) {
-        if (m > 0) printf(",");
-        printf("%lu", (unsigned long)s_results.motion_indicator.motion[m]);
-    }
+        uint32_t motion = s_results.motion_indicator.motion[z];
 #else
-    for (int m = 0; m < VL53L5CX_DET_NUM_ZONES; m++) {
-        printf(",0");
-    }
+        uint32_t motion = 0;
 #endif
 
+        printf(",%lu,%lu,%lu,%lu",
+               (unsigned long)cur_sig,
+               (unsigned long)s_baseline_signal[z],
+               (unsigned long)cur_dist,
+               (unsigned long)motion);
+    }
     printf("\r\n");
 
 #else

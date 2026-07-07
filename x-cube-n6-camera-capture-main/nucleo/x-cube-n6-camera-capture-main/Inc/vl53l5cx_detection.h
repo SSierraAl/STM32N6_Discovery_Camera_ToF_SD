@@ -35,7 +35,7 @@
 /* Resolution selector:
    - 4 = VL53L5CX_RESOLUTION_4X4  (16 zones, faster, lower granularity)
    - 8 = VL53L5CX_RESOLUTION_8X8  (64 zones, slower, higher granularity) */
-#define VL53L5CX_DET_RESOLUTION       8
+#define VL53L5CX_DET_RESOLUTION       4
 
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_NUM_ZONES        64
@@ -49,6 +49,20 @@
 #define VL53L5CX_DET_THRESHOLD_PCT    6       /* Signal drop % for detection */
 #define VL53L5CX_DET_MOTION_THRESH    40      /* Motion indicator threshold (per zone) */
 
+/* Motion indicator tuning (applied at ST API level):
+   These are set in VL53L5CX_Configure() after motion init.
+
+   - MOTION_MIN_ZONES: min zones that must detect motion for global trigger.
+     ST API: min_nb_for_global_detection. Set to 1 to disable.
+   - MOTION_PERSIST_FRAMES: frames to accumulate before motion fires.
+     ST API: nb_of_temporal_accumulations. Set to 1 to disable.
+   - MOTION_EXTRA_NOISE_SIGMA: extra noise floor to ignore small fluctuations.
+     ST API: extra_noise_sigma. Higher = more tolerant of ambient noise.
+     Set to 0 to disable. */
+#define VL53L5CX_DET_MOTION_MIN_ZONES       2     /* min zones for detection */
+#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  2     /* temporal accumulations */
+#define VL53L5CX_DET_MOTION_EXTRA_NOISE     0     /* extra noise sigma (0=disabled) */
+
 /* Adaptive baseline filter:
    When enabled, slowly updates baseline using EMA for zones NOT
    affected by detection. Compensates for natural drift (temperature,
@@ -56,28 +70,29 @@
 #define VL53L5CX_DET_ADAPTIVE_ENABLED 0
 #define VL53L5CX_DET_EMA_DIVIDER      256     /* Smoothing factor */
 
-/* Debug output for Python visualization:
-   Set to 0 because debug prints are now in main.c insect_detection_task.
-   The task calls VL53L5CX_PrintZFrame() and VL53L5CX_PrintAllZoneParams() directly. */
+/* Debug output (legacy, unused - prints are in main.c insect_task) */
 #define VL53L5CX_DET_DEBUG_FRAME_INTERVAL 0
 
-/* Debug: Print ALL ToF parameters per zone (detailed table)
-   Set to 1 to enable, 0 to disable. Only affects console verbosity. */
-#define VL53L5CX_DET_DEBUG_ALLPARAMS    1
-#define VL53L5CX_DET_DEBUG_ALLPARAM_INT 10
-
-/* Enable extended ZFRAME with ALL parameters:
-   1 = 209 fields per line (all params + motion)
-   0 = 65 fields per line (legacy: sig, base, dist, bdist only)
-   Python auto-detects both formats. */
-#define VL53L5CX_DET_DEBUG_EXTENDED_ZFRAME 1
+/* Streamlined ZFRAME format (always enabled):
+   Sends only the variables needed for insect detection:
+     ZFRAME,temp,sig0,base0,dist0,motion0,sig1,base1,dist1,motion1,...
+   Per zone: 4 fields (signal, baseline_signal, distance, motion)
+   Total for 8x8: 1 + 64*4 = 257 values (vs. 1 + 64*12 + 64 = 1345 in extended)
+   Python parses this compact format for all plots and heatmaps. */
+#define VL53L5CX_DET_ZFRAME_COMPACT 1
 
 /* ================================================================
    Detection Result Structure
    ================================================================ */
 
+/* Trigger source flags */
+#define VL53L5CX_TRIG_SIGNAL  0x01  /* Signal drop triggered detection */
+#define VL53L5CX_TRIG_MOTION  0x02  /* Motion indicator triggered detection */
+#define VL53L5CX_TRIG_BOTH    0x03  /* Both signal and motion triggered */
+
 typedef struct {
     uint8_t  insect_detected;       /* 1 if insect detected this frame */
+    uint8_t  trigger_source;        /* VL53L5CX_TRIG_SIGNAL / MOTION / BOTH */
     uint8_t  affected_count;        /* Number of affected zones */
     uint8_t  affected_zones[VL53L5CX_DET_NUM_ZONES];  /* Zone indices */
     uint32_t affected_drop[VL53L5CX_DET_NUM_ZONES];   /* Drop % per affected zone */

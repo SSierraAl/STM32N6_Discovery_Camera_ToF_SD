@@ -24,10 +24,10 @@
    ================================================================ */
 
 /** Snapshot resolution (width)  --  YUV422 format = 2 bytes/pixel */
-#define SNAP_WIDTH          2592
+#define SNAP_WIDTH          480
 
 /** Snapshot resolution (height) */
-#define SNAP_HEIGHT          1944
+#define SNAP_HEIGHT          480
 
 /** Camera frame rate (FPS).
     Valid values depend on resolution:
@@ -140,7 +140,19 @@
 #define SD_MAX_SNAPSHOTS       3000
 
 /* ================================================================
-   SECTION 4: BUTTON / LED PARAMETERS
+   SECTION 4: CAPTURE MODE SELECTION
+   ================================================================ */
+
+/** Capture mode for ToF-triggered photography.
+    0 = ON-DEMAND  — Camera off until trigger. Full init → warmup → capture → deinit cycle.
+                      Safe but slow (~400ms latency). Good for stationary/slow objects.
+    1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
+                      Very fast (~5-10ms latency). Good for fast-moving objects.
+                      Requires extra PSRAM buffer (~5MB) for frame copy during SD write. */
+#define CAPTURE_MODE             1
+
+/* ================================================================
+   SECTION 5: BUTTON / LED PARAMETERS
    ================================================================ */
 
 /** Debounce time for USER button press detection (milliseconds).

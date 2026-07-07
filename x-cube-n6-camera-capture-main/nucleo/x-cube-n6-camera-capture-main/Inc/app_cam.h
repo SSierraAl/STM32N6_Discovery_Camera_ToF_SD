@@ -70,6 +70,40 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
 int CAM_CaptureSingleFrame_DefaultWarmup(uint8_t *buf, int buf_size, int width, int height, int fps);
 
 /* ================================================================
+   PUBLIC API — CONTINUOUS MODE (CAPTURE_MODE = 1)
+   Camera always running, snapshot on trigger with zero warmup delay.
+   ================================================================ */
+
+/**
+ * @brief  Start continuous camera capture (init + warmup done once at boot).
+ *
+ * @param  buf            Pre-allocated buffer (>= width*height*2 bytes for YUV422)
+ * @param  buf_size       Size of buf in bytes
+ * @param  width          Capture width (e.g. 2592)
+ * @param  height         Capture height (e.g. 1944)
+ * @param  fps            Sensor frame rate (e.g. 30)
+ * @return 0 on success, -1 on timeout or buffer too small
+ */
+int CAM_ContinuousStart(uint8_t *buf, int buf_size, int width, int height, int fps);
+
+/**
+ * @brief  Snap the current frame from the continuous capture buffer.
+ *
+ *   Atomically: Stop DCMIPP pipe → memcpy to dest_buf → Restart pipe.
+ *   This prevents buffer corruption (camera never writes while we copy).
+ *
+ * @param  dest_buf       Destination buffer (>= width*height*2 bytes)
+ * @param  frame_size     Exact frame size in bytes (width*height*2)
+ * @return 0 on success, -1 on error
+ */
+int CAM_ContinuousSnap(uint8_t *dest_buf, uint32_t frame_size);
+
+/**
+ * @brief  Stop continuous capture and deinit camera (shutdown).
+ */
+int CAM_ContinuousStop(void);
+
+/* ================================================================
    PUBLIC API — FRAME COUNTER (used by vsync IRQ handler)
    ================================================================ */
 

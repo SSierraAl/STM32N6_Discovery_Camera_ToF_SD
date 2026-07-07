@@ -384,3 +384,193 @@ int CAM_CaptureSingleFrame_DefaultWarmup(uint8_t *buf, int buf_size, int width, 
 {
   return CAM_CaptureSingleFrame(buf, buf_size, width, height, fps, 8);
 }
+
+/* External reference to capture_buf (defined in main.c) */
+extern uint8_t capture_buf[];
+
+/* ================================================================
+   CONTINUOUS MODE IMPLEMENTATION (CAPTURE_MODE = 1)
+   ================================================================ */
+
+/**
+ * @brief  Internal helper: Init camera + apply quality settings + warmup.
+ *
+ *   Shared between CAM_CaptureSingleFrame (on-demand) and
+ *   CAM_ContinuousStart (continuous).  This function performs the
+ *   sensor init, exposure/gain configuration, warmup discard, and
+ *   leaves the capture pipe RUNNING in continuous mode.
+ *
+ * @param  buf            Pre-allocated buffer for capture
+ * @param  buf_size       Size of buf in bytes
+ * @param  width          Capture width
+ * @param  height         Capture height
+ * @param  fps            Sensor frame rate
+ * @param  warmup_frames  Number of frames to discard (use 0 to skip warmup)
+ * @return 0 on success, -1 on error
+ */
+static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size,
+                                       int width, int height, int fps,
+                                       int warmup_frames)
+{
+  int min_size = width * height * 2;
+
+  if (buf == NULL || buf_size <= 0) return -1;
+  if (buf_size < min_size) return -1;
+  if (warmup_frames < 0) warmup_frames = 0;
+
+  /* ---- 1. Init camera ---- */
+  printf("[CAM] Init camera %dx%d@%d YUV422 ...\n", width, height, fps);
+  CAM_conf_t conf = {0};
+  conf.capture_width        = width;
+  conf.capture_height       = height;
+  conf.fps                  = fps;
+  conf.dcmipp_output_format = DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1;
+  conf.is_rgb_swap          = 0;
+
+  CAM_Init(&conf);
+
+  /* ---- Apply camera quality settings ---- */
+  int32_t ret_expo_mode;
+  ret_expo_mode = CMW_CAMERA_SetExposureMode(
+      CAM_EXPOSURE_MODE == 1 ? CMW_EXPOSUREMODE_MANUAL :
+      CAM_EXPOSURE_MODE == 2 ? CMW_EXPOSUREMODE_AUTOFREEZE :
+                               CMW_EXPOSUREMODE_AUTO);
+
+  if (CAM_EXPOSURE_MODE == 1) {
+    int32_t ret_expo = CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+    int32_t ret_gain = CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+
+    int32_t readback_expo, readback_gain;
+    CMW_CAMERA_GetExposure(&readback_expo);
+    CMW_CAMERA_GetGain(&readback_gain);
+    printf("[CAM] SetExposure(%ld)->rc=%ld, SetGain(%ld)->rc=%ld\n",
+           (long)CAM_EXPOSURE_VALUE, (long)ret_expo,
+           (long)CAM_GAIN_VALUE, (long)ret_gain);
+    printf("[CAM] Readback: exposure=%ld, gain=%ld\n", (long)readback_expo, (long)readback_gain);
+  } else {
+    printf("[CAM] SetExposureMode=%ld rc=%ld\n", (long)CAM_EXPOSURE_MODE, (long)ret_expo_mode);
+  }
+
+  DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
+
+  /* ---- 2. Start CONTINUOUS capture into buf ---- */
+  printf("[CAM] Start continuous capture ...\n");
+  CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
+
+  /* ---- 3. Wait for warmup frames (if requested) ---- */
+  if (warmup_frames > 0) {
+    printf("[CAM] Warmup: discarding %d frames...\n", warmup_frames);
+    CAM_ResetFrameCounter(warmup_frames);
+
+    uint32_t t0 = HAL_GetTick();
+    while (g_wait_frames != 0) {
+      CAM_IspUpdate();
+      vTaskDelay(pdMS_TO_TICKS(5));
+
+      if (HAL_GetTick() - t0 > 5000) {
+        printf("[CAM] WARMUP TIMEOUT! Got %lu frames (wanted %d)\n",
+               (unsigned long)g_frame_count, warmup_frames);
+        HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
+        CAM_Deinit();
+        return -1;
+      }
+    }
+    printf("[CAM] Warmup done (%lu frames discarded). Camera RUNNING.\n",
+           (unsigned long)g_frame_count);
+  } else {
+    printf("[CAM] No warmup. Camera RUNNING.\n");
+  }
+
+  return 0;
+}
+
+/**
+ * @brief  Start continuous camera capture (init + warmup done once at boot).
+ *
+ *   After this call the camera pipe is running in CONTINUOUS mode,
+ *   constantly overwriting `buf` with fresh frames.  Use
+ *   CAM_ContinuousSnap() to safely extract a frame on demand.
+ *
+ * @return 0 on success, -1 on timeout or buffer too small
+ */
+int CAM_ContinuousStart(uint8_t *buf, int buf_size, int width, int height, int fps)
+{
+  return CAM_InitAndStartContinuous(buf, buf_size, width, height, fps, SNAP_WARMUP_FRAMES);
+}
+
+/**
+ * @brief  Snap the current frame from the continuous capture buffer.
+ *
+ *   Strategy (FIXED for torn-frame glitch):
+ *     1. STOP the DCMIPP pipe briefly (halts sensor → DMA → capture_buf)
+ *     2. Invalidate D-Cache for capture_buf (read fresh DMA data)
+ *     3. memcpy capture_buf → dest_buf (guaranteed clean frame, no tearing)
+ *     4. Clean D-Cache for dest_buf (SD write sees it)
+ *     5. RESTART the DCMIPP pipe (continuous capture resumes)
+ *
+ *   At 30 FPS, one frame period ≈ 33ms. Stopping for ~5ms copy is only
+ *   ~15% of a frame period — the sensor simply drops 0-1 frames during
+ *   the copy, which is imperceptible.
+ *
+ *   This eliminates the "row jump"/glitch artifact caused by DCMIPP
+ *   overwriting capture_buf rows while we're reading them.
+ *
+ * @return 0 on success, -1 on error
+ */
+int CAM_ContinuousSnap(uint8_t *dest_buf, uint32_t frame_size)
+{
+    if (!dest_buf) return -1;
+
+    uint32_t t0 = HAL_GetTick();
+
+    DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
+
+    /* --- Step 1: STOP DCMIPP pipe to prevent torn frames ---
+       This is the KEY fix for the image glitch. While the pipe runs in
+       CONTINUOUS mode, DCMIPP DMA overwrites capture_buf row by row.
+       If we memcpy simultaneously, we get a "torn" frame where some
+       rows are from frame N and others from frame N+1 — visible as
+       horizontal bands or a "jump" in the image.
+       By stopping the pipe first, we guarantee an atomic copy. */
+    HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
+
+    /* Small delay to ensure DCMIPP has fully stopped and DMA is idle */
+    for (volatile int i = 0; i < 100; i++);
+
+    /* --- Step 2: D-Cache coherency ---
+       DCMIPP DMA writes to capture_buf bypass the D-Cache.  Before the CPU
+       reads capture_buf we must INVALIDATE so it fetches the fresh data from
+       PSRAM instead of serving stale cache lines. */
+    SCB_InvalidateDCache_by_Addr((uint32_t *)capture_buf, frame_size);
+
+    /* --- Step 3: memcpy — guaranteed no tearing since pipe is stopped --- */
+    memcpy(dest_buf, capture_buf, frame_size);
+
+    /* --- Step 4: Clean destination — push CPU-written data to PSRAM for SD DMA */
+    SCB_CleanDCache_by_Addr((uint32_t *)dest_buf, frame_size);
+
+    /* --- Step 5: RESTART the DCMIPP pipe — resume continuous capture ---
+       CMW_CAMERA_Start reinitializes the pipe with the same configuration
+       and buffer address. This is safe because the camera was already
+       initialized; we're just restarting the DMA transfer. */
+    CMW_CAMERA_Start(DCMIPP_PIPE1, capture_buf, CMW_MODE_CONTINUOUS);
+
+    uint32_t elapsed = HAL_GetTick() - t0;
+    printf("[CAM] ContinuousSnap: stop+copy+restart (glitch-free) in %lu ms\n", (unsigned long)elapsed);
+
+    return 0;
+}
+
+/**
+ * @brief  Stop continuous capture and deinit camera (shutdown).
+ */
+int CAM_ContinuousStop(void)
+{
+  DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
+  if (hhandle) {
+    HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
+  }
+  CAM_Deinit();
+  printf("[CAM] Continuous mode stopped.\n");
+  return 0;
+}
