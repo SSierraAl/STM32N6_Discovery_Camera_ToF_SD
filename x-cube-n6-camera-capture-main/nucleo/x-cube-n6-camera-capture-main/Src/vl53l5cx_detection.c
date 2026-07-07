@@ -35,13 +35,37 @@ static uint8_t   s_baseline_ready = 0;
 static VL53L5CX_DetectionResult_t s_last_result = {0};
 static uint8_t s_last_insect_detected = 0;
 
+/* Zone reliability tracking (zero-signal detection) */
+#if VL53L5CX_DET_ZONE_RELIABILITY_ENABLED
+static uint16_t s_zone_zero_count[VL53L5CX_DET_NUM_ZONES] = {0};  // Consecutive zero-signal frames
+static uint8_t  s_zone_unreliable[VL53L5CX_DET_NUM_ZONES] = {0};  // Marked unreliable flag
+static uint8_t  s_zone_post_restart[VL53L5CX_DET_NUM_ZONES] = {0}; // Tracking post-restart state
+static uint8_t  s_total_restarts = 0;                              // Total restarts done
+static uint8_t  s_settle_frames_left = 0;                          // Frames to discard after restart
+#endif
+
+/* Adaptive baseline state */
+#if VL53L5CX_DET_ADAPTIVE_ENABLED
+static uint32_t s_adapt_frame_counter = 0;   // Frame counter for adaptation interval
+static uint32_t s_quiet_frame_counter = 0;   // Consecutive no-detection frames
+#endif
+
+/* Periodic ranging restart state */
+#if VL53L5CX_DET_PERIODIC_RESTART_ENABLED
+static uint32_t s_periodic_frame_counter = 0;  // Frame counter for periodic restart
+static uint8_t  s_periodic_settle_left = 0;    // Frames to discard after periodic restart
+#endif
+
 /* ================================================================
    Internal Helpers
    ================================================================ */
 
-/* Zone mask disabled — all zones always enabled */
+/* Zone mask: skip unreliable zones (only when reliability tracking enabled) */
 static inline int is_zone_enabled(uint8_t z)
 {
+#if VL53L5CX_DET_ZONE_RELIABILITY_ENABLED
+    if (s_zone_unreliable[z]) return 0;
+#endif
     (void)z;
     return 1;
 }
@@ -267,6 +291,28 @@ void VL53L5CX_ResetBaseline(void)
     memset(s_baseline_distance, 0, sizeof(s_baseline_distance));
     memset(s_zone_valid, 0, sizeof(s_zone_valid));
     s_baseline_ready = 0;
+
+#if VL53L5CX_DET_ZONE_RELIABILITY_ENABLED
+    // Reset zone reliability tracking
+    memset(s_zone_zero_count, 0, sizeof(s_zone_zero_count));
+    memset(s_zone_unreliable, 0, sizeof(s_zone_unreliable));
+    memset(s_zone_post_restart, 0, sizeof(s_zone_post_restart));
+    s_total_restarts = 0;
+    s_settle_frames_left = 0;
+#endif
+
+#if VL53L5CX_DET_ADAPTIVE_ENABLED
+    // Reset adaptive baseline state
+    s_adapt_frame_counter = 0;
+    s_quiet_frame_counter = 0;
+#endif
+
+#if VL53L5CX_DET_PERIODIC_RESTART_ENABLED
+    // Reset periodic restart state
+    s_periodic_frame_counter = 0;
+    s_periodic_settle_left = 0;
+#endif
+
     printf("[ToF] Baseline reset\n");
 }
 
@@ -344,6 +390,68 @@ int VL53L5CX_Update(void)
     if (!VL53L5CX_WaitForDataReady(1000)) return 0;
     if (VL53L5CX_GetData() != 0) return 0;
 
+#if VL53L5CX_DET_ZONE_RELIABILITY_ENABLED
+    /* Handle post-restart settle frames (discard them) */
+    if (s_settle_frames_left > 0) {
+        s_settle_frames_left--;
+        if (s_settle_frames_left == 0)
+            printf("[RELIABLE] Settle done after restart. Resuming detection.\n");
+        return 1;
+    }
+
+    /* Track zero-signal zones and trigger soft restart if needed */
+    uint8_t restart_triggered = 0;
+    for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
+        if (!s_zone_valid[z]) continue;
+        uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+        if (s_results.target_status[idx] != 0 &&
+            s_results.target_status[idx] != 5 &&
+            s_results.target_status[idx] != 9) {
+            // Invalid status - reset counter
+            s_zone_zero_count[z] = 0;
+            continue;
+        }
+
+        if (s_results.signal_per_spad[idx] == 0) {
+            s_zone_zero_count[z]++;
+
+            // Check if we need a restart
+            if (!s_zone_post_restart[z] &&
+                s_zone_zero_count[z] >= VL53L5CX_DET_ZERO_RESTART_THRESH &&
+                s_total_restarts < VL53L5CX_DET_MAX_RESTARTS) {
+                printf("[RELIABLE] Z%02d zero signal for %u frames. Restarting sensor...\n",
+                       z, s_zone_zero_count[z]);
+                vl53l5cx_stop_ranging(&s_dev);
+                vTaskDelay(pdMS_TO_TICKS(100));
+                vl53l5cx_start_ranging(&s_dev);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                s_total_restarts++;
+                s_settle_frames_left = VL53L5CX_DET_SETTLE_AFTER_RESTART;
+                s_zone_post_restart[z] = 1;
+                restart_triggered = 1;
+                printf("[RELIABLE] Restart #%d done. Discarding %d settle frames.\n",
+                       s_total_restarts, VL53L5CX_DET_SETTLE_AFTER_RESTART);
+                return 1;
+            }
+
+            // After restart, check if still zero
+            if (s_zone_post_restart[z] &&
+                s_zone_zero_count[z] >= VL53L5CX_DET_ZERO_UNRELIABLE_THRESH) {
+                s_zone_unreliable[z] = 1;
+                printf("[RELIABLE] Z%02d marked UNRELIABLE (zero after restart)\n", z);
+            }
+        } else {
+            // Signal recovered
+            if (s_zone_post_restart[z] && s_zone_zero_count[z] > 0) {
+                // Signal came back after restart - zone is fine
+                s_zone_post_restart[z] = 0;
+            }
+            s_zone_zero_count[z] = 0;
+        }
+    }
+    if (restart_triggered) return 1;
+#endif
+
     /* Reset detection result */
     s_last_insect_detected = 0;
     s_last_result.insect_detected = 0;
@@ -365,6 +473,10 @@ int VL53L5CX_Update(void)
         if (s_results.target_status[idx] != 0 &&
             s_results.target_status[idx] != 5 &&
             s_results.target_status[idx] != 9)
+            continue;
+
+        /* Skip zero-signal zones (invalid measurement, not detection) */
+        if (s_results.signal_per_spad[idx] == 0)
             continue;
 
         s_last_result.valid_measurements++;
@@ -391,18 +503,11 @@ int VL53L5CX_Update(void)
         if (signal_triggered || motion_triggered) {
             uint8_t k = s_last_result.affected_count;
             s_last_result.affected_zones[k] = (uint8_t)z;
-            /* Store drop% for signal trigger, or motion value for motion trigger */
             s_last_result.affected_drop[k] = signal_triggered ? signal_drop : s_results.motion_indicator.motion[s_motion_config.map_id[z]];
             s_last_result.affected_count++;
 
             if (signal_triggered) frame_trig_signal = 1;
             if (motion_triggered) frame_trig_motion = 1;
-
-            /* Debug: print which zone triggered and why */
-            printf("[DBG] Z%02d drop=%lu%%(>%d=%d) motion=%lu(>%d=%d)\n",
-                   z, (unsigned long)signal_drop, VL53L5CX_DET_THRESHOLD_PCT, signal_triggered,
-                   (unsigned long)s_results.motion_indicator.motion[s_motion_config.map_id[z]],
-                   VL53L5CX_DET_MOTION_THRESH, motion_triggered);
         }
 
         /* Only set insect_detected if enough zones are affected (min-zones filter) */
@@ -416,33 +521,107 @@ int VL53L5CX_Update(void)
         }
     }
 
-    /* Adaptive baseline update (only for non-affected zones) */
+    /* Event-driven adaptive baseline update:
+       Only adapt after a quiet period (no detections for N frames)
+       AND at the adaptation interval boundary.
+       This prevents baseline corruption when an insect stays in a zone
+       for 30+ seconds - baseline won't update until the insect leaves
+       AND the zone is stable for the quiet period. */
 #if VL53L5CX_DET_ADAPTIVE_ENABLED
-    for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-        if (!is_zone_enabled(z)) continue;
-        if (!s_zone_valid[z]) continue;
+    /* Update quiet frame counter */
+    if (s_last_insect_detected) {
+        s_quiet_frame_counter = 0;  // Reset on detection
+    } else {
+        s_quiet_frame_counter++;
+    }
 
-        uint8_t is_affected = 0;
-        for (uint8_t k = 0; k < s_last_result.affected_count; k++) {
-            if (s_last_result.affected_zones[k] == (uint8_t)z) {
-                is_affected = 1;
-                break;
+    s_adapt_frame_counter++;
+    if (s_adapt_frame_counter >= VL53L5CX_DET_ADAPT_INTERVAL &&
+        s_quiet_frame_counter >= VL53L5CX_DET_QUIET_FRAMES) {
+        s_adapt_frame_counter = 0;
+        uint8_t adapted = 0;
+
+        for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
+            if (!is_zone_enabled(z)) continue;
+            if (!s_zone_valid[z]) continue;
+
+            uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+            if (s_results.target_status[idx] != 0 &&
+                s_results.target_status[idx] != 5 &&
+                s_results.target_status[idx] != 9) continue;
+            if (s_results.signal_per_spad[idx] == 0) continue;
+
+            /* Adaptive signal baseline */
+            if (s_baseline_signal[z] > 0) {
+                int32_t diff = (int32_t)s_results.signal_per_spad[idx] - (int32_t)s_baseline_signal[z];
+                int32_t drift_pct = (int32_t)(diff * 100 / s_baseline_signal[z]);
+
+                /* Clamp drift to max allowed */
+                if (drift_pct > VL53L5CX_DET_MAX_DRIFT_PCT)
+                    drift_pct = VL53L5CX_DET_MAX_DRIFT_PCT;
+                else if (drift_pct < -VL53L5CX_DET_MAX_DRIFT_PCT)
+                    drift_pct = -VL53L5CX_DET_MAX_DRIFT_PCT;
+
+                int32_t adjustment = (int32_t)s_baseline_signal[z] * drift_pct / 100 / VL53L5CX_DET_EMA_DIVIDER;
+                if (adjustment != 0) {
+                    s_baseline_signal[z] += adjustment;
+                    adapted = 1;
+                }
+            }
+
+            /* Adaptive distance baseline */
+            if (s_baseline_distance[z] > 0) {
+                int32_t diff = (int32_t)s_results.distance_mm[idx] - (int32_t)s_baseline_distance[z];
+                s_baseline_distance[z] += diff / VL53L5CX_DET_EMA_DIVIDER;
             }
         }
-        if (is_affected) continue;
 
-        uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-        if (s_results.target_status[idx] != 0 &&
-            s_results.target_status[idx] != 5 &&
-            s_results.target_status[idx] != 9) continue;
-
-        if (s_baseline_signal[z] > 0) {
-            int32_t diff = (int32_t)s_results.signal_per_spad[idx] - (int32_t)s_baseline_signal[z];
-            s_baseline_signal[z] += diff / VL53L5CX_DET_EMA_DIVIDER;
+        if (adapted) {
+            printf("[ADAPTIVE] Baseline adapted (quiet=%u frames)\n", s_quiet_frame_counter);
         }
-        if (s_baseline_distance[z] > 0) {
-            int32_t diff = (int32_t)s_results.distance_mm[idx] - (int32_t)s_baseline_distance[z];
-            s_baseline_distance[z] += diff / VL53L5CX_DET_EMA_DIVIDER;
+    }
+#endif
+
+    /* Periodic ranging restart:
+       Every N frames, stop and restart ranging to test sensor recovery.
+       Discards settle frames after restart to avoid false triggers. */
+#if VL53L5CX_DET_PERIODIC_RESTART_ENABLED
+    if (s_periodic_settle_left > 0) {
+        s_periodic_settle_left--;
+        if (s_periodic_settle_left == 0) {
+            printf("[PERIODIC] Settle done. Resuming detection.\n");
+
+            /* Refresh baseline to current readings so signal drops reset to ~0-2% */
+#if VL53L5CX_DET_PERIODIC_REFRESH_BASELINE
+            uint8_t refreshed = 0;
+            for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
+                if (!s_zone_valid[z]) continue;
+                uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+                if (s_results.target_status[idx] != 0 &&
+                    s_results.target_status[idx] != 5 &&
+                    s_results.target_status[idx] != 9) continue;
+                if (s_results.signal_per_spad[idx] == 0) continue;
+
+                s_baseline_signal[z]   = s_results.signal_per_spad[idx];
+                s_baseline_distance[z] = s_results.distance_mm[idx];
+                refreshed++;
+            }
+            printf("[PERIODIC] Baseline refreshed for %d zones.\n", refreshed);
+#endif
+        }
+    } else {
+        s_periodic_frame_counter++;
+        if (s_periodic_frame_counter >= VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) {
+            s_periodic_frame_counter = 0;
+            printf("[PERIODIC] Restarting ranging (interval=%d frames)...\n",
+                   VL53L5CX_DET_PERIODIC_RESTART_INTERVAL);
+            vl53l5cx_stop_ranging(&s_dev);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            vl53l5cx_start_ranging(&s_dev);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            s_periodic_settle_left = VL53L5CX_DET_PERIODIC_SETTLE_FRAMES;
+            printf("[PERIODIC] Restart done. Discarding %d settle frames.\n",
+                   VL53L5CX_DET_PERIODIC_SETTLE_FRAMES);
         }
     }
 #endif

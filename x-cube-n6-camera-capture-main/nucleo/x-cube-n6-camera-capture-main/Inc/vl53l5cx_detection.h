@@ -59,7 +59,7 @@
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_THRESHOLD_PCT    15      /* 8x8: higher signal drop threshold (noisier) */
 #define VL53L5CX_DET_MOTION_THRESH    100     /* 8x8: higher motion threshold (more sensitive) */
-#define VL53L5CX_DET_MIN_AFFECTED_ZONES 1     /* 8x8: require 2 zones (reduce false triggers) */
+#define VL53L5CX_DET_MIN_AFFECTED_ZONES 2     /* 8x8: require 2 zones (reduce false triggers) */
 #else
 #define VL53L5CX_DET_THRESHOLD_PCT     6      /* 4x4: lower signal drop threshold */
 #define VL53L5CX_DET_MOTION_THRESH    40      /* 4x4: lower motion threshold */
@@ -86,12 +86,53 @@
 #define VL53L5CX_DET_MOTION_EXTRA_NOISE     0     /* 4x4: no extra noise */
 #endif
 
-/* Adaptive baseline filter:
-   When enabled, slowly updates baseline using EMA for zones NOT
+/* Adaptive baseline filter (event-driven, NOT per-frame):
+   When enabled, periodically recalibrates baseline using EMA for zones NOT
    affected by detection. Compensates for natural drift (temperature,
-   ambient light) without chasing real objects. */
-#define VL53L5CX_DET_ADAPTIVE_ENABLED 0
-#define VL53L5CX_DET_EMA_DIVIDER      256     /* Smoothing factor */
+   ambient light) without chasing real objects.
+
+   KEY DESIGN: Only adapt after a "quiet period" of N consecutive frames
+   with NO detections. This prevents baseline corruption when an insect
+   stays in a zone for 30+ seconds - the baseline won't update until the
+   insect leaves AND the zone is stable for the quiet period.
+
+   Example at 5Hz (8x8 mode):
+     - ADAPT_INTERVAL = 100 frames = every 20 seconds
+     - QUIET_FRAMES = 50 frames = 10 seconds of no detections required
+     - So baseline adapts at most once every 20s, only if no detections
+       in the preceding 10s. */
+#define VL53L5CX_DET_ADAPTIVE_ENABLED 1       /* Set to 0 to disable for testing */
+#define VL53L5CX_DET_ADAPT_INTERVAL   100     /* Frames between adaptation attempts */
+#define VL53L5CX_DET_QUIET_FRAMES     50      /* Consecutive no-detection frames required */
+#define VL53L5CX_DET_EMA_DIVIDER      64      /* Smoothing factor (64 = moderate speed) */
+#define VL53L5CX_DET_MAX_DRIFT_PCT    10      /* Max % change per adaptation (guardrail) */
+
+/* Zone reliability tracking (modular - enable/disable for testing):
+   In 8x8 mode (and sometimes 4x4), some zones may have intermittent
+   signal loss. This feature tracks consecutive zero-signal frames and
+   restarts the sensor to recover. If still zero after restart, mark
+   the zone as unreliable and skip it in detection. */
+#define VL53L5CX_DET_ZONE_RELIABILITY_ENABLED 0  /* Set to 0 to disable for testing */
+#define VL53L5CX_DET_ZERO_RESTART_THRESH  10     /* Frames of zero signal before restart */
+#define VL53L5CX_DET_ZERO_UNRELIABLE_THRESH 20   /* Frames after restart to mark unreliable */
+#define VL53L5CX_DET_MAX_RESTARTS         5      /* Max total restarts (prevent loops) */
+#define VL53L5CX_DET_SETTLE_AFTER_RESTART 5      /* Frames to discard after restart */
+
+/* Periodic ranging restart (modular - enable/disable for testing):
+   Periodically stops and restarts ranging every N frames to test
+   sensor recovery performance. Useful for comparing detection quality
+   before/after restarts and measuring any transient effects.
+   Default DISABLED so it doesn't affect normal operation. */
+#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED  1   /* Set to 1 to enable for testing */
+#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL 500  /* Restart every N frames */
+#define VL53L5CX_DET_PERIODIC_SETTLE_FRAMES    10   /* Frames to discard after restart */
+
+/* Periodic baseline refresh:
+   After each periodic restart, snaps baseline to current readings.
+   This resets signal drops to ~0-2% per zone, simulating a fresh start.
+   No full relearn needed (sensor config is preserved across stop/start).
+   Without this, stale baseline values cause artificially high drops. */
+#define VL53L5CX_DET_PERIODIC_REFRESH_BASELINE 1   /* Refresh baseline after periodic restart */
 
 /* Debug output (legacy, unused - prints are in main.c insect_task) */
 #define VL53L5CX_DET_DEBUG_FRAME_INTERVAL 0
