@@ -80,14 +80,40 @@
 #define VL53L5CX_DET_MIN_SIGNAL 500
 
 /* ================================================================
-   Periodic Restart (prevents sensor drift / stuck state)
+   Baseline Refresh Modes (choose ONE)
+   ================================================================
+
+   MODE 1 — PERIODIC (time-based):
+     Refreshes baseline every N frames regardless of detections.
+     Use when you want predictable, fixed-interval refreshes.
+     Example: every 500 frames (~33s at 15Hz).
+
+   MODE 2 — ADAPTIVE (detection-based):
+     Counts detections in a sliding window. If more than MAX_DETECTIONS
+     occur within the window, baseline is refreshed.
+     Use when environment is mostly stable but occasionally changes.
+
+   IMPORTANT: Only enable ONE mode at a time.
+   - For periodic: set PERIODIC_RESTART_ENABLED=1, ADAPTIVE_REFRESH_ENABLED=0
+   - For adaptive: set PERIODIC_RESTART_ENABLED=0, ADAPTIVE_REFRESH_ENABLED=1
+
+   Frame counting method:
+     A static counter increments on EVERY call to VL53L5CX_Update().
+     It is NOT reset by detections. It wraps at the window/interval size.
+     FreeRTOS safety: the counter is only read/written by the ToF task
+     (no shared access), so no mutex is needed.
+     vTaskDelay() is used for blocking waits (not HAL_Delay), keeping
+     the RTOS scheduler responsive.
    ================================================================ */
 
-/* Enable periodic restart of ranging to recover from sensor lockups.
-   Set to 0 to disable. Value is in number of frames between restarts.
-   Full cycle: stop → re-init → re-configure → re-learn baseline → start */
-#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED  1
-#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL 100  /* Restart every N frames */
+/* --- MODE 1: Periodic Restart --- */
+#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   0
+#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500  /* Refresh every N frames */
+
+/* --- MODE 2: Adaptive Refresh --- */
+#define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
+#define VL53L5CX_DET_DETECTION_WINDOW           150  /* Frame window size */
+#define VL53L5CX_DET_MAX_DETECTIONS             5    /* Max detections before refresh */
 
 /* ================================================================
    Debug Output Configuration
@@ -97,14 +123,14 @@
    Format: ZFRAME,temp,sig0,dist0,base_sig0,base_dist0,motion0,...
    Per zone: 5 fields (signal, distance, baseline_signal, baseline_distance, motion)
    Enables: Signal vs Baseline plot, Distance plot, Motion plot, Drop% heatmap */
-#define VL53L5CX_DET_DEBUG_ZFRAME     1
+#define VL53L5CX_DET_DEBUG_ZFRAME     0
 #define VL53L5CX_DET_DEBUG_ZFRAME_INT 1    /* Emit ZFRAME every N frames in Update() */
 
 /* DEBUG MODE 2: ALLPARAM (for datalogger.py + analysis.py)
    Format: ALLPARAM,temp,sig0,base_sig0,dist0,base_dist0,amb0,sigma0,reflect0,...
    Per zone: 12 fields (all parameters)
    Enables: Full parameter logging, detailed analysis, all heatmaps */
-#define VL53L5CX_DET_DEBUG_ALLPARAMS    1
+#define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 50   /* Emit ALLPARAM every N frames */
 
 /* NOTE: Both ZFRAME and ALLPARAM can be enabled simultaneously.

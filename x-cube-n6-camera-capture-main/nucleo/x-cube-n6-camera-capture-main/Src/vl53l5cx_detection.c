@@ -392,29 +392,91 @@ int VL53L5CX_Update(void)
         }
     }
 
-    /* Periodic baseline re-learn to compensate for temperature drift
-       and ambient light changes. Stop → start → re-learn cycle.
-       Ranging must be started BEFORE LearnBaseline so data is available. */
+    /* ================================================================
+       BASELINE REFRESH — Two modes (choose ONE in header):
+
+       MODE 1: PERIODIC — refresh every N frames regardless of detections.
+       MODE 2: ADAPTIVE  — refresh only when detection rate is high.
+
+       FRAME COUNTING:
+         - A static counter increments on EVERY call to VL53L5CX_Update().
+         - It is NOT reset by detections, NOT reset on refresh.
+         - It wraps at the interval/window size (modulo arithmetic).
+         - Counter is monotonically increasing: 1,2,3,...,N,0,1,2,3,...
+
+         Example (interval=500):
+           Frame 1:    counter=1,   no refresh
+           Frame 499:  counter=499, no refresh
+           Frame 500:  counter=500, REFRESH → counter wraps to 0
+           Frame 501:  counter=1,   no refresh
+           Frame 1000: counter=500, REFRESH → counter wraps to 0
+
+       FREE_RTOS SAFETY:
+         - All counters are static locals inside VL53L5CX_Update().
+         - VL53L5CX_Update() is called ONLY from the ToF task (main_thread).
+         - No other task reads/writes these counters → no mutex needed.
+         - Blocking waits use vTaskDelay() (yields CPU) not HAL_Delay()
+           (busy-waits) → other tasks continue running normally.
+         - The only shared variable is s_last_insect_detected (uint8_t),
+           written here and read in main_thread detection handler.
+           uint8_t reads/writes are atomic on Cortex-M → safe without mutex.
+    */
+
+    /* --- MODE 1: Periodic Restart (fixed interval) --- */
 #if VL53L5CX_DET_PERIODIC_RESTART_ENABLED > 0
     {
-        static uint32_t restart_counter = 0;
-        restart_counter++;
-        if (restart_counter >= VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) {
-            restart_counter = 0;
-            printf("[ToF] Periodic baseline refresh...\n");
+        static uint32_t frame_counter = 0;
+        frame_counter++;
 
-            /* Stop ranging briefly to reset sensor state */
+        if (frame_counter >= VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) {
+            frame_counter = 0;
+            printf("[ToF] Periodic refresh (every %d frames)...\n",
+                   VL53L5CX_DET_PERIODIC_RESTART_INTERVAL);
+
+            /* Stop → Start → Re-learn (ranging must be ON for LearnBaseline) */
             vl53l5cx_stop_ranging(&s_dev);
             vTaskDelay(pdMS_TO_TICKS(50));
-
-            /* Start ranging AGAIN before LearnBaseline (it needs data!) */
             vl53l5cx_start_ranging(&s_dev);
             vTaskDelay(pdMS_TO_TICKS(200));
-
-            /* Re-learn baseline (adaptive to current conditions) */
             VL53L5CX_LearnBaseline();
 
-            printf("[ToF] Periodic baseline refresh done.\n");
+            printf("[ToF] Periodic refresh done.\n");
+        }
+    }
+#endif
+
+    /* --- MODE 2: Adaptive Refresh (detection-rate based) --- */
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+    {
+        static uint32_t frame_counter = 0;
+        static uint8_t  detection_count = 0;
+
+        frame_counter++;
+        if (s_last_insect_detected)
+            detection_count++;
+
+        /* When window expires, check if too many detections occurred */
+        if (frame_counter >= VL53L5CX_DET_DETECTION_WINDOW) {
+            frame_counter = 0;
+
+            if (detection_count > VL53L5CX_DET_MAX_DETECTIONS) {
+                printf("[ToF] Adaptive refresh: %d detections in %d frames (max=%d)\n",
+                       detection_count, VL53L5CX_DET_DETECTION_WINDOW,
+                       VL53L5CX_DET_MAX_DETECTIONS);
+
+                /* Stop → Start → Re-learn (ranging must be ON for LearnBaseline) */
+                vl53l5cx_stop_ranging(&s_dev);
+                vTaskDelay(pdMS_TO_TICKS(50));
+                vl53l5cx_start_ranging(&s_dev);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                VL53L5CX_LearnBaseline();
+
+                printf("[ToF] Adaptive refresh done.\n");
+            } else {
+                printf("[ToF] Window: %d detections (max=%d) — no refresh\n",
+                       detection_count, VL53L5CX_DET_MAX_DETECTIONS);
+            }
+            detection_count = 0;
         }
     }
 #endif
