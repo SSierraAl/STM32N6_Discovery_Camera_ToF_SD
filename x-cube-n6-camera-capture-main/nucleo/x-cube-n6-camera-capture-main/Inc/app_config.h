@@ -24,10 +24,10 @@
    ================================================================ */
 
 /** Snapshot resolution (width)  --  YUV422 format = 2 bytes/pixel */
-#define SNAP_WIDTH          480
+#define SNAP_WIDTH          2592
 
 /** Snapshot resolution (height) */
-#define SNAP_HEIGHT          480
+#define SNAP_HEIGHT          1944
 
 /** Camera frame rate (FPS).
     Valid values depend on resolution:
@@ -44,7 +44,7 @@
 #define SNAP_WARMUP_FRAMES   11
 
 /** Maximum time to wait for warmup + capture frames (milliseconds). */
-#define SNAP_TIMEOUT_MS      400
+#define SNAP_TIMEOUT_MS      200
 
 /* ================================================================
    SECTION 1B: CAMERA IMAGE QUALITY (exposure, gain, brightness)
@@ -69,7 +69,7 @@
       - Dim lighting:                  15000-30000 µs + low gain
     
     Default: 3000 µs (good balance for moving objects indoors) */
-#define CAM_EXPOSURE_VALUE   1000
+#define CAM_EXPOSURE_VALUE   100
 
 /** Analog gain (only used in MANUAL mode).
     Range: 0-2047. Higher = brighter image but more noise/grain.
@@ -149,7 +149,7 @@
     1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
                       Very fast (~5-10ms latency). Good for fast-moving objects.
                       Requires extra PSRAM buffer (~5MB) for frame copy during SD write. */
-#define CAPTURE_MODE             1
+#define CAPTURE_MODE             0
 
 /* ================================================================
    SECTION 5: BUTTON / LED PARAMETERS

@@ -82,6 +82,11 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/app_sdcard.h</locationURI>
 		</link>
 		<link>
+			<name>Inc/app_thread.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Inc/app_thread.h</locationURI>
+		</link>
+		<link>
 			<name>Inc/aps256xx_conf.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/aps256xx_conf.h</locationURI>
@@ -315,6 +320,11 @@
 			<name>Src/app_sdcard.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Src/app_sdcard.c</locationURI>
+		</link>
+		<link>
+			<name>Src/app_thread.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Src/app_thread.c</locationURI>
 		</link>
 		<link>
 			<name>Src/freertos_bsp.c</name>

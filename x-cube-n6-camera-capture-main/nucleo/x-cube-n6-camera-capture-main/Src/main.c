@@ -68,6 +68,7 @@
 #include "app_config.h"
 #include "app_cam.h"
 #include "app_fuseprogramming.h"
+#include "app_thread.h"
 #include "main.h"
 #include "npu_cache.h"
 #include "utils.h"
@@ -75,6 +76,8 @@
 /* ---- FreeRTOS ---- */
 #include "FreeRTOS.h"
 #include "task.h"
+#include "queue.h"
+#include "semphr.h"
 
 /* ================================================================
    SECTION 2: GLOBAL PERIPHERAL HANDLES
@@ -107,9 +110,17 @@ static StackType_t     main_thread_stack[configMINIMAL_STACK_SIZE];
 static StaticTask_t    btn_thread_cb;
 static StackType_t     btn_thread_stack[4 * configMINIMAL_STACK_SIZE];
 
-/** Insect detection task (runs forever, monitors ToF sensor) */
-static StaticTask_t    insect_thread_cb;
-static StackType_t     insect_thread_stack[4 * configMINIMAL_STACK_SIZE];
+/** Sensor task (ToF monitoring + insect detection) */
+static StaticTask_t    sensor_thread_cb;
+static StackType_t     sensor_thread_stack[SENSOR_TASK_STACK_SIZE];
+
+/** Camera task (acquisition: continuous/snapshot) */
+static StaticTask_t    camera_thread_cb;
+static StackType_t     camera_thread_stack[CAMERA_TASK_STACK_SIZE];
+
+/** Storage task (SD card writes) */
+static StaticTask_t    storage_thread_cb;
+static StackType_t     storage_thread_stack[STORAGE_TASK_STACK_SIZE];
 
 /* ================================================================
    SECTION 4: FORWARD DECLARATIONS
@@ -126,7 +137,7 @@ static void Setup_Mpu(void);
 static int   main_freertos(void);
 static void  main_thread_fct(void *arg);
 static void  btn_thread_fct(void *arg);
-static void  insect_detection_task(void *arg);
+/* insect_detection_task moved to app_thread.c as sensor_task() */
 
 /* ---- SD Card Operations ---- */
 static int   SD_Benchmarks(void);
@@ -153,8 +164,9 @@ extern int   __uncached_bss_end__;
    SECTION 5: RUNTIME STATE AND BUFFERS
    ================================================================ */
 
-/* System readiness flag (set by main_thread, polled by btn_thread) */
-static volatile int system_ready = 0;
+/* System readiness flag (set by main_thread, polled by other tasks)
+   NOTE: Not static — referenced via extern by app_thread.c */
+volatile int system_ready = 0;
 
 /* Snapshot counter and base block tracking */
 static uint32_t snap_count = 0;
@@ -168,8 +180,9 @@ uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
     Size = SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE = 64 * 512 = 32 KB.
     This buffer holds multiple 512-byte SD blocks so we can write them
     in a single HAL_SD_WriteBlocks() call, drastically reducing the
-    number of HAL API calls per snapshot (~307 instead of ~19,643). */
-static uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
+    number of HAL API calls per snapshot (~307 instead of ~19,643).
+    NOTE: Not static — referenced by app_thread.c (storage_task). */
+uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
 
 /** Save buffer for continuous mode — allocated in PSRAM.
     In CONTINUOUS mode (CAPTURE_MODE=1), the camera writes continuously
@@ -803,206 +816,6 @@ static void btn_thread_fct(void *arg)
     }
 }
 
-static void insect_detection_task(void *arg)
-{
-    (void)arg;
-
-    /* ---- Wait for system to be ready ---- */
-    while (!system_ready) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-
-    printf("\n============================================\n");
-    printf("  INSECT DETECTION MODE (VL53L5CX)\n");
-    printf("  Using vl53l5cx_detection module\n");
-    printf("============================================\n\n");
-
-    /* ---- Initialize ToF sensor (already powered up by main_thread) ---- */
-    if (VL53L5CX_Init(&hi2c1) != 0) {
-        printf("[ERROR] VL53L5CX_Init failed! Scanning I2C bus...\n");
-        VL53L5CX_ScanI2CBus();
-        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    /* ---- Configure resolution, integration time, frequency ---- */
-#if VL53L5CX_DET_RESOLUTION == 8
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 800, 15);
-    printf("  Resolution: 8x8 (64 zones)\n");
-#else
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 800, 15);
-    printf("  Resolution: 4x4 (16 zones)\n");
-#endif
-
-    /* ---- Start continuous ranging ---- */
-    VL53L5CX_StartRanging();
-
-    /* ---- Learn baseline ---- */
-    VL53L5CX_LearnBaseline();
-
-    if (!VL53L5CX_IsBaselineReady()) {
-        printf("[ERROR] Baseline learning failed!\n");
-        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-
-    printf("\n[MONITORING] Watching zones for insect passage...\n");
-#if CAPTURE_MODE == 1
-    printf("  Capture Mode: CONTINUOUS (camera always running, fast snap)\n");
-#else
-    printf("  Capture Mode: ON-DEMAND (full init per capture)\n");
-#endif
-    printf("  Camera will auto-capture on insect detection.\n\n");
-
-    uint32_t capture_count = 0;
-    uint32_t cooldown_frames = 0;
-    const uint32_t COOLDOWN_FRAMES_VALUE = 30;
-
-    /* ---- Debug output counters (controlled from here) ---- */
-    static uint32_t debug_frame_count = 0;
-    static uint32_t allparam_count    = 0;
-
-    while (1) {
-        /* ---- Update detection module ---- */
-        if (!VL53L5CX_Update()) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-
-        /* ---- Continuous debug output for Python monitor ---- */
-        debug_frame_count++;
-        if (debug_frame_count >= 1) {
-            debug_frame_count = 0;
-            //VL53L5CX_PrintZFrame();
-        }
-
-#if VL53L5CX_DET_DEBUG_ALLPARAMS > 0
-        allparam_count++;
-        if (allparam_count >= VL53L5CX_DET_DEBUG_ALLPARAM_INT) {
-            allparam_count = 0;
-            //VL53L5CX_PrintAllZoneParams();
-        }
-#endif
-
-        /* ---- Check cooldown ---- */
-        if (cooldown_frames > 0) cooldown_frames--;
-
-        /* ---- Insect detected? ---- */
-        if (VL53L5CX_IsInsectDetected() && cooldown_frames == 0) {
-            /* Guard: skip if a capture is already in progress */
-            if (capture_in_progress) {
-                printf("    [SKIP] Capture already in progress, ignoring detection.\n");
-                continue;
-            }
-            capture_in_progress = 1;
-
-            VL53L5CX_DetectionResult_t result = VL53L5CX_GetResult();
-
-            const char *trig_str;
-            switch (result.trigger_source) {
-                case VL53L5CX_TRIG_SIGNAL: trig_str = "signal"; break;
-                case VL53L5CX_TRIG_MOTION: trig_str = "motion"; break;
-                case VL53L5CX_TRIG_BOTH:   trig_str = "signal+motion"; break;
-                default:                    trig_str = "unknown"; break;
-            }
-
-            printf(">>> INSECT DETECTED! Trigger: %s (%u zones)\n",
-                   trig_str, result.affected_count);
-
-
-            /* ---- TRIGGER CAMERA CAPTURE ---- */
-            uint32_t t_total_start = HAL_GetTick();
-            uint32_t t_cam_start, t_cam_end, t_sd_start, t_sd_end;
-            uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
-            const uint8_t *frame_to_save = NULL;
-
-#if CAPTURE_MODE == 1
-            /* CONTINUOUS MODE: Snap FIRST (frame already in capture_buf), 
-               then illuminate + save. Zero delay before snap! */
-            printf("    [CONTINUOUS] Snapping current frame (IMMEDIATE)...\n");
-            BSP_LED_Off(LED_GREEN);
-            BSP_LED_On(LED_RED);
-
-            /* SNAP FIRST — memcpy the frame that's already sitting in capture_buf */
-            t_cam_start = HAL_GetTick();
-            int rc = CAM_ContinuousSnap(save_buf, frame_size);
-            t_cam_end = HAL_GetTick();
-
-            /* NOW illuminate (after snap, no delay) */
-            WS2812_TurnOn();
-            WS2812_TurnOff();
-
-            if (rc == 0) {
-                frame_to_save = save_buf;
-                printf("    [CONTINUOUS] Frame snapped in %lu ms\n", (unsigned long)(t_cam_end - t_cam_start));
-            } else {
-                printf("    [ERROR] ContinuousSnap failed (rc=%d)!\n", rc);
-                BSP_LED_Off(LED_RED);
-                BSP_LED_On(LED_GREEN);
-                capture_in_progress = 0;
-                continue;
-            }
-#else
-            /* ON-DEMAND MODE: Full init + warmup + capture + deinit */
-            printf("    [ON-DEMAND] Full camera init + capture...\n");
-            BSP_LED_Off(LED_GREEN);
-            BSP_LED_On(LED_RED);
-            WS2812_TurnOn();
-            vTaskDelay(pdMS_TO_TICKS(100));
-            WS2812_TurnOff();
-
-            t_cam_start = HAL_GetTick();
-            int rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                            SNAP_WIDTH, SNAP_HEIGHT,
-                                            SNAP_FPS, SNAP_WARMUP_FRAMES);
-            t_cam_end = HAL_GetTick();
-
-            if (rc == 0) {
-                frame_to_save = capture_buf;
-                printf("    [ON-DEMAND] Captured in %lu ms\n", (unsigned long)(t_cam_end - t_cam_start));
-            } else {
-                printf("    [ERROR] Camera capture failed (rc=%d)!\n", rc);
-                BSP_LED_Off(LED_RED);
-                BSP_LED_On(LED_GREEN);
-                capture_in_progress = 0;
-                continue;
-            }
-#endif
-
-            /* ---- SAVE TO SD CARD ---- */
-            t_sd_start = HAL_GetTick();
-            uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
-            uint32_t target_block = snap_base_block + (capture_count * total_blocks);
-            uint32_t saved_base = SD_IMG_BASE_BLOCK;
-            SD_IMG_BASE_BLOCK = target_block;
-
-            if (SD_StoreRawImage(frame_to_save, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
-                capture_count++;
-                snap_count++;
-                t_sd_end = HAL_GetTick();
-                printf("    >>> Snapshot #%lu SAVED (block %lu)\n",
-                       (unsigned long)capture_count, (unsigned long)target_block);
-                printf("    [PERF] Camera=%lums + SD=%lums = Total=%lums\n",
-                       (unsigned long)(t_cam_end - t_cam_start),
-                       (unsigned long)(t_sd_end - t_sd_start),
-                       (unsigned long)(t_sd_end - t_total_start));
-            } else {
-                t_sd_end = HAL_GetTick();
-                printf("    [ERROR] SD write failed! (SD took %lu ms)\n",
-                       (unsigned long)(t_sd_end - t_sd_start));
-            }
-
-            SD_IMG_BASE_BLOCK = saved_base;
-
-            /* ---- Restore LEDs and enter cooldown ---- */
-            BSP_LED_Off(LED_RED);
-            BSP_LED_On(LED_GREEN);
-            capture_in_progress = 0;
-            cooldown_frames = COOLDOWN_FRAMES_VALUE;
-            printf("    Cooldown: %d frames (%.1f seconds)\n\n",
-                   COOLDOWN_FRAMES_VALUE, (float)COOLDOWN_FRAMES_VALUE / 15.0f);
-        }
-    }
-}
-
 /* ================================================================
    SECTION 15: FREERTOS INITIALIZATION
    ================================================================ */
@@ -1010,31 +823,49 @@ static void insect_detection_task(void *arg)
 /**
  * @brief  Create and start FreeRTOS tasks
  *
- *         Creates two static tasks:
- *         - main_thread (priority 2): Board initialization, then deletes itself
- *         - btn_thread  (priority 3): Button polling and capture loop
+ *         Tasks created:
+ *         - main_thread   (priority IDLE+1): Board init, then deletes itself
+ *         - storage_task  (priority IDLE+2): SD card writes (blocking OK)
+ *         - camera_task   (priority IDLE+3): Camera acquisition (fast response)
+ *         - sensor_task   (priority IDLE+4): ToF monitoring (highest, detection critical)
+ *         - btn_thread    (priority IDLE+3): Button polling + manual capture
  */
 static int main_freertos(void)
 {
     TaskHandle_t hdl;
 
+    /* ---- Main init thread (lowest priority, deletes itself) ---- */
     hdl = xTaskCreateStatic(main_thread_fct, "main",
                             configMINIMAL_STACK_SIZE, NULL,
                             tskIDLE_PRIORITY + 1,
                             main_thread_stack, &main_thread_cb);
     assert(hdl != NULL);
 
-    /* Create insect detection task (priority: IDLE+2 - higher than button) */
-    hdl = xTaskCreateStatic(insect_detection_task, "insect",
-                            4 * configMINIMAL_STACK_SIZE, NULL,
+    /* ---- Storage task (blocking SD writes) ---- */
+    hdl = xTaskCreateStatic(storage_task, "storage",
+                            STORAGE_TASK_STACK_SIZE, NULL,
                             tskIDLE_PRIORITY + 2,
-                            insect_thread_stack, &insect_thread_cb);
+                            storage_thread_stack, &storage_thread_cb);
     assert(hdl != NULL);
 
-    /* Button task at HIGHER priority for immediate response */
+    /* ---- Camera task (acquisition, high priority for fast snaps) ---- */
+    hdl = xTaskCreateStatic(camera_task, "camera",
+                            CAMERA_TASK_STACK_SIZE, NULL,
+                            tskIDLE_PRIORITY + 3,
+                            camera_thread_stack, &camera_thread_cb);
+    assert(hdl != NULL);
+
+    /* ---- Sensor task (ToF monitoring, highest priority for detection) ---- */
+    hdl = xTaskCreateStatic(sensor_task, "sensor",
+                            SENSOR_TASK_STACK_SIZE, NULL,
+                            tskIDLE_PRIORITY + 4,
+                            sensor_thread_stack, &sensor_thread_cb);
+    assert(hdl != NULL);
+
+    /* ---- Button task (manual capture) ---- */
     hdl = xTaskCreateStatic(btn_thread_fct, "btn",
                             4 * configMINIMAL_STACK_SIZE, NULL,
-                            tskIDLE_PRIORITY + 2,
+                            tskIDLE_PRIORITY + 3,
                             btn_thread_stack, &btn_thread_cb);
     assert(hdl != NULL);
 
@@ -1236,23 +1067,27 @@ static void main_thread_fct(void *arg)
         printf("\n[ERROR] SD card NOT detected after %d attempts! Camera captures will fail.\n", SD_MAX_RETRIES);
     }
 
+    /* ---- Initialize IPC (queues + semaphores) ----
+       Must be done AFTER console init (printf used in IPC_Init diagnostics)
+       and BEFORE setting system_ready (tasks poll system_ready then use IPC). */
+    if (IPC_Init() != pdTRUE) {
+        printf("[FATAL] IPC_Init failed! Cannot start threaded tasks.\n");
+        while (1);
+    }
+
     /* ---- System Ready ---- */
     printf("\n===========================================\n");
     printf("[INFO] System READY!\n");
+    printf("[INFO] Multi-threaded architecture active:\n");
+    printf("[INFO]   - sensor_task  (ToF monitoring)\n");
+    printf("[INFO]   - camera_task  (acquisition)\n");
+    printf("[INFO]   - storage_task (SD writes)\n");
+    printf("[INFO]   - btn_thread   (manual capture)\n");
 
 #if CAPTURE_MODE == 1
-    /* CONTINUOUS MODE: Start camera at boot so it's always capturing */
-    printf("[INFO] Capture Mode: CONTINUOUS (camera always running)\n");
-    printf("[INFO] Starting camera + warmup at boot...\n");
-    int cam_rc = CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                     SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
-    if (cam_rc != 0) {
-        printf("[ERROR] CAM_ContinuousStart failed (rc=%d)! Camera not ready.\n", cam_rc);
-    } else {
-        printf("[INFO] Camera is RUNNING and capturing continuously.\n");
-    }
+    printf("[INFO] Capture Mode: CONTINUOUS (camera_task starts pipe)\n");
 #else
-    printf("[INFO] Capture Mode: ON-DEMAND (init per capture)\n");
+    printf("[INFO] Capture Mode: ON-DEMAND (camera_task inits per capture)\n");
 #endif
 
     printf("[INFO] Press USER button (PC13) to capture + save.\n");
