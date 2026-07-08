@@ -816,14 +816,6 @@ static void insect_detection_task(void *arg)
             continue;
         }
 
-        /* ---- Continuous debug output for Python monitor ---- */
-        /* Emit ZFRAME every 5 frames to reduce UART load */
-        debug_frame_count++;
-        if (debug_frame_count >= 5) {
-            debug_frame_count = 0;
-            VL53L5CX_PrintZFrame();
-        }
-
         /* ---- Check cooldown ---- */
         if (cooldown_frames > 0) cooldown_frames--;
 
@@ -849,7 +841,6 @@ static void insect_detection_task(void *arg)
             BSP_LED_On(LED_RED);
             WS2812_TurnOn();
             vTaskDelay(pdMS_TO_TICKS(100));
-            WS2812_TurnOff();
 
             int rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
                                             SNAP_WIDTH, SNAP_HEIGHT,
@@ -875,6 +866,7 @@ static void insect_detection_task(void *arg)
 
             BSP_LED_Off(LED_RED);
             BSP_LED_On(LED_GREEN);
+            WS2812_TurnOff();
             cooldown_frames = COOLDOWN_FRAMES_VALUE;
             printf("    Cooldown: %d frames (%.1f seconds)\n\n",
                    COOLDOWN_FRAMES_VALUE, (float)COOLDOWN_FRAMES_VALUE / 15.0f);

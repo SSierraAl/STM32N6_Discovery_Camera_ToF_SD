@@ -1,7 +1,7 @@
 /**
  * *****************************************************************************
  * @file    vl53l5cx_detection.h
- * @brief   VL53L5CX ToF Sensor - Modular Detection API
+ * @brief   VL53L5CX ToF Sensor - Clean Detection API
  *
  *           Provides initialization, configuration, baseline learning,
  *           and insect detection for the VL53L5CX 4x4/8x8 ToF sensor.
@@ -45,122 +45,90 @@
 #error "VL53L5CX_DET_RESOLUTION must be 4 or 8"
 #endif
 
-/* Resolution-specific baseline samples:
-   8x8 zones are smaller and noisier, need more samples for stable baseline. */
+/* Resolution-specific baseline samples */
 #if VL53L5CX_DET_RESOLUTION == 8
-#define VL53L5CX_DET_BASELINE_SAMPLES 30      /* 8x8: more samples for stability */
+#define VL53L5CX_DET_BASELINE_SAMPLES 30
 #else
-#define VL53L5CX_DET_BASELINE_SAMPLES 10      /* 4x4: 10 samples enough */
+#define VL53L5CX_DET_BASELINE_SAMPLES 10
 #endif
 
-/* Resolution-specific thresholds:
-   8x8 zones are 1/4 the area of 4x4 zones, so signal is noisier and
-   motion indicator is more sensitive. Use higher thresholds for 8x8. */
+/* Resolution-specific detection thresholds */
 #if VL53L5CX_DET_RESOLUTION == 8
-#define VL53L5CX_DET_THRESHOLD_PCT    15      /* 8x8: higher signal drop threshold (noisier) */
-#define VL53L5CX_DET_MOTION_THRESH    100     /* 8x8: higher motion threshold (more sensitive) */
-#define VL53L5CX_DET_MIN_AFFECTED_ZONES 2     /* 8x8: require 2 zones (reduce false triggers) */
+#define VL53L5CX_DET_THRESHOLD_PCT      15      /* 8x8: higher signal drop threshold */
+#define VL53L5CX_DET_MOTION_THRESH      100     /* 8x8: higher motion threshold */
+#define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
 #else
-#define VL53L5CX_DET_THRESHOLD_PCT     6      /* 4x4: lower signal drop threshold */
-#define VL53L5CX_DET_MOTION_THRESH    40      /* 4x4: lower motion threshold */
-#define VL53L5CX_DET_MIN_AFFECTED_ZONES 1     /* 4x4: single zone triggers */
+#define VL53L5CX_DET_THRESHOLD_PCT      6       /* 4x4: lower signal drop threshold */
+#define VL53L5CX_DET_MOTION_THRESH      40      /* 4x4: lower motion threshold */
+#define VL53L5CX_DET_MIN_AFFECTED_ZONES 1       /* 4x4: single zone triggers */
 #endif
 
-/* Motion indicator tuning (applied at ST API level):
-   These are set in VL53L5CX_Configure() after motion init.
-
-   - MOTION_MIN_ZONES: min zones that must detect motion for global trigger.
-     ST API: min_nb_for_global_detection. Set to 1 to disable.
-   - MOTION_PERSIST_FRAMES: frames to accumulate before motion fires.
-     ST API: nb_of_temporal_accumulations. Set to 1 to disable.
-   - MOTION_EXTRA_NOISE_SIGMA: extra noise floor to ignore small fluctuations.
-     ST API: extra_noise_sigma. Higher = more tolerant of ambient noise.
-     Set to 0 to disable. */
+/* Motion indicator tuning (ST API level) */
 #if VL53L5CX_DET_RESOLUTION == 8
-#define VL53L5CX_DET_MOTION_MIN_ZONES       2     /* 8x8: require 2 zones for ST motion API */
-#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  3     /* 8x8: more persistence (3 frames) */
-#define VL53L5CX_DET_MOTION_EXTRA_NOISE     50    /* 8x8: add noise floor */
+#define VL53L5CX_DET_MOTION_MIN_ZONES       2
+#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  3
+#define VL53L5CX_DET_MOTION_EXTRA_NOISE     50
 #else
-#define VL53L5CX_DET_MOTION_MIN_ZONES       1     /* 4x4: single zone for ST motion API */
-#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  2     /* 4x4: 2 frame persistence */
-#define VL53L5CX_DET_MOTION_EXTRA_NOISE     0     /* 4x4: no extra noise */
+#define VL53L5CX_DET_MOTION_MIN_ZONES       1
+#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  2
+#define VL53L5CX_DET_MOTION_EXTRA_NOISE     0
 #endif
 
-/* Adaptive baseline filter (event-driven, NOT per-frame):
-   When enabled, periodically recalibrates baseline using EMA for zones NOT
-   affected by detection. Compensates for natural drift (temperature,
-   ambient light) without chasing real objects.
+/* Minimum signal threshold:
+   Zones with signal below this are skipped during baseline learning
+   and detection. Prevents false triggers from noisy/blind zones. */
+#define VL53L5CX_DET_MIN_SIGNAL 500
 
-   KEY DESIGN: Only adapt after a "quiet period" of N consecutive frames
-   with NO detections. This prevents baseline corruption when an insect
-   stays in a zone for 30+ seconds - the baseline won't update until the
-   insect leaves AND the zone is stable for the quiet period.
+/* ================================================================
+   Periodic Restart (prevents sensor drift / stuck state)
+   ================================================================ */
 
-   Example at 5Hz (8x8 mode):
-     - ADAPT_INTERVAL = 100 frames = every 20 seconds
-     - QUIET_FRAMES = 50 frames = 10 seconds of no detections required
-     - So baseline adapts at most once every 20s, only if no detections
-       in the preceding 10s. */
-#define VL53L5CX_DET_ADAPTIVE_ENABLED 1       /* Set to 0 to disable for testing */
-#define VL53L5CX_DET_ADAPT_INTERVAL   100     /* Frames between adaptation attempts */
-#define VL53L5CX_DET_QUIET_FRAMES     50      /* Consecutive no-detection frames required */
-#define VL53L5CX_DET_EMA_DIVIDER      64      /* Smoothing factor (64 = moderate speed) */
-#define VL53L5CX_DET_MAX_DRIFT_PCT    10      /* Max % change per adaptation (guardrail) */
+/* Enable periodic restart of ranging to recover from sensor lockups.
+   Set to 0 to disable. Value is in number of frames between restarts.
+   Full cycle: stop → re-init → re-configure → re-learn baseline → start */
+#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED  1
+#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL 100  /* Restart every N frames */
 
-/* Zone reliability tracking (modular - enable/disable for testing):
-   In 8x8 mode (and sometimes 4x4), some zones may have intermittent
-   signal loss. This feature tracks consecutive zero-signal frames and
-   restarts the sensor to recover. If still zero after restart, mark
-   the zone as unreliable and skip it in detection. */
-#define VL53L5CX_DET_ZONE_RELIABILITY_ENABLED 0  /* Set to 0 to disable for testing */
-#define VL53L5CX_DET_ZERO_RESTART_THRESH  10     /* Frames of zero signal before restart */
-#define VL53L5CX_DET_ZERO_UNRELIABLE_THRESH 20   /* Frames after restart to mark unreliable */
-#define VL53L5CX_DET_MAX_RESTARTS         5      /* Max total restarts (prevent loops) */
-#define VL53L5CX_DET_SETTLE_AFTER_RESTART 5      /* Frames to discard after restart */
+/* ================================================================
+   Debug Output Configuration
+   ================================================================ */
 
-/* Periodic ranging restart (modular - enable/disable for testing):
-   Periodically stops and restarts ranging every N frames to test
-   sensor recovery performance. Useful for comparing detection quality
-   before/after restarts and measuring any transient effects.
-   Default DISABLED so it doesn't affect normal operation. */
-#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED  1   /* Set to 1 to enable for testing */
-#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL 500  /* Restart every N frames */
-#define VL53L5CX_DET_PERIODIC_SETTLE_FRAMES    10   /* Frames to discard after restart */
+/* DEBUG MODE 1: Compact ZFRAME (for zone_monitor.py real-time plots)
+   Format: ZFRAME,temp,sig0,dist0,base_sig0,base_dist0,motion0,...
+   Per zone: 5 fields (signal, distance, baseline_signal, baseline_distance, motion)
+   Enables: Signal vs Baseline plot, Distance plot, Motion plot, Drop% heatmap */
+#define VL53L5CX_DET_DEBUG_ZFRAME     1
+#define VL53L5CX_DET_DEBUG_ZFRAME_INT 1    /* Emit ZFRAME every N frames in Update() */
 
-/* Periodic baseline refresh:
-   After each periodic restart, snaps baseline to current readings.
-   This resets signal drops to ~0-2% per zone, simulating a fresh start.
-   No full relearn needed (sensor config is preserved across stop/start).
-   Without this, stale baseline values cause artificially high drops. */
-#define VL53L5CX_DET_PERIODIC_REFRESH_BASELINE 1   /* Refresh baseline after periodic restart */
+/* DEBUG MODE 2: ALLPARAM (for datalogger.py + analysis.py)
+   Format: ALLPARAM,temp,sig0,base_sig0,dist0,base_dist0,amb0,sigma0,reflect0,...
+   Per zone: 12 fields (all parameters)
+   Enables: Full parameter logging, detailed analysis, all heatmaps */
+#define VL53L5CX_DET_DEBUG_ALLPARAMS    1
+#define VL53L5CX_DET_DEBUG_ALLPARAM_INT 50   /* Emit ALLPARAM every N frames */
 
-/* Debug output (legacy, unused - prints are in main.c insect_task) */
-#define VL53L5CX_DET_DEBUG_FRAME_INTERVAL 0
-
-/* Streamlined ZFRAME format (always enabled):
-   Sends only the variables needed for insect detection:
-     ZFRAME,temp,sig0,base0,dist0,motion0,sig1,base1,dist1,motion1,...
-   Per zone: 4 fields (signal, baseline_signal, distance, motion)
-   Total for 8x8: 1 + 64*4 = 257 values (vs. 1 + 64*12 + 64 = 1345 in extended)
-   Python parses this compact format for all plots and heatmaps. */
-#define VL53L5CX_DET_ZFRAME_COMPACT 1
+/* NOTE: Both ZFRAME and ALLPARAM can be enabled simultaneously.
+   - ZFRAME: emitted every frame (compact, for real-time monitoring)
+   - ALLPARAM: emitted every 50 frames (detailed, for datalogging + analysis)
+   - For lower UART bandwidth: disable ZFRAME, keep ALLPARAM
+   - For real-time only: keep ZFRAME, disable ALLPARAM */
 
 /* ================================================================
    Detection Result Structure
    ================================================================ */
 
 /* Trigger source flags */
-#define VL53L5CX_TRIG_SIGNAL  0x01  /* Signal drop triggered detection */
-#define VL53L5CX_TRIG_MOTION  0x02  /* Motion indicator triggered detection */
-#define VL53L5CX_TRIG_BOTH    0x03  /* Both signal and motion triggered */
+#define VL53L5CX_TRIG_SIGNAL  0x01
+#define VL53L5CX_TRIG_MOTION  0x02
+#define VL53L5CX_TRIG_BOTH    0x03
 
 typedef struct {
-    uint8_t  insect_detected;       /* 1 if insect detected this frame */
-    uint8_t  trigger_source;        /* VL53L5CX_TRIG_SIGNAL / MOTION / BOTH */
-    uint8_t  affected_count;        /* Number of affected zones */
-    uint8_t  affected_zones[VL53L5CX_DET_NUM_ZONES];  /* Zone indices */
-    uint32_t affected_drop[VL53L5CX_DET_NUM_ZONES];   /* Drop % per affected zone */
-    uint8_t  valid_measurements;    /* Number of valid zone readings */
+    uint8_t  insect_detected;
+    uint8_t  trigger_source;
+    uint8_t  affected_count;
+    uint8_t  affected_zones[VL53L5CX_DET_NUM_ZONES];
+    uint32_t affected_drop[VL53L5CX_DET_NUM_ZONES];
+    uint8_t  valid_measurements;
 } VL53L5CX_DetectionResult_t;
 
 /* ================================================================
@@ -190,14 +158,15 @@ void VL53L5CX_LearnBaseline(void);
 void VL53L5CX_ResetBaseline(void);
 
 /* --- Detection --- */
-int  VL53L5CX_Update(void);                          /* Returns 1 if new data processed */
-int  VL53L5CX_IsInsectDetected(void);                /* Returns 1 if insect detected */
-VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void); /* Get last detection result */
+int  VL53L5CX_Update(void);
+int  VL53L5CX_IsInsectDetected(void);
+VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void);
 
 /* --- Debug / Diagnostics --- */
 void VL53L5CX_PrintAllZoneParams(void);
 void VL53L5CX_PrintZFrame(void);
-int  VL53L5CX_ScanI2CBus(void);                      /* Returns number of devices found */
+void VL53L5CX_PrintBaselineFrame(void);
+int  VL53L5CX_ScanI2CBus(void);
 
 /* --- Legacy Test Functions --- */
 void VL53L5CX_Validate(void);
