@@ -445,26 +445,29 @@ int VL53L5CX_Update(void)
     }
 #endif
 
-    /* --- MODE 2: Adaptive Refresh (detection-rate based) --- */
+    /* --- MODE 2: Adaptive Refresh (time-based, detection-rate) --- */
 #if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
     {
-        static uint32_t frame_counter = 0;
+        static uint32_t window_start = 0;
         static uint8_t  detection_count = 0;
 
-        frame_counter++;
+        /* Initialize window start on first call */
+        if (window_start == 0)
+            window_start = xTaskGetTickCount();
+
         if (s_last_insect_detected)
             detection_count++;
 
-        /* When window expires, check if too many detections occurred */
-        if (frame_counter >= VL53L5CX_DET_DETECTION_WINDOW) {
-            frame_counter = 0;
+        /* Check if real-time window has expired (uses FreeRTOS tick, always running) */
+        if ((xTaskGetTickCount() - window_start) >= pdMS_TO_TICKS(VL53L5CX_DET_REFRESH_WINDOW_SECS * 1000)) {
+            window_start = xTaskGetTickCount();  /* Reset window */
 
             if (detection_count > VL53L5CX_DET_MAX_DETECTIONS) {
-                printf("[ToF] Adaptive refresh: %d detections in %d frames (max=%d)\n",
-                       detection_count, VL53L5CX_DET_DETECTION_WINDOW,
+                printf("[ToF] Adaptive refresh: %d detections in %ds (max=%d)\n",
+                       detection_count, VL53L5CX_DET_REFRESH_WINDOW_SECS,
                        VL53L5CX_DET_MAX_DETECTIONS);
 
-                /* Stop → Start → Re-learn (ranging must be ON for LearnBaseline) */
+                /* Stop -> Start -> Re-learn (ranging must be ON for LearnBaseline) */
                 vl53l5cx_stop_ranging(&s_dev);
                 vTaskDelay(pdMS_TO_TICKS(50));
                 vl53l5cx_start_ranging(&s_dev);
@@ -473,8 +476,9 @@ int VL53L5CX_Update(void)
 
                 printf("[ToF] Adaptive refresh done.\n");
             } else {
-                printf("[ToF] Window: %d detections (max=%d) — no refresh\n",
-                       detection_count, VL53L5CX_DET_MAX_DETECTIONS);
+                printf("[ToF] Window: %d detections in %ds (max=%d) — no refresh\n",
+                       detection_count, VL53L5CX_DET_REFRESH_WINDOW_SECS,
+                       VL53L5CX_DET_MAX_DETECTIONS);
             }
             detection_count = 0;
         }

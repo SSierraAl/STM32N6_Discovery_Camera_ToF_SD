@@ -110,10 +110,10 @@
 #define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   0
 #define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500  /* Refresh every N frames */
 
-/* --- MODE 2: Adaptive Refresh --- */
+/* --- MODE 2: Adaptive Refresh (time-based) --- */
 #define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
-#define VL53L5CX_DET_DETECTION_WINDOW           150  /* Frame window size */
-#define VL53L5CX_DET_MAX_DETECTIONS             5    /* Max detections before refresh */
+#define VL53L5CX_DET_REFRESH_WINDOW_SECS        10   /* Real-time window in seconds */
+#define VL53L5CX_DET_MAX_DETECTIONS             5    /* Max detections in window before refresh */
 
 /* ================================================================
    Debug Output Configuration
