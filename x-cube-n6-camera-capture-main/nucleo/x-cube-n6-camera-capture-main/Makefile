@@ -59,13 +59,12 @@ C_SOURCES += Src/app_cvt.c
 C_SOURCES += Src/app_fuseprogramming.c
 C_SOURCES += Src/stm32n6xx_it.c
 C_SOURCES += Src/app_cam.c
+C_SOURCES += Src/app_thread.c
+C_SOURCES += Src/perf_debug.c
 C_SOURCES += Src/freertos_bsp.c
 C_SOURCES += Src/app_filex.c
 C_SOURCES += Src/app_sdcard.c
-C_SOURCES += Src/app_thread.c
-C_SOURCES += Src/vl53l5cx_detection.c
-C_SOURCES += Src/ws2812.c
-C_SOURCES += Src/vlc5_tof.c
+C
 
 # ASM sources
 ASM_SOURCES =

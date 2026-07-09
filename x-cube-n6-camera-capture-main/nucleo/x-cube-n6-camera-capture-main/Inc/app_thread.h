@@ -25,6 +25,7 @@
 #include "task.h"
 #include "queue.h"
 #include "semphr.h"
+#include "perf_debug.h"
 
 /* ================================================================
    SENSOR STATES
@@ -149,6 +150,9 @@ extern SemaphoreHandle_t storage_done_sem;
 
 /* Shared state */
 extern volatile SensorState_t g_sensor_state;
+
+/* Shared performance timer (used across app_cam.c and app_thread.c) */
+extern PerfTimer_t g_perf_timer;
 
 /* ================================================================
    INITIALIZATION

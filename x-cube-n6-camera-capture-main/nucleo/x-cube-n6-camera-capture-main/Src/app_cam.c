@@ -1,9 +1,9 @@
 /**
- ******************************************************************************
+ * ******************************************************************************
  * @file    app_cam.c
  * @author  GPM Application Team
  *
- ******************************************************************************
+ * ******************************************************************************
  * @attention
  *
  * Copyright (c) 2023 STMicroelectronics.
@@ -13,17 +13,21 @@
  * in the root directory of this software component.
  * If no LICENSE file comes with this software, it is provided AS-IS.
  *
- ******************************************************************************
+ * ******************************************************************************
  */
 #include <assert.h>
 #include "cmw_camera.h"
 #include "app_cam.h"
 #include "app_config.h"
+#include "perf_debug.h"
 #include "stm32n6xx.h"
 #include "stm32n6xx_hal.h"
 #include "utils.h"
 #include "FreeRTOS.h"
 #include "task.h"
+
+/* External reference to shared perf timer */
+extern PerfTimer_t g_perf_timer;
 
 /* Define sensor orientation */
 #if CAMERA_SELFY == 1
@@ -289,20 +293,32 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
   /* ---- sanity checks ---- */
   int min_size = width * height * 2;  /* YUV422 = 2 bpp */
 
+#if PERF_DEBUG_LEVEL >= 2
   printf("[CAM] Enter: %dx%d, min_buf=%d, avail=%d\n", width, height, min_size, buf_size);
+#endif
 
   if (buf == NULL || buf_size <= 0) {
+#if PERF_DEBUG_LEVEL >= 1
     printf("[CAM] FAIL: buf NULL or size 0\n");
+#endif
     return -1;
   }
   if (buf_size < min_size) {
+#if PERF_DEBUG_LEVEL >= 1
     printf("[CAM] FAIL: buffer too small (%d < %d)\n", buf_size, min_size);
+#endif
     return -1;
   }
   if (warmup_frames < 1) warmup_frames = 8;
 
+  /* ---- PERF: Mark camera init start ---- */
+  PERF_MARK(g_perf_timer, CAM_INIT);
+
   /* ---- 1. Init camera ---- */
+#if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Init camera %dx%d@%d YUV422 ...\n", width, height, fps);
+#endif
+
   CAM_conf_t conf = {0};
   conf.capture_width        = width;
   conf.capture_height       = height;
@@ -311,6 +327,9 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
   conf.is_rgb_swap          = 0;
 
   CAM_Init(&conf);
+
+  /* ---- PERF: Mark exposure config ---- */
+  PERF_MARK(g_perf_timer, CAM_EXPO);
 
   /* ---- Apply camera quality settings from app_config.h ----
      CRITICAL: Must be AFTER CAM_Init() so sensor defaults don't override */
@@ -329,25 +348,44 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
     int32_t readback_expo, readback_gain;
     CMW_CAMERA_GetExposure(&readback_expo);
     CMW_CAMERA_GetGain(&readback_gain);
+
+#if PERF_DEBUG_LEVEL >= 2
     printf("[CAM] SetExposure(%ld)->rc=%ld, SetGain(%ld)->rc=%ld\n",
            (long)CAM_EXPOSURE_VALUE, (long)ret_expo,
            (long)CAM_GAIN_VALUE, (long)ret_gain);
     printf("[CAM] Readback: exposure=%ld, gain=%ld\n", (long)readback_expo, (long)readback_gain);
+#elif PERF_DEBUG_LEVEL >= 1
+    printf("[CAM] Exposure=%ld Gain=%ld (rc=%ld)\n",
+           (long)readback_expo, (long)readback_gain, (long)ret_expo);
+#endif
   } else {
+#if PERF_DEBUG_LEVEL >= 2
     printf("[CAM] SetExposureMode=%ld rc=%ld\n", (long)CAM_EXPOSURE_MODE, (long)ret_expo_mode);
+#endif
   }
+
+#if PERF_DEBUG_LEVEL >= 2
   printf("[CAM] Camera init done\n");
+#endif
 
   DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
+
+  /* ---- PERF: Mark warmup start ---- */
+  PERF_MARK(g_perf_timer, CAM_WARMUP);
 
   /* Reset frame counter */
   CAM_ResetFrameCounter(warmup_frames + 1);
 
   /* ---- 2. Start CONTINUOUS capture into buf ---- */
-  printf("[CAM] Start continuous capture ...\n");
+#if PERF_DEBUG_LEVEL >= 1
+  printf("[CAM] Start continuous capture (warmup=%d + 1)...\n", warmup_frames);
+#endif
+
   CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
-  printf("[CAM] Capture started. Waiting %d frames...\n",
-         warmup_frames + 1);
+
+#if PERF_DEBUG_LEVEL >= 3
+  printf("[CAM] Capture started. Waiting %d frames...\n", warmup_frames + 1);
+#endif
 
   /* ---- 3. Wait for enough frames ---- */
   uint32_t t0 = HAL_GetTick();
@@ -356,25 +394,44 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
     vTaskDelay(pdMS_TO_TICKS(5));
 
     if (HAL_GetTick() - t0 > 5000) {
-      printf("[CAM] TIMEOUT! Only got %lu frames (wanted %d)\n",
-             (unsigned long)g_frame_count, warmup_frames + 1);
+#if PERF_DEBUG_LEVEL >= 1
+      printf("[CAM] TIMEOUT! Got %lu/%d frames in %lu ms\n",
+             (unsigned long)g_frame_count, warmup_frames + 1,
+             (unsigned long)(HAL_GetTick() - t0));
+#endif
       HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
       CAM_Deinit();
       return -1;
     }
   }
-  printf("[CAM] Got %lu frames. Frame #%d captured!\n",
-         (unsigned long)g_frame_count, warmup_frames + 1);
+
+#if PERF_DEBUG_LEVEL >= 2
+  printf("[CAM] Got %lu frames in %lu ms (~%lu ms/frame)\n",
+         (unsigned long)g_frame_count,
+         (unsigned long)(HAL_GetTick() - t0),
+         g_frame_count > 0 ? (HAL_GetTick() - t0) / g_frame_count : 0);
+#endif
+
+  /* ---- PERF: Mark frame captured ---- */
+  PERF_MARK(g_perf_timer, CAM_SNAP);
 
   /* ---- 4. Stop DCMIPP — buf has the clean frame ---- */
-  printf("[CAM] Stop DCMIPP ...\n");
+  PERF_MARK(g_perf_timer, CAM_STOP);
   HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
   HAL_Delay(5);
 
   /* ---- 5. Deinit camera ---- */
+  PERF_MARK(g_perf_timer, CAM_DEINIT);
+
+#if PERF_DEBUG_LEVEL >= 2
   printf("[CAM] Deinit camera ...\n");
+#endif
+
   CAM_Deinit();
+
+#if PERF_DEBUG_LEVEL >= 3
   printf("[CAM] Done. buf=%p size=%d\n", (void*)buf, min_size);
+#endif
 
   return 0;
 }
@@ -419,7 +476,10 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size,
   if (warmup_frames < 0) warmup_frames = 0;
 
   /* ---- 1. Init camera ---- */
+#if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Init camera %dx%d@%d YUV422 ...\n", width, height, fps);
+#endif
+
   CAM_conf_t conf = {0};
   conf.capture_width        = width;
   conf.capture_height       = height;
@@ -443,23 +503,33 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size,
     int32_t readback_expo, readback_gain;
     CMW_CAMERA_GetExposure(&readback_expo);
     CMW_CAMERA_GetGain(&readback_gain);
+
+#if PERF_DEBUG_LEVEL >= 2
     printf("[CAM] SetExposure(%ld)->rc=%ld, SetGain(%ld)->rc=%ld\n",
            (long)CAM_EXPOSURE_VALUE, (long)ret_expo,
            (long)CAM_GAIN_VALUE, (long)ret_gain);
     printf("[CAM] Readback: exposure=%ld, gain=%ld\n", (long)readback_expo, (long)readback_gain);
+#endif
   } else {
+#if PERF_DEBUG_LEVEL >= 2
     printf("[CAM] SetExposureMode=%ld rc=%ld\n", (long)CAM_EXPOSURE_MODE, (long)ret_expo_mode);
+#endif
   }
 
   DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
 
   /* ---- 2. Start CONTINUOUS capture into buf ---- */
+#if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Start continuous capture ...\n");
+#endif
+
   CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
 
   /* ---- 3. Wait for warmup frames (if requested) ---- */
   if (warmup_frames > 0) {
+#if PERF_DEBUG_LEVEL >= 1
     printf("[CAM] Warmup: discarding %d frames...\n", warmup_frames);
+#endif
     CAM_ResetFrameCounter(warmup_frames);
 
     uint32_t t0 = HAL_GetTick();
@@ -468,17 +538,23 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size,
       vTaskDelay(pdMS_TO_TICKS(5));
 
       if (HAL_GetTick() - t0 > 5000) {
-        printf("[CAM] WARMUP TIMEOUT! Got %lu frames (wanted %d)\n",
+#if PERF_DEBUG_LEVEL >= 1
+        printf("[CAM] WARMUP TIMEOUT! Got %lu/%d frames\n",
                (unsigned long)g_frame_count, warmup_frames);
+#endif
         HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
         CAM_Deinit();
         return -1;
       }
     }
-    printf("[CAM] Warmup done (%lu frames discarded). Camera RUNNING.\n",
+#if PERF_DEBUG_LEVEL >= 1
+    printf("[CAM] Warmup done (%lu frames). Camera RUNNING.\n",
            (unsigned long)g_frame_count);
+#endif
   } else {
+#if PERF_DEBUG_LEVEL >= 1
     printf("[CAM] No warmup. Camera RUNNING.\n");
+#endif
   }
 
   return 0;
@@ -525,38 +601,29 @@ int CAM_ContinuousSnap(uint8_t *dest_buf, uint32_t frame_size)
 
     DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
 
-    /* --- Step 1: STOP DCMIPP pipe to prevent torn frames ---
-       This is the KEY fix for the image glitch. While the pipe runs in
-       CONTINUOUS mode, DCMIPP DMA overwrites capture_buf row by row.
-       If we memcpy simultaneously, we get a "torn" frame where some
-       rows are from frame N and others from frame N+1 — visible as
-       horizontal bands or a "jump" in the image.
-       By stopping the pipe first, we guarantee an atomic copy. */
+    /* --- Step 1: STOP DCMIPP pipe to prevent torn frames --- */
     HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
 
     /* Small delay to ensure DCMIPP has fully stopped and DMA is idle */
     for (volatile int i = 0; i < 100; i++);
 
-    /* --- Step 2: D-Cache coherency ---
-       DCMIPP DMA writes to capture_buf bypass the D-Cache.  Before the CPU
-       reads capture_buf we must INVALIDATE so it fetches the fresh data from
-       PSRAM instead of serving stale cache lines. */
+    /* --- Step 2: D-Cache coherency --- */
     SCB_InvalidateDCache_by_Addr((uint32_t *)capture_buf, frame_size);
 
     /* --- Step 3: memcpy — guaranteed no tearing since pipe is stopped --- */
     memcpy(dest_buf, capture_buf, frame_size);
 
-    /* --- Step 4: Clean destination — push CPU-written data to PSRAM for SD DMA */
+    /* --- Step 4: Clean destination — push CPU-written data to PSRAM for SD DMA --- */
     SCB_CleanDCache_by_Addr((uint32_t *)dest_buf, frame_size);
 
-    /* --- Step 5: RESTART the DCMIPP pipe — resume continuous capture ---
-       CMW_CAMERA_Start reinitializes the pipe with the same configuration
-       and buffer address. This is safe because the camera was already
-       initialized; we're just restarting the DMA transfer. */
+    /* --- Step 5: RESTART the DCMIPP pipe --- */
     CMW_CAMERA_Start(DCMIPP_PIPE1, capture_buf, CMW_MODE_CONTINUOUS);
 
     uint32_t elapsed = HAL_GetTick() - t0;
-    printf("[CAM] ContinuousSnap: stop+copy+restart (glitch-free) in %lu ms\n", (unsigned long)elapsed);
+
+#if PERF_DEBUG_LEVEL >= 1
+    printf("[CAM] ContinuousSnap: stop+copy+restart in %lu ms\n", (unsigned long)elapsed);
+#endif
 
     return 0;
 }
@@ -571,6 +638,8 @@ int CAM_ContinuousStop(void)
     HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
   }
   CAM_Deinit();
+#if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Continuous mode stopped.\n");
+#endif
   return 0;
 }

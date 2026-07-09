@@ -162,6 +162,11 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/partition_stm32n657xx.h</locationURI>
 		</link>
 		<link>
+			<name>Inc/perf_debug.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Inc/perf_debug.h</locationURI>
+		</link>
+		<link>
 			<name>Inc/platform.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/platform.h</locationURI>
@@ -340,6 +345,11 @@
 			<name>Src/main.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Src/main.c</locationURI>
+		</link>
+		<link>
+			<name>Src/perf_debug.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Src/perf_debug.c</locationURI>
 		</link>
 		<link>
 			<name>Src/platform.c</name>

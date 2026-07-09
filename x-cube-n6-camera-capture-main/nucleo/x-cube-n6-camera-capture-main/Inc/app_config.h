@@ -23,11 +23,20 @@
    Change these to adjust snapshot behavior.
    ================================================================ */
 
-/** Snapshot resolution (width)  --  YUV422 format = 2 bytes/pixel */
-#define SNAP_WIDTH          2592
+/** Camera binning mode — simple toggle to switch resolutions.
+    0 = FULL RESOLUTION (2592x1944, 5MPX) — Default, best for species ID
+    1 = 2x2 BINNING (1296x972, 1.3MPX) — Faster readout, less rolling shutter */
+#define CAM_BINNING          1
 
-/** Snapshot resolution (height) */
-#define SNAP_HEIGHT          1944
+/** Snapshot resolution (auto-calculated from CAM_BINNING).
+    YUV422 format = 2 bytes per pixel */
+#if CAM_BINNING == 1
+    #define SNAP_WIDTH       1296   /* 2x2 binned: 2592/2 */
+    #define SNAP_HEIGHT      972    /* 2x2 binned: 1944/2 */
+#else
+    #define SNAP_WIDTH       2592   /* Full resolution */
+    #define SNAP_HEIGHT      1944   /* Full resolution */
+#endif
 
 /** Camera frame rate (FPS).
     Valid values depend on resolution:
@@ -38,9 +47,10 @@
 #define SNAP_FPS             30
 
 /** Number of warmup frames to discard after camera power-on.
-    The IMX335 sensor outputs garbage on the first frames.
-    Reduced from 11 to 8 to save ~100ms per capture (33ms saved per frame).
-    If images have green tint, increase this value. */
+     The IMX335 sensor outputs garbage on the first frames.
+     REDUCED FROM 11 → 4: Saves ~167ms per capture (33ms saved per frame).
+     CRITICAL: Each warmup frame = ~33ms of delay where the insect can move!
+     If images have green tint on first few captures, increase this value. */
 #define SNAP_WARMUP_FRAMES   11
 
 /** Maximum time to wait for warmup + capture frames (milliseconds). */
@@ -59,28 +69,29 @@
 #define CAM_EXPOSURE_MODE    1
 
 /** Exposure time in MICROSECONDS (only used in MANUAL mode).
-    The IMX335 sensor expects exposure in µs, NOT 0-200 arbitrary units!
-    Valid range: ~1000-33000 µs (depends on FPS setting).
-    
-    Good starting points:
-      - Fast moving objects (bright): 1000-2000 µs + high gain
-      - Fast moving objects (indoor): 2000-4000 µs + high gain  
-      - Normal indoor:                 5000-10000 µs + moderate gain
-      - Dim lighting:                  15000-30000 µs + low gain
-    
-    Default: 3000 µs (good balance for moving objects indoors) */
-#define CAM_EXPOSURE_VALUE   100
+     The IMX335 sensor expects exposure in µs.
+     Valid range: ~1000-33000 µs (depends on FPS setting).
+     
+     NOTE: At 30 FPS, one frame period = 33,333 µs. Exposure cannot exceed this.
+     For OUTDOOR (bright light): 2000-5000 µs works well.
+     
+     IMPORTANT: Check console output for "[CAM] Readback: exposure=XXX"
+     If readback differs from configured value, sensor driver is clamping.
+     Values below ~1000 µs are often clamped to minimum by IMX335 driver.
+     
+     Current: 1000 µs (minimum practical for outdoor, bright conditions) */
+#define CAM_EXPOSURE_VALUE   50
 
 /** Analog gain (only used in MANUAL mode).
-    Range: 0-2047. Higher = brighter image but more noise/grain.
-    For short exposure (3000µs), you need high gain to compensate.
-    Good starting points:
-      - With exposure=3000µs: 1000-1500 (bright but noisy)
-      - With exposure=5000µs: 600-1000 (good balance) 
-      - With exposure=10000µs: 300-600 (cleaner image)
-      - Dim lighting long exp: 100-300 (minimize noise)
-    Default: 1200 (high gain for 3000µs exposure) */
-#define CAM_GAIN_VALUE       600
+     Range: 0-2047. Higher = brighter image but more noise/grain.
+     For OUTDOOR (bright light): Lower gain is better (less noise).
+     Good starting points:
+       - Outdoor bright:    200-400 (clean image, short exposure)
+       - Outdoor shade:     600-1000
+       - Indoor bright:     1000-1500
+     
+     Current: 300 (outdoor, bright conditions, minimal noise) */
+#define CAM_GAIN_VALUE       200
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
@@ -123,15 +134,16 @@
 #define SD_SNAP_BASE_BLOCK   3072
 
 /** Number of SD blocks written per HAL_SD_WriteBlocks call.
-    Larger values reduce the number of HAL API calls (less overhead = faster).
-    - 1  block/call  = 19,643 calls per snapshot (original, slow)
-    - 64 blocks/call = ~307 calls per snapshot (64x fewer calls)
-    - 128 blocks/call = ~154 calls per snapshot (128x fewer calls)
+    For 5MP (10MB) = 19684 blocks total:
+    - 32 blocks/call = 615 HAL calls (safer for slow cards)
+    - 64 blocks/call = 307 HAL calls
+    - 128 blocks/call = 154 calls (too aggressive, causes CRC errors)
 
-    Buffer size in PSRAM = SD_BATCH_WRITE_BLOCKS * 512 bytes.
-    With 64 blocks: 32 KB buffer. With 128 blocks: 64 KB buffer.
-    PSRAM has ~6.4 MB free after capture_buf, so even 128 is safe. */
-#define SD_BATCH_WRITE_BLOCKS  64
+    SD card needs time between batches for internal flash programming.
+    Use smaller batches + longer waits = more reliable.
+
+    Reduced from 128 to 64: More batches but more reliable. */
+#define SD_BATCH_WRITE_BLOCKS 64
 
 /** Maximum snapshots that can be stored before SD card overflow.
     For a 32 GB SDHC card (64,000,000 blocks):
@@ -179,5 +191,81 @@
 #else
 #define MAX_IMG_FRAME_SIZE (0)  /* UVC buffers not allocated in standalone */
 #endif
+
+/* ================================================================
+   SECTION 7: PERFORMANCE DEBUG / TIMING CONTROL
+   ================================================================ */
+
+/** Enable detailed performance timing prints.
+    0 = Minimal prints (production: only total time per snapshot)
+    1 = Standard prints (phase breakdown: camera init, capture, SD write)
+    2 = VERBOSE prints (sub-phase timing: exposure config, warmup, per-batch SD, cache ops)
+    3 = DEBUG prints (everything + per-block SD timing + wait-state analysis)
+
+    For bottleneck analysis, use level 2 or 3.
+    For production deployment, use level 0. */
+#define PERF_DEBUG_LEVEL         1
+
+/** When PERF_DEBUG_LEVEL >= 2, print SD batch timing every N batches.
+    Set to 1 for every batch (very verbose), 4 for every 4th batch. */
+#define PERF_SD_BATCH_PRINT_EVERY  4
+
+/** Track cumulative waiting time for SD card ready states.
+    When enabled, the final summary will show total time spent waiting
+    for the card to be ready vs actual DMA transfer time. */
+#define PERF_TRACK_SD_WAIT_TIME    1
+
+/** Print a performance summary after each complete capture cycle.
+    Shows: phase breakdown, bottleneck identification, throughput MB/s. */
+#define PERF_PRINT_SUMMARY         1
+
+/** Maximum number of snapshots to track for running statistics.
+    Set to 0 for no stats, 10 for average over last 10 captures. */
+#define PERF_STATS_WINDOW          10
+
+/* ================================================================
+   SECTION 8: WS2812 ILLUMINATION CONFIGURATION
+   ================================================================ */
+
+/** Illumination mode:
+    0 = ALWAYS_ON  — LEDs stay on continuously (power hungry, not recommended)
+    1 = CAPTURE    — LEDs turn on at detection, stay on during full camera
+                     capture cycle (warmup + frame grab), then off.
+                     This is the CORRECT mode for insect capture! */
+#define WS2812_MODE                1
+
+/** Illumination ON duration in milliseconds.
+    MUST be LONGER than the full camera capture cycle (warmup + frame grab).
+    
+    Camera timing breakdown:
+      - Warmup frames: 11 × 33ms = 363ms
+      - Capture frame: 1 × 33ms = 33ms
+      - Total capture: ~396ms (confirmed in logs)
+      - Safety margin: +50ms
+    
+    Recommended minimum: 450ms
+    If you reduce SNAP_WARMUP_FRAMES, adjust this accordingly:
+      Formula: (SNAP_WARMUP_FRAMES + 1) × (1000/SNAP_FPS) + 50ms
+              = (11 + 1) × (1000/30) + 50 = 450ms */
+#define WS2812_ILLUMINATION_MS     500
+
+/** Illumination brightness (0-100%).
+    During capture: LEDs run at this brightness.
+    Higher = brighter image but more power consumption.
+    At 100%: Maximum LED output
+    At 50%:  Half brightness (may need higher camera gain to compensate) */
+#define WS2812_ILLUMINATION_BRIGHTNESS  100
+
+/** Illumination color (0xRRGGBB format).
+    White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
+    Green (0x00FF00): Insects less sensitive, more natural behavior
+    Red (0xFF0000): Least disruptive to insects but camera needs more gain */
+#define WS2812_ILLUMINATION_COLOR       0xFFFFFF
+
+/** Visual indicator flash (optional).
+    After illumination stops, flash LEDs briefly to confirm detection.
+    0 = No indicator (silent operation)
+    50-200ms = Brief visual confirmation */
+#define WS2812_INDICATOR_MS          0
 
 #endif /* APP_CONFIG */

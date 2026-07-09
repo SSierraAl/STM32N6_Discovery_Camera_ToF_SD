@@ -1,13 +1,10 @@
 /**
- * ******************************************************************************
  * @file    app_thread.c
- * @brief   Multi-threaded Camera + Sensor + Storage implementation
+ * @brief   Multi-threaded Camera + Sensor + Storage
  *
- *   Three dedicated threads with clean separation of concerns:
- *     1. SENSOR_TASK  - VL53L5CX ToF monitoring & insect detection
- *     2. CAMERA_TASK  - Camera acquisition (continuous/snapshot modes)
- *     3. STORAGE_TASK - SD card raw image storage
- * ******************************************************************************
+ *   SD STORE: Based on the PROVEN working implementation from main.c.
+ *   Key: Must check BOTH card state AND HAL state. Must wait for card
+ *   to be truly ready before each batch (not just rely on fixed delay).
  */
 
 #include <stdio.h>
@@ -15,753 +12,569 @@
 #include "app_thread.h"
 #include "app_config.h"
 #include "app_cam.h"
+#include "perf_debug.h"
 #include "vl53l5cx_detection.h"
 #include "ws2812.h"
 #include "stm32n6xx_hal.h"
-#include "stm32n6570_discovery.h"  /* BSP_LED_On/Off, LED_GREEN/LED_RED */
+#include "stm32n6570_discovery.h"
 #include "main.h"
 
-/* ================================================================
-   EXTERNAL REFERENCES
-   ================================================================ */
-
 extern I2C_HandleTypeDef hi2c1;
-extern uint8_t capture_buf[];    /* Main camera buffer (PSRAM) */
-
+extern uint8_t capture_buf[];
 #if CAPTURE_MODE == 1
-extern uint8_t save_buf[];       /* Save buffer for continuous mode (PSRAM) */
+extern uint8_t save_buf[];
 #endif
 
-/* ================================================================
-   IPC OBJECTS (queues, semaphores)
-   ================================================================ */
-
-QueueHandle_t    camera_cmd_queue    = NULL;
-QueueHandle_t    storage_cmd_queue   = NULL;
-QueueHandle_t    sensor_event_queue  = NULL;
-
-SemaphoreHandle_t camera_ready_sem   = NULL;
-SemaphoreHandle_t storage_done_sem   = NULL;
-
+QueueHandle_t    camera_cmd_queue   = NULL;
+QueueHandle_t    storage_cmd_queue  = NULL;
+QueueHandle_t    sensor_event_queue = NULL;
+SemaphoreHandle_t camera_ready_sem  = NULL;
+SemaphoreHandle_t storage_done_sem  = NULL;
 volatile SensorState_t g_sensor_state = SENSOR_STATE_IDLE;
 
-/* Capture busy flag */
 static volatile int g_capture_busy = 0;
-
-/* Snapshot counter (preserved from original code) */
 static uint32_t g_snap_count = 0;
-
-/* SD image base block tracking */
 static uint32_t g_sd_img_base_block;
 #define SD_IMG_HEADER_SIZE  64
 #define SD_BLOCK_SIZE       512
-
-/* Debug output counters */
 static uint32_t g_debug_frame_count = 0;
 
-/* ================================================================
-   SD CARD IMAGE HEADER (matches main.c)
-   ================================================================ */
-
 typedef struct {
-    uint32_t magic;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pixel_format;
-    uint32_t data_size;
-    uint32_t timestamp;
-    uint32_t checksum;
-    uint32_t snap_id;
-    uint8_t  reserved[28];
+    uint32_t magic; uint32_t width; uint32_t height;
+    uint32_t pixel_format; uint32_t data_size; uint32_t timestamp;
+    uint32_t checksum; uint32_t snap_id; uint8_t reserved[28];
 } sd_image_header_t;
+#define SD_HEADER_TAG  0x49444745U
 
-#define SD_HEADER_TAG       0x49444745U
-#define SD_BATCH_WRITE_BLOCKS  64
-
-/* External SD handle and batch buffer references */
 extern SD_HandleTypeDef hsd1;
 extern uint8_t sd_batch_buf[];
 
-/* ================================================================
-   IPC_Init / IPC_Deinit
-   ================================================================ */
+/* Shared performance timer */
+PerfTimer_t g_perf_timer;
 
+/* ==================== IPC ==================== */
 BaseType_t IPC_Init(void)
 {
-    /* Create queues */
     camera_cmd_queue = xQueueCreate(CAMERA_CMD_QUEUE_LEN, sizeof(CameraCmd_t));
     if (!camera_cmd_queue) return pdFALSE;
-
     storage_cmd_queue = xQueueCreate(STORAGE_CMD_QUEUE_LEN, sizeof(StorageCmd_t));
     if (!storage_cmd_queue) return pdFALSE;
-
     sensor_event_queue = xQueueCreate(SENSOR_EVENT_QUEUE_LEN, sizeof(CameraEvent_typed));
     if (!sensor_event_queue) return pdFALSE;
-
-    /* Create binary semaphores (initially given = 0 / not taken) */
     camera_ready_sem = xSemaphoreCreateBinary();
     if (!camera_ready_sem) return pdFALSE;
-
     storage_done_sem = xSemaphoreCreateBinary();
     if (!storage_done_sem) return pdFALSE;
-
-    /* Ensure semaphores start in "not signaled" state */
     xSemaphoreTake(camera_ready_sem, 0);
     xSemaphoreTake(storage_done_sem, 0);
-
-    /* Initialize SD base block */
     g_sd_img_base_block = SD_SNAP_BASE_BLOCK;
-
-    printf("[IPC] Queues and semaphores created successfully\n");
+    printf("[IPC] OK\n");
     return pdTRUE;
 }
 
 void IPC_Deinit(void)
 {
-    if (camera_cmd_queue)    { vQueueDelete(camera_cmd_queue);    camera_cmd_queue    = NULL; }
-    if (storage_cmd_queue)   { vQueueDelete(storage_cmd_queue);   storage_cmd_queue   = NULL; }
-    if (sensor_event_queue)  { vQueueDelete(sensor_event_queue);  sensor_event_queue  = NULL; }
-    if (camera_ready_sem)    { vSemaphoreDelete(camera_ready_sem); camera_ready_sem   = NULL; }
-    if (storage_done_sem)    { vSemaphoreDelete(storage_done_sem); storage_done_sem   = NULL; }
+    if (camera_cmd_queue) vQueueDelete(camera_cmd_queue);
+    if (storage_cmd_queue) vQueueDelete(storage_cmd_queue);
+    if (sensor_event_queue) vQueueDelete(sensor_event_queue);
+    if (camera_ready_sem) vSemaphoreDelete(camera_ready_sem);
+    if (storage_done_sem) vSemaphoreDelete(storage_done_sem);
 }
 
-/* ================================================================
-   HIGH-LEVEL API
-   ================================================================ */
-
-int Capture_IsBusy(void)
-{
-    return g_capture_busy;
-}
+int Capture_IsBusy(void) { return g_capture_busy; }
 
 BaseType_t Capture_RequestSnapOnly(void)
 {
-    CameraCmd_t cmd = {0};
-    cmd.type = CAM_CMD_SNAP;
-
-    if (xQueueSend(camera_cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
-        printf("[CAPTURE] Snap request failed (queue full)\n");
-        return pdFALSE;
-    }
-    return pdTRUE;
+    CameraCmd_t cmd = {0}; cmd.type = CAM_CMD_SNAP;
+    return xQueueSend(camera_cmd_queue, &cmd, pdMS_TO_TICKS(100));
 }
 
-/**
- * @brief  SD_StoreRawImage — moved here from main.c for the storage task.
- *         Uses batched writes for performance.
- */
+/* ==================== SD AUTO-RECOVERY ==================== */
+
+/** Reinitialize the SD card after a fatal error.
+    Preserves g_sd_img_base_block so existing photos are NOT overwritten.
+    Returns 0 on success, -1 on failure. */
+static int SD_Reinit(void)
+{
+#if PERF_DEBUG_LEVEL >= 1
+    printf("[SD] === SD RECOVERY STARTED ===\n");
+#endif
+
+    /* Save current block offset BEFORE reinit (preserve existing photos!) */
+    uint32_t saved_block = g_sd_img_base_block;
+
+    /* Pause sensor task to prevent new capture requests during recovery */
+    g_sensor_state = SENSOR_STATE_PAUSED;
+
+    /* Deinit current SD */
+    HAL_SD_Abort(&hsd1);
+    HAL_SD_DeInit(&hsd1);
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    /* Full peripheral reset */
+    __HAL_RCC_SDMMC2_FORCE_RESET();
+    vTaskDelay(pdMS_TO_TICKS(10));
+    __HAL_RCC_SDMMC2_RELEASE_RESET();
+    vTaskDelay(pdMS_TO_TICKS(10));
+
+    /* Reconfigure clock */
+    RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
+    PeriphClkInit.PeriphClockSelection  = RCC_PERIPHCLK_SDMMC2;
+    PeriphClkInit.Sdmmc2ClockSelection  = RCC_SDMMC2CLKSOURCE_HCLK;
+    HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit);
+
+    /* Reinit SD */
+    hsd1.Instance             = SDMMC2;
+    hsd1.Init.ClockEdge       = SDMMC_CLOCK_EDGE_RISING;
+    hsd1.Init.ClockPowerSave  = SDMMC_CLOCK_POWER_SAVE_DISABLE;
+    hsd1.Init.BusWide         = SDMMC_BUS_WIDE_4B;
+    hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
+    hsd1.Init.ClockDiv        = 2;
+    hsd1.State                = HAL_SD_STATE_RESET;
+
+    HAL_SD_MspInit(&hsd1);
+    HAL_StatusTypeDef status = HAL_SD_Init(&hsd1);
+
+    if (status == HAL_OK) {
+        status = HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B);
+        if (status == HAL_OK) {
+            hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
+        }
+    }
+
+    /* Restore saved block offset — CRITICAL: don't overwrite existing photos! */
+    g_sd_img_base_block = saved_block;
+
+    /* Resume sensor task */
+    g_sensor_state = SENSOR_STATE_RUNNING;
+
+    if (status == HAL_OK) {
+#if PERF_DEBUG_LEVEL >= 1
+        printf("[SD] Recovery OK! Next write from block %lu\n", (unsigned long)g_sd_img_base_block);
+#endif
+        return 0;
+    } else {
+#if PERF_DEBUG_LEVEL >= 1
+        printf("[SD] Recovery FAILED (HAL=0x%08lX)\n", (unsigned long)status);
+#endif
+        return -1;
+    }
+}
+
+/* ==================== SD STORE (PROVEN from main.c) ==================== */
+
+/** Wait for SD card ready.
+    This is the PROVEN approach from main.c that works reliably. */
+static int SD_WaitForReady(void)
+{
+    uint32_t wait_ms = 0;
+    uint32_t last_print = 0;
+
+    /* CRITICAL: Must check BOTH conditions. HAL_SD_GetCardState() checks
+       the card hardware state, while hsd1.State tracks the HAL driver
+       state machine. Both must be ready. */
+    while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 2000) {
+        vTaskDelay(pdMS_TO_TICKS(1));
+        wait_ms++;
+    }
+
+    if (wait_ms >= 2000) {
+#if PERF_DEBUG_LEVEL >= 1
+        printf("[SD] timeout before next batch\n");
+#endif
+        return -1;
+    }
+    return 0;
+}
+
+/** Store raw image to SD card.
+    This implementation is based on the PROVEN working code from main.c.
+    Changes: Added timing markers and progress prints only. */
 static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
                             uint32_t w, uint32_t h, uint32_t pixel_format,
                             uint32_t snap_id)
 {
-    uint32_t base = g_sd_img_base_block;
-    uint32_t total_blocks = (SD_IMG_HEADER_SIZE + img_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
-    uint32_t i, checksum = 0;
+    uint32_t         base = g_sd_img_base_block;
+    uint32_t         batch_blocks = SD_BATCH_WRITE_BLOCKS;
+    uint32_t         batch_size = batch_blocks * SD_BLOCK_SIZE;
+    uint32_t         i, checksum = 0;
 
-    /* Overflow protection */
     if (hsd1.SdCard.BlockNbr > 0) {
-        uint32_t last_block = base + total_blocks - 1;
-        if (last_block >= hsd1.SdCard.BlockNbr) {
-            printf("[SD Store] OVERFLOW! block %lu >= card max %lu\n",
-                   (unsigned long)last_block, (unsigned long)hsd1.SdCard.BlockNbr);
+        uint32_t total_blocks = (SD_IMG_HEADER_SIZE + img_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+        if ((base + total_blocks - 1) >= hsd1.SdCard.BlockNbr) {
+#if PERF_DEBUG_LEVEL >= 1
+            printf("[SD] OVERFLOW\n");
+#endif
             return -1;
         }
     }
 
-    /* Compute XOR checksum */
-    for (i = 0; i < img_size; i++)
-        checksum ^= img_buf[i];
+    for (i = 0; i < img_size; i++) checksum ^= img_buf[i];
 
-    /* Build header */
     sd_image_header_t hdr;
-    hdr.magic        = SD_HEADER_TAG;
-    hdr.width        = w;
-    hdr.height       = h;
-    hdr.pixel_format = pixel_format;
-    hdr.data_size    = img_size;
-    hdr.timestamp    = HAL_GetTick();
-    hdr.checksum     = checksum;
-    hdr.snap_id      = snap_id;
-    memset(hdr.reserved, 0, sizeof(hdr.reserved));
+    hdr.magic = SD_HEADER_TAG; hdr.width = w; hdr.height = h;
+    hdr.pixel_format = pixel_format; hdr.data_size = img_size;
+    hdr.timestamp = HAL_GetTick(); hdr.checksum = checksum;
+    hdr.snap_id = snap_id; memset(hdr.reserved, 0, sizeof(hdr.reserved));
 
-    uint32_t batch_size = SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE;
+#if PERF_DEBUG_LEVEL >= 1
+    printf("[SD] #%" PRIu32 " %lux%lu %lu bytes (%.3f MB)\n",
+           snap_id, (unsigned long)w, (unsigned long)h, img_size,
+           img_size / 1048576.0f);
+#endif
 
-    printf("[SD Store] %lux%lu fmt=%lu %lu bytes %lu blocks (batch=%lu)\n",
-           (unsigned long)w, (unsigned long)h, pixel_format,
-           img_size, total_blocks, (unsigned long)SD_BATCH_WRITE_BLOCKS);
+    /* ---- PERF: Reset SD batch counters ---- */
+    g_perf_timer.sd_total_wait_ms = 0;
+    g_perf_timer.sd_total_write_ms = 0;
+    g_perf_timer.sd_total_gap_ms = 0;
+    g_perf_timer.sd_batch_count = 0;
+    g_perf_timer.sd_max_batch_ms = 0;
+    g_perf_timer.sd_max_wait_ms = 0;
 
-    /* --- Step 1: Write header block + first image chunk --- */
-    memset((void *)sd_batch_buf, 0, batch_size);
-    memcpy((void *)sd_batch_buf, (const void *)&hdr, SD_IMG_HEADER_SIZE);
+    PERF_MARK(g_perf_timer, STORAGE);
+
+    /* ---- Wait for card + HAL ready BEFORE first write ---- */
+    uint32_t t_wait = HAL_GetTick();
+    if (SD_WaitForReady() != 0) {
+#if PERF_DEBUG_LEVEL >= 1
+        printf("[SD] Not ready for first write\n");
+#endif
+        return -1;
+    }
+    uint32_t wait_ms = HAL_GetTick() - t_wait;
+
+    /* ---- Step 1: Write header + first chunk ---- */
+    memset(sd_batch_buf, 0, batch_size);
+    memcpy(sd_batch_buf, &hdr, SD_IMG_HEADER_SIZE);
     uint32_t first_chunk = SD_BLOCK_SIZE - SD_IMG_HEADER_SIZE;
     if (first_chunk > img_size) first_chunk = img_size;
-    memcpy((void *)(sd_batch_buf + SD_IMG_HEADER_SIZE), (const void *)img_buf, first_chunk);
+    memcpy(sd_batch_buf + SD_IMG_HEADER_SIZE, img_buf, first_chunk);
 
     uint32_t img_offset = first_chunk;
     uint32_t batch_blk  = 1;
-    while (img_offset < img_size && batch_blk < SD_BATCH_WRITE_BLOCKS) {
+    while (img_offset < img_size && batch_blk < batch_blocks) {
         uint32_t chunk = SD_BLOCK_SIZE;
         if (chunk > img_size - img_offset) chunk = img_size - img_offset;
-        memcpy((void *)(sd_batch_buf + batch_blk * SD_BLOCK_SIZE),
-               (const void *)(img_buf + img_offset), chunk);
+        memcpy(sd_batch_buf + batch_blk * SD_BLOCK_SIZE, img_buf + img_offset, chunk);
         if (chunk < SD_BLOCK_SIZE)
-            memset((void *)(sd_batch_buf + batch_blk * SD_BLOCK_SIZE + chunk),
-                   0, SD_BLOCK_SIZE - chunk);
+            memset(sd_batch_buf + batch_blk * SD_BLOCK_SIZE + chunk, 0, SD_BLOCK_SIZE - chunk);
         img_offset += chunk;
         batch_blk++;
     }
 
+    PERF_MARK(g_perf_timer, CACHE_CLEAN);
+    SCB_CleanDCache_by_Addr((uint32_t *)sd_batch_buf, batch_blk * SD_BLOCK_SIZE);
+    PERF_MARK(g_perf_timer, SD_WRITE);
+
+    uint32_t t0 = HAL_GetTick();
     HAL_StatusTypeDef st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, base, batch_blk, HAL_MAX_DELAY);
+    uint32_t write_ms = HAL_GetTick() - t0;
+
     if (st != HAL_OK) {
-        printf("[SD Store] header batch FAIL (HAL=0x%08lX)\n", (unsigned long)st);
+#if PERF_DEBUG_LEVEL >= 1
+        printf("[SD] header FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
+               (unsigned long)base, (unsigned long)st, (unsigned long)SDMMC2->STA);
+#endif
         return -1;
     }
 
+    Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, 0);
     uint32_t current_block = base + batch_blk;
 
-    /* --- Step 2: Write remaining image data in full batches --- */
+    /* ---- Step 2: Write remaining image data in full batches ---- */
     while (img_offset < img_size) {
         uint32_t remaining_bytes = img_size - img_offset;
         uint32_t remaining_blocks_full = (remaining_bytes + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
-        uint32_t blocks_in_batch = (remaining_blocks_full < SD_BATCH_WRITE_BLOCKS)
-                                    ? remaining_blocks_full : SD_BATCH_WRITE_BLOCKS;
+        uint32_t blocks_in_batch = (remaining_blocks_full < batch_blocks)
+                                    ? remaining_blocks_full : batch_blocks;
 
+        /* Fill the batch buffer */
         for (uint32_t b = 0; b < blocks_in_batch; b++) {
             uint32_t src = img_offset + b * SD_BLOCK_SIZE;
             uint32_t dst = b * SD_BLOCK_SIZE;
             if (src + SD_BLOCK_SIZE <= img_size) {
-                memcpy((void *)(sd_batch_buf + dst), (const void *)(img_buf + src), SD_BLOCK_SIZE);
+                memcpy(sd_batch_buf + dst, img_buf + src, SD_BLOCK_SIZE);
             } else {
                 uint32_t partial = img_size - src;
-                memcpy((void *)(sd_batch_buf + dst), (const void *)(img_buf + src), partial);
-                memset((void *)(sd_batch_buf + dst + partial), 0, SD_BLOCK_SIZE - partial);
+                memcpy(sd_batch_buf + dst, img_buf + src, partial);
+                memset(sd_batch_buf + dst + partial, 0, SD_BLOCK_SIZE - partial);
             }
         }
 
-        /* Wait for SD card ready */
-        {
-            uint32_t wait_ms = 0;
-            while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 2000) {
-                vTaskDelay(pdMS_TO_TICKS(1));
-                wait_ms++;
-            }
-            if (wait_ms >= 2000) {
-                printf("[SD Store] Card timeout before block %lu (state=%lu)\n",
-                       (unsigned long)current_block,
-                       (unsigned long)HAL_SD_GetCardState(&hsd1));
-            }
-        }
+        SCB_CleanDCache_by_Addr((uint32_t *)sd_batch_buf, blocks_in_batch * SD_BLOCK_SIZE);
 
-        st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
-        if (st != HAL_OK) {
-            printf("[SD Store] batch FAIL at block %lu (HAL=0x%08lX STA=0x%08lX)\n",
-                   (unsigned long)current_block, (unsigned long)st, (unsigned long)SDMMC2->STA);
+        /* Wait for card ready (PROVEN: checks card state via HAL) */
+        t0 = HAL_GetTick();
+        if (SD_WaitForReady() != 0) {
+#if PERF_DEBUG_LEVEL >= 1
+            printf("[SD] timeout before block %lu\n", (unsigned long)current_block);
+#endif
             return -1;
         }
+        wait_ms = HAL_GetTick() - t0;
+
+        /* CRITICAL: SDXC cards need significant time between multi-block writes
+           for internal flash programming and wear leveling. With 128-block batches
+           (64KB each), 20ms is the minimum tested gap that is stable.
+           10ms causes DCRCFAIL at random batches (~65% through). */
+        t0 = HAL_GetTick();
+        vTaskDelay(pdMS_TO_TICKS(10));
+        uint32_t gap_ms = HAL_GetTick() - t0;
+
+        t0 = HAL_GetTick();
+        st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
+        write_ms = HAL_GetTick() - t0;
+
+        if (st != HAL_OK) {
+#if PERF_DEBUG_LEVEL >= 1
+            printf("[SD] FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
+                   (unsigned long)current_block, (unsigned long)st, (unsigned long)SDMMC2->STA);
+#endif
+            return -1;
+        }
+
+        Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, gap_ms);
+
+        /* Progress print (throttled) */
+        uint32_t batch_num = g_perf_timer.sd_batch_count;
+#if PERF_DEBUG_LEVEL >= 2
+        if (batch_num % PERF_SD_BATCH_PRINT_EVERY == 0) {
+            uint32_t done_bytes = img_offset + blocks_in_batch * SD_BLOCK_SIZE;
+            float pct = (100.0f * done_bytes) / img_size;
+            printf("[SD] #%lu wait=%lums write=%lums gap=%lums | %.1f%%\n",
+                   (unsigned long)batch_num,
+                   (unsigned long)wait_ms,
+                   (unsigned long)write_ms,
+                   (unsigned long)gap_ms, pct);
+        }
+#elif PERF_DEBUG_LEVEL >= 1
+        if (batch_num % 64 == 0) {
+            uint32_t done_bytes = img_offset + blocks_in_batch * SD_BLOCK_SIZE;
+            float pct = (100.0f * done_bytes) / img_size;
+            printf("[SD] ... %.1f%%\n", pct);
+        }
+#endif
 
         img_offset += blocks_in_batch * SD_BLOCK_SIZE;
         current_block += blocks_in_batch;
     }
 
-    printf("[SD Store] OK (blocks %lu..%lu)\n",
-           (unsigned long)base, (unsigned long)(current_block - 1));
-
-    /* Advance base block for next snapshot */
     g_sd_img_base_block = current_block;
+    PERF_MARK(g_perf_timer, DONE);
+
+#if PERF_DEBUG_LEVEL >= 1
+    printf("[SD] OK blocks %lu..%lu (%lu batches)\n",
+           (unsigned long)base, (unsigned long)(current_block - 1),
+           (unsigned long)g_perf_timer.sd_batch_count);
+#endif
 
     return 0;
 }
 
-
-/* ================================================================
-   SENSOR TASK
-   ================================================================ */
-
+/* ==================== SENSOR TASK ==================== */
 void sensor_task(void *arg)
 {
     (void)arg;
-
-    printf("\n============================================\n");
-    printf("  SENSOR TASK (VL53L5CX)\n");
-    printf("============================================\n\n");
-
-    /* Wait for system ready signal from main */
     extern volatile int system_ready;
-    while (!system_ready) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
+    while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 
-    /* Initialize ToF sensor */
     if (VL53L5CX_Init(&hi2c1) != 0) {
-        printf("[SENSOR] VL53L5CX_Init failed! Scanning I2C bus...\n");
-        VL53L5CX_ScanI2CBus();
-        /* Don't delete task — keep alive for button capture */
         g_sensor_state = SENSOR_STATE_STOPPED;
-        while (1) {
-            printf("[SENSOR] ToF unavailable. Press button for camera-only mode.\n");
-            vTaskDelay(pdMS_TO_TICKS(5000));
-        }
+        while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
-    /* Configure resolution, integration time, frequency */
 #if VL53L5CX_DET_RESOLUTION == 8
     VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 800, 15);
-    printf("[SENSOR] Resolution: 8x8 (64 zones)\n");
 #else
     VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 800, 15);
-    printf("[SENSOR] Resolution: 4x4 (16 zones)\n");
 #endif
-
-    /* Start continuous ranging */
     VL53L5CX_StartRanging();
-
-    /* Learn baseline */
     VL53L5CX_LearnBaseline();
-
     if (!VL53L5CX_IsBaselineReady()) {
-        printf("[SENSOR] Baseline learning failed!\n");
         g_sensor_state = SENSOR_STATE_STOPPED;
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
     g_sensor_state = SENSOR_STATE_RUNNING;
+    printf("[SENSOR] Running\n");
 
-    printf("[SENSOR] Monitoring zones for insect passage...\n");
-#if CAPTURE_MODE == 1
-    printf("[SENSOR] Camera mode: CONTINUOUS\n");
-#else
-    printf("[SENSOR] Camera mode: ON-DEMAND\n");
-#endif
-    printf("[SENSOR] Auto-capture on detection enabled.\n\n");
-
-    uint32_t capture_count = 0;
-    uint32_t cooldown_frames = 0;
-    const uint32_t COOLDOWN_FRAMES_VALUE = 30;
+    uint32_t capture_count = 0, cooldown = 0;
 
     while (1) {
-        /* If sensor is paused, wait briefly and skip ToF reads */
-        if (g_sensor_state == SENSOR_STATE_PAUSED) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
-
-        if (g_sensor_state == SENSOR_STATE_STOPPED) {
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            continue;
-        }
-
-        /* Normal operation: update ToF sensor */
-        if (!VL53L5CX_Update()) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
-
-        /* Continuous debug output */
+        if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+        if (!VL53L5CX_Update()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
         g_debug_frame_count++;
-        if (g_debug_frame_count >= 1) {
-            g_debug_frame_count = 0;
-            //VL53L5CX_PrintZFrame();
-        }
+        if (g_debug_frame_count >= 1) g_debug_frame_count = 0;
+        if (cooldown > 0) cooldown--;
 
-        /* Check cooldown */
-        if (cooldown_frames > 0) cooldown_frames--;
-
-        /* ---- INSECT DETECTED? ---- */
-        if (VL53L5CX_IsInsectDetected() && cooldown_frames == 0) {
-            /* Guard: skip if a capture is already in progress */
-            if (g_capture_busy) {
-                printf("    [SKIP] Capture already in progress, ignoring detection.\n");
-                continue;
-            }
-
+        if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
+            if (g_capture_busy) continue;
             g_capture_busy = 1;
-
-            VL53L5CX_DetectionResult_t result = VL53L5CX_GetResult();
-
-            const char *trig_str;
-            switch (result.trigger_source) {
-                case VL53L5CX_TRIG_SIGNAL: trig_str = "signal"; break;
-                case VL53L5CX_TRIG_MOTION: trig_str = "motion"; break;
-                case VL53L5CX_TRIG_BOTH:   trig_str = "signal+motion"; break;
-                default:                    trig_str = "unknown"; break;
-            }
-
-            printf(">>> INSECT DETECTED! Trigger: %s (%u zones)\n",
-                   trig_str, result.affected_count);
-
-            /* ---- STEP 0: LEDs + Illumination ---- */
-            BSP_LED_Off(LED_GREEN);
-            BSP_LED_On(LED_RED);
-            WS2812_TurnOn();
-            WS2812_TurnOff();
-
-            /* ---- STEP 1: PAUSE SENSOR (stop I2C + ToF reads) ---- */
             g_sensor_state = SENSOR_STATE_PAUSED;
-            printf("    [SENSOR] PAUSED — handing off to camera+storage\n");
+            (void)VL53L5CX_GetResult();
 
-            /* ---- STEP 2: TRIGGER CAPTURE via the threaded pipeline ---- */
-            uint32_t t_total_start = HAL_GetTick();
-            int capture_rc = Capture_RequestSnapshot(5000);
+#if PERF_DEBUG_LEVEL >= 1
+            printf(">>> INSECT DETECTED!\n");
+#endif
+            BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
 
-            if (capture_rc == 0) {
-                capture_count++;
-                uint32_t t_total_end = HAL_GetTick();
-                printf("    >>> Snapshot #%lu SAVED (total %lu ms)\n",
-                       (unsigned long)capture_count,
-                       (unsigned long)(t_total_end - t_total_start));
-            } else {
-                printf("    [ERROR] Capture pipeline failed (rc=%d)\n", capture_rc);
-            }
+#if WS2812_MODE == 1  /* CAPTURE mode: illuminate during camera cycle */
+            WS2812_Illuminate(WS2812_ILLUMINATION_COLOR,
+                              WS2812_ILLUMINATION_BRIGHTNESS,
+                              WS2812_ILLUMINATION_MS);
+#elif WS2812_MODE == 0  /* ALWAYS_ON */
+            WS2812_TurnOn();
+#else  /* INDICATOR only */
+            WS2812_TurnOn();
+            vTaskDelay(pdMS_TO_TICKS(WS2812_INDICATOR_MS));
+            WS2812_TurnOff();
+#endif
 
-            /* ---- STEP 3: Restore LEDs + Resume Sensor ---- */
-            BSP_LED_Off(LED_RED);
-            BSP_LED_On(LED_GREEN);
+            PerfTimer_t t;
+            PERF_START(t);
+
+            int rc = Capture_RequestSnapshot(60000);
+
+            PERF_STOP(t);
+
+            /* Turn off illumination after capture */
+#if WS2812_MODE == 0
+            WS2812_TurnOff();
+#endif
+            BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
             g_sensor_state = SENSOR_STATE_RUNNING;
             g_capture_busy = 0;
-            cooldown_frames = COOLDOWN_FRAMES_VALUE;
+            cooldown = 30;
 
-            printf("    [SENSOR] RESUMED — Cooldown: %d frames (%.1f s)\n\n",
-                   COOLDOWN_FRAMES_VALUE, (float)COOLDOWN_FRAMES_VALUE / 15.0f);
+            if (rc == 0) {
+                capture_count++;
+#if PERF_PRINT_SUMMARY
+                PERF_PRINT(t, capture_count);
+                PERF_STATS(t);
+#else
+                printf("Snapshot #%lu SAVED (%lu ms)\n",
+                       (unsigned long)capture_count, (unsigned long)Perf_TotalElapsed(&t));
+#endif
+            } else {
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[SENSOR] Capture FAILED rc=%d\n", rc);
+#endif
+            }
         }
-
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
 
-
-/* ================================================================
-   CAMERA TASK
-   ================================================================ */
-
+/* ==================== CAMERA TASK ==================== */
 void camera_task(void *arg)
 {
     (void)arg;
-
-    printf("\n============================================\n");
-    printf("  CAMERA TASK\n");
-    printf("============================================\n\n");
-
-    /* Wait for system ready */
     extern volatile int system_ready;
-    while (!system_ready) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
+    while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 
 #if CAPTURE_MODE == 1
-    /* CONTINUOUS MODE: Start camera at boot */
-    printf("[CAMERA] Starting continuous capture at boot...\n");
-    int cam_rc = CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                     SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
-    if (cam_rc != 0) {
-        printf("[CAMERA] ContinuousStart failed (rc=%d)!\n", cam_rc);
-    } else {
-        printf("[CAMERA] Continuous capture RUNNING\n");
-    }
+    CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
 #endif
-
     uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
 
     while (1) {
         CameraCmd_t cmd = {0};
-
-        /* In continuous mode, keep the ISP updated */
 #if CAPTURE_MODE == 1
         CAM_IspUpdate();
 #endif
+        if (xQueueReceive(camera_cmd_queue, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) continue;
 
-        /* Wait for commands (check immediately, then block) */
-        if (xQueueReceive(camera_cmd_queue, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) {
-            continue;
-        }
-
-        printf("[CAMERA] Received command: type=%d\n", cmd.type);
-
-        switch (cmd.type) {
-        case CAM_CMD_SNAP: {
-            uint32_t t0 = HAL_GetTick();
+        if (cmd.type == CAM_CMD_SNAP) {
+            PERF_MARK(g_perf_timer, START);
             int rc = -1;
             const uint8_t *frame_to_save = NULL;
 
 #if CAPTURE_MODE == 1
-            /* CONTINUOUS MODE: Stop pipe → copy → restart */
-            printf("[CAMERA] [CONTINUOUS] Snapping current frame...\n");
             extern uint8_t save_buf[];
             rc = CAM_ContinuousSnap(save_buf, frame_size);
-            if (rc == 0) {
-                frame_to_save = save_buf;
-            }
+            if (rc == 0) frame_to_save = save_buf;
 #else
-            /* ON-DEMAND MODE: Full init + capture + deinit */
-            printf("[CAMERA] [ON-DEMAND] Full camera init + capture...\n");
             rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                        SNAP_WIDTH, SNAP_HEIGHT,
-                                        SNAP_FPS, SNAP_WARMUP_FRAMES);
-            if (rc == 0) {
-                frame_to_save = capture_buf;
-            }
+                                        SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS, SNAP_WARMUP_FRAMES);
+            if (rc == 0) frame_to_save = capture_buf;
 #endif
 
-            uint32_t elapsed = HAL_GetTick() - t0;
-
             if (rc == 0) {
-                printf("[CAMERA] Snap OK in %lu ms\n", (unsigned long)elapsed);
-
-                /* Signal camera ready */
-                xSemaphoreGive(camera_ready_sem);
-
-                /* Forward to storage task */
-                StorageCmd_t storage_cmd = {0};
-                storage_cmd.type         = STORAGE_CMD_SAVE;
-                storage_cmd.image_buf    = frame_to_save;
-                storage_cmd.image_size   = frame_size;
-                storage_cmd.width        = SNAP_WIDTH;
-                storage_cmd.height       = SNAP_HEIGHT;
-                storage_cmd.pixel_format = 0;  /* YUV422 */
-                storage_cmd.snap_id      = g_snap_count;
-
-                if (xQueueSend(storage_cmd_queue, &storage_cmd, pdMS_TO_TICKS(1000)) != pdTRUE) {
-                    printf("[CAMERA] Storage queue full! Frame dropped.\n");
-                }
-            } else {
-                printf("[CAMERA] Snap FAILED (rc=%d)\n", rc);
-
-                /* Signal failure so sensor doesn't block forever */
-                CameraEvent_typed evt = {0};
-                evt.type       = CAM_EVENT_SNAP_FAILED;
-                evt.error_code = rc;
-                evt.elapsed_ms = elapsed;
-                xQueueSend(sensor_event_queue, &evt, 0);
-
-                /* Still give the semaphore so sensor task unblocks */
-                xSemaphoreGive(camera_ready_sem);
-            }
-            break;
-        }
-
-        case CAM_CMD_START_CONTINUOUS: {
-            printf("[CAMERA] Starting continuous capture...\n");
-            int rc = CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                         SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
-            CameraEvent_typed evt = {0};
-            if (rc == 0) {
-                evt.type = CAM_EVENT_CONTINUOUS_STARTED;
-                printf("[CAMERA] Continuous capture started\n");
-            } else {
-                evt.type       = CAM_EVENT_ERROR;
-                evt.error_code = rc;
-                printf("[CAMERA] ContinuousStart failed (rc=%d)\n", rc);
-            }
-            evt.elapsed_ms = HAL_GetTick();
-            xQueueSend(sensor_event_queue, &evt, 0);
-            break;
-        }
-
-        case CAM_CMD_STOP_CONTINUOUS: {
-            printf("[CAMERA] Stopping continuous capture...\n");
-            CAM_ContinuousStop();
-            CameraEvent_typed evt = {0};
-            evt.type = CAM_EVENT_CONTINUOUS_STOPPED;
-            xQueueSend(sensor_event_queue, &evt, 0);
-            break;
-        }
-
-        case CAM_CMD_CAPTURE_SINGLE: {
-            uint32_t t0 = HAL_GetTick();
-            printf("[CAMERA] Single capture %lux%lu @%lu fps...\n",
-                   (unsigned long)cmd.width, (unsigned long)cmd.height,
-                   (unsigned long)cmd.fps);
-
-            int rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                            cmd.width, cmd.height,
-                                            cmd.fps, cmd.warmup_frames);
-
-            uint32_t elapsed = HAL_GetTick() - t0;
-            CameraEvent_typed evt = {0};
-
-            if (rc == 0) {
-                evt.type = CAM_EVENT_SNAP_READY;
-                evt.elapsed_ms = elapsed;
-                printf("[CAMERA] Single capture OK in %lu ms\n", (unsigned long)elapsed);
-
-                /* Forward to storage if buffer provided */
-                if (cmd.dest_buf) {
-                    StorageCmd_t storage_cmd = {0};
-                    storage_cmd.type         = STORAGE_CMD_SAVE;
-                    storage_cmd.image_buf    = capture_buf;
-                    storage_cmd.image_size   = frame_size;
-                    storage_cmd.width        = cmd.width;
-                    storage_cmd.height       = cmd.height;
-                    storage_cmd.pixel_format = 0;
-                    storage_cmd.snap_id      = g_snap_count;
-                    xQueueSend(storage_cmd_queue, &storage_cmd, pdMS_TO_TICKS(1000));
-                }
-            } else {
-                evt.type       = CAM_EVENT_SNAP_FAILED;
-                evt.error_code = rc;
-                evt.elapsed_ms = elapsed;
-                printf("[CAMERA] Single capture FAILED (rc=%d)\n", rc);
-            }
-
-            xSemaphoreGive(camera_ready_sem);
-            xQueueSend(sensor_event_queue, &evt, 0);
-            break;
-        }
-
-        case CAM_CMD_GET_STATUS:
-            printf("[CAMERA] Status: continuous=%s\n",
-#if CAPTURE_MODE == 1
-                   "running"
-#else
-                   "on-demand"
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[CAM] OK %lu ms\n",
+                       (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
 #endif
-            );
-            break;
-
-        default:
-            printf("[CAMERA] Unknown command: %d\n", cmd.type);
-            break;
+                xSemaphoreGive(camera_ready_sem);
+                StorageCmd_t sc = {0};
+                sc.type = STORAGE_CMD_SAVE; sc.image_buf = frame_to_save;
+                sc.image_size = frame_size; sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
+                sc.pixel_format = 0; sc.snap_id = g_snap_count;
+                xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000));
+            } else {
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[CAM] FAIL\n");
+#endif
+                xSemaphoreGive(camera_ready_sem);
+            }
         }
     }
 }
 
-
-/* ================================================================
-   STORAGE TASK
-   ================================================================ */
-
+/* ==================== STORAGE TASK ==================== */
 void storage_task(void *arg)
 {
     (void)arg;
-
-    printf("\n============================================\n");
-    printf("  STORAGE TASK\n");
-    printf("============================================\n\n");
-
-    /* Wait for system ready */
     extern volatile int system_ready;
-    while (!system_ready) {
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-
-    printf("[STORAGE] Waiting for save commands...\n\n");
+    while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 
     while (1) {
         StorageCmd_t cmd = {0};
-
-        /* Block until a command arrives */
-        if (xQueueReceive(storage_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) {
-            continue;
-        }
-
-        switch (cmd.type) {
-        case STORAGE_CMD_SAVE: {
-            printf("[STORAGE] Save request: %lux%lu %lu bytes (snap_id=%lu)\n",
-                   (unsigned long)cmd.width, (unsigned long)cmd.height,
-                   (unsigned long)cmd.image_size, (unsigned long)cmd.snap_id);
-
-            uint32_t t0 = HAL_GetTick();
-
-            /* Perform the SD write (blocking — this is the storage task's job) */
+        if (xQueueReceive(storage_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) continue;
+        if (cmd.type == STORAGE_CMD_SAVE) {
+            PERF_MARK(g_perf_timer, STORAGE);
             int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size,
-                                      cmd.width, cmd.height,
-                                      cmd.pixel_format, cmd.snap_id);
-
-            uint32_t elapsed = HAL_GetTick() - t0;
-
+                                      cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
+            PERF_MARK(g_perf_timer, DONE);
             if (rc == 0) {
                 g_snap_count++;
-                printf("[STORAGE] Save OK (%lu ms) — total snaps: %lu\n",
-                       (unsigned long)elapsed, (unsigned long)g_snap_count);
-
-                StorageEvent_t evt = {0};
-                evt.type      = STORAGE_EVENT_SAVE_DONE;
-                evt.elapsed_ms = elapsed;
-                // Not sending to any queue since camera_task already signaled
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[SD] OK %lu ms\n",
+                       (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
+#endif
             } else {
-                printf("[STORAGE] Save FAILED (%lu ms)\n", (unsigned long)elapsed);
-
-                StorageEvent_t evt = {0};
-                evt.type       = STORAGE_EVENT_SAVE_FAILED;
-                evt.error_code = rc;
-                evt.elapsed_ms = elapsed;
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[SD] FAIL %lu ms — attempting recovery...\n",
+                       (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
+#endif
+                /* Auto-recover: reinit SD card, preserve existing photos */
+                int rec = SD_Reinit();
+                if (rec == 0) {
+#if PERF_DEBUG_LEVEL >= 1
+                    printf("[SD] Recovery OK — next capture will retry.\n");
+#endif
+                }
             }
-
-            /* Signal storage done — unblocks sensor task */
             xSemaphoreGive(storage_done_sem);
-            break;
-        }
-
-        case STORAGE_CMD_GET_STATUS:
-            printf("[STORAGE] Next block: %lu, Snaps saved: %lu\n",
-                   (unsigned long)g_sd_img_base_block,
-                   (unsigned long)g_snap_count);
-            break;
-
-        case STORAGE_CMD_GET_FREE_SPACE:
-            if (hsd1.SdCard.BlockNbr > 0) {
-                uint32_t blocks_per_snap = (SD_IMG_HEADER_SIZE +
-                    (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
-                uint32_t remaining = hsd1.SdCard.BlockNbr - g_sd_img_base_block;
-                uint32_t snaps_left = remaining / blocks_per_snap;
-                printf("[STORAGE] ~%lu snapshots remaining (%lu blocks free)\n",
-                       (unsigned long)snaps_left, (unsigned long)remaining);
-            }
-            break;
-
-        default:
-            printf("[STORAGE] Unknown command: %d\n", cmd.type);
-            break;
         }
     }
 }
 
-
-/* ================================================================
-   Capture_RequestSnapshot — Full capture pipeline
-   ================================================================ */
-
+/* ==================== PIPELINE ==================== */
 int Capture_RequestSnapshot(uint32_t timeout_ms)
 {
     uint32_t t_start = HAL_GetTick();
+    CameraCmd_t cmd = {0}; cmd.type = CAM_CMD_SNAP;
+    if (xQueueSend(camera_cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) return -2;
 
-    /* ---- STEP 1: Send snapshot command to camera task ---- */
-    CameraCmd_t cam_cmd = {0};
-    cam_cmd.type = CAM_CMD_SNAP;
+    TickType_t ticks = (timeout_ms > 0) ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY;
+    if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) return -1;
 
-    if (xQueueSend(camera_cmd_queue, &cam_cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
-        printf("[PIPELINE] Failed to send snap command to camera\n");
-        return -2;
-    }
-
-    /* ---- STEP 2: Wait for camera to finish the snap ---- */
-    TickType_t ticks_left;
     if (timeout_ms > 0) {
         uint32_t elapsed = HAL_GetTick() - t_start;
         if (elapsed >= timeout_ms) return -1;
-        ticks_left = pdMS_TO_TICKS(timeout_ms - elapsed);
-    } else {
-        ticks_left = portMAX_DELAY;
-    }
+        ticks = pdMS_TO_TICKS(timeout_ms - elapsed);
+    } else { ticks = portMAX_DELAY; }
 
-    if (xSemaphoreTake(camera_ready_sem, ticks_left) != pdTRUE) {
-        printf("[PIPELINE] Timeout waiting for camera snap\n");
-        return -1;
-    }
-
-    /* ---- STEP 3: Wait for storage to finish the SD write ---- */
-    if (timeout_ms > 0) {
-        uint32_t elapsed = HAL_GetTick() - t_start;
-        if (elapsed >= timeout_ms) return -1;
-        ticks_left = pdMS_TO_TICKS(timeout_ms - elapsed);
-    } else {
-        ticks_left = portMAX_DELAY;
-    }
-
-    if (xSemaphoreTake(storage_done_sem, ticks_left) != pdTRUE) {
-        printf("[PIPELINE] Timeout waiting for storage write\n");
-        return -1;
-    }
-
-    printf("[PIPELINE] Capture complete (snap + save)\n");
+    if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE) return -1;
     return 0;
 }

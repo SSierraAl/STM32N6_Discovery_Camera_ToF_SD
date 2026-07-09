@@ -26,6 +26,12 @@ static uint8_t ws2812_brightness = WS2812_BRIGHTNESS_DEFAULT;
 /** Current color */
 static uint32_t ws2812_current_color = 0;
 
+/** Flash start time (for non-blocking strobe) */
+static uint32_t ws2812_flash_start = 0;
+
+/** Flash active flag */
+static volatile bool ws2812_flash_active = false;
+
 /* ================================================================
    PRIVATE FUNCTION PROTOTYPES
    ================================================================ */
@@ -206,4 +212,134 @@ static void WS2812_BuildPWMData(void)
     for (int i = 0; i < WS2812_RESET_ENTRIES; i++) {
         ws2812_pwm_buffer[idx++] = 0;
     }
+}
+
+/* ================================================================
+   STROBE FLASH FUNCTIONS
+   ================================================================ */
+
+/**
+ * @brief Blocking strobe flash.
+ *        Turns LEDs on, waits duration_ms, then turns off.
+ */
+void WS2812_Flash(uint32_t color, uint8_t brightness, uint32_t duration_ms)
+{
+    uint8_t saved_brightness = ws2812_brightness;
+    
+    // Set brightness for flash
+    ws2812_brightness = brightness;
+    
+    // Turn on
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    uint32_t grb_color = ((uint32_t)g << 16) | ((uint32_t)r << 8) | b;
+    
+    for (int i = 0; i < WS2812_NUM_LEDS; i++) {
+        ws2812_led_buffer[i] = grb_color;
+    }
+    ws2812_current_color = color;
+    WS2812_Update();
+    
+    // Block for duration
+    if (duration_ms > 0)
+        HAL_Delay(duration_ms);
+    
+    // Turn off
+    for (int i = 0; i < WS2812_NUM_LEDS; i++) {
+        ws2812_led_buffer[i] = 0;
+    }
+    ws2812_current_color = 0;
+    WS2812_Update();
+    
+    // Restore brightness
+    ws2812_brightness = saved_brightness;
+}
+
+/**
+ * @brief Start non-blocking strobe flash.
+ */
+void WS2812_FlashStart(uint32_t color, uint8_t brightness)
+{
+    ws2812_brightness = brightness;
+    ws2812_flash_start = HAL_GetTick();
+    ws2812_flash_active = true;
+    
+    uint8_t r = (color >> 16) & 0xFF;
+    uint8_t g = (color >> 8) & 0xFF;
+    uint8_t b = color & 0xFF;
+    uint32_t grb_color = ((uint32_t)g << 16) | ((uint32_t)r << 8) | b;
+    
+    for (int i = 0; i < WS2812_NUM_LEDS; i++) {
+        ws2812_led_buffer[i] = grb_color;
+    }
+    ws2812_current_color = color;
+    WS2812_Update();
+}
+
+/**
+ * @brief Stop the current flash immediately.
+ */
+void WS2812_FlashStop(void)
+{
+    ws2812_flash_active = false;
+    
+    for (int i = 0; i < WS2812_NUM_LEDS; i++) {
+        ws2812_led_buffer[i] = 0;
+    }
+    ws2812_current_color = 0;
+    WS2812_Update();
+}
+
+/**
+ * @brief Auto-stop flash if duration elapsed.
+ * @return 0 if flash still on, 1 if flash was stopped
+ */
+uint8_t WS2812_FlashCheck(uint32_t duration_ms)
+{
+    if (!ws2812_flash_active)
+        return 1;
+    
+    uint32_t elapsed = HAL_GetTick() - ws2812_flash_start;
+    if (elapsed >= duration_ms) {
+        WS2812_FlashStop();
+        return 1;
+    }
+    return 0;
+}
+
+/**
+ * @brief Get flash start timestamp.
+ */
+uint32_t WS2812_FlashGetStartTime(void)
+{
+    return ws2812_flash_start;
+}
+
+/**
+ * @brief Start illumination for camera capture (blocking).
+ *        This is the MAIN function for insect capture illumination.
+ *        LEDs turn ON, stay on for duration_ms, then turn OFF.
+ *        
+ * @param color       Illumination color (0xRRGGBB)
+ * @param brightness  Brightness 0-100%
+ * @param duration_ms How long to keep LEDs on (ms)
+ * 
+ * TIMING: The duration MUST cover the full camera capture cycle:
+ *   - Camera init: ~185ms
+ *   - Warmup frames: 11 × 33ms = 363ms  
+ *   - Capture frame: 33ms
+ *   - Total: ~581ms
+ *   - Recommended: 500ms minimum (use WS2812_ILLUMINATION_MS from app_config.h)
+ */
+void WS2812_Illuminate(uint32_t color, uint8_t brightness, uint32_t duration_ms)
+{
+    // Turn on at specified brightness/color
+    WS2812_FlashStart(color, brightness);
+    
+    // Block for the full duration (camera captures during this window)
+    HAL_Delay(duration_ms);
+    
+    // Turn off
+    WS2812_FlashStop();
 }
