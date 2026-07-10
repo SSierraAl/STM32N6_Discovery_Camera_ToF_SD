@@ -1,7 +1,7 @@
 /**
  * *****************************************************************************
  * @file    vl53l5cx_detection.c
- * @brief   VL53L5CX ToF Sensor - Modular Detection API Implementation
+ * @brief   VL53L5CX ToF Sensor - Clean Detection API Implementation
  *
  *           All VL53L5CX functions are here. Include vl53l5cx_detection.h
  *           in your code and call the public API directly.
@@ -36,25 +36,9 @@ static VL53L5CX_DetectionResult_t s_last_result = {0};
 static uint8_t s_last_insect_detected = 0;
 
 /* ================================================================
-   Internal Helpers
-   ================================================================ */
-
-/* Zone mask disabled — all zones always enabled */
-static inline int is_zone_enabled(uint8_t z)
-{
-    (void)z;
-    return 1;
-}
-
-/* ================================================================
    Initialization
    ================================================================ */
 
-/**
- * @brief  Initialize VL53L5CX sensor
- * @param  hi2c  Pointer to I2C handle
- * @return 0 on success, -1 if sensor not detected, -2 if init failed
- */
 int VL53L5CX_Init(I2C_HandleTypeDef *hi2c)
 {
     uint8_t is_alive;
@@ -94,19 +78,10 @@ int VL53L5CX_Init(I2C_HandleTypeDef *hi2c)
     return 0;
 }
 
-/**
- * @brief  Power up the VL53L5CX sensor (GPIO sequence)
- *
- *         Pin Mapping:
- *           - PD0  → PWR_EN  (Power Enable, active HIGH)
- *           - PE7  → I2C_RST (Reset, active LOW pulse)
- *           - PD6  → LPn     (Low Power disable, active HIGH)
- */
 void VL53L5CX_PowerUp(void)
 {
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    /* Initialize GPIO pins */
     __HAL_RCC_GPIOD_CLK_ENABLE();
     __HAL_RCC_GPIOE_CLK_ENABLE();
 
@@ -125,26 +100,20 @@ void VL53L5CX_PowerUp(void)
 
     printf("\n=== ToF Sensor Power Up ===\n");
 
-    /* Step 1: Enable power */
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
     HAL_Delay(10);
 
-    /* Step 2: Reset pulse (active LOW) */
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
     HAL_Delay(10);
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_SET);
     HAL_Delay(10);
 
-    /* Step 3: Disable Low Power mode */
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
     HAL_Delay(100);
 
     printf("[OK] Sensor power-up complete\n\n");
 }
 
-/**
- * @brief  Power down the VL53L5CX sensor
- */
 void VL53L5CX_PowerDown(void)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET);
@@ -171,10 +140,6 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
         printf("[ToF] WARN: Motion indicator init failed: %d\n", motion_st);
         s_motion_initialized = 0;
     } else {
-        /* Apply ST-level anti-false-trigger parameters:
-           - min_nb_for_global_detection: require N zones before global motion fires
-           - nb_of_temporal_accumulations: accumulate N frames before motion fires
-           - extra_noise_sigma: add noise floor to ignore small fluctuations */
         s_motion_config.min_nb_for_global_detection = VL53L5CX_DET_MOTION_MIN_ZONES;
         s_motion_config.nb_of_temporal_accumulations = VL53L5CX_DET_MOTION_PERSIST_FRAMES;
         s_motion_config.extra_noise_sigma = VL53L5CX_DET_MOTION_EXTRA_NOISE;
@@ -276,48 +241,68 @@ void VL53L5CX_LearnBaseline(void)
 
     VL53L5CX_ResetBaseline();
 
-    printf("[BASELINE] Learning %d samples...\n", VL53L5CX_DET_BASELINE_SAMPLES);
+    const uint8_t baseline_samples = VL53L5CX_DET_BASELINE_SAMPLES;
 
-    for (uint8_t i = 0; i < VL53L5CX_DET_BASELINE_SAMPLES; i++) {
+    /* Settling frames */
+#if VL53L5CX_DET_RESOLUTION == 8
+    const uint8_t settle_frames = 20;
+#else
+    const uint8_t settle_frames = 5;
+#endif
+
+    printf("[BASELINE] Learning %d samples + %d settle frames...\n",
+           baseline_samples, settle_frames);
+
+    /* ---- Phase 1: Collect baseline samples ---- */
+    for (uint8_t i = 0; i < baseline_samples; i++) {
         if (!VL53L5CX_WaitForDataReady(1000)) continue;
         if (VL53L5CX_GetData() != 0) continue;
 
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-            if (!is_zone_enabled(z)) continue;
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
             if (s_results.target_status[idx] == 0 ||
                 s_results.target_status[idx] == 5 ||
                 s_results.target_status[idx] == 9) {
+                /* Skip zones with signal below minimum threshold */
+                if (s_results.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) {
+                    continue;
+                }
                 s_baseline_signal[z] += s_results.signal_per_spad[idx];
                 s_baseline_distance[z] += s_results.distance_mm[idx];
                 s_zone_valid[z] = 1;
             }
         }
-        printf("  [%d/%d]\r", i + 1, VL53L5CX_DET_BASELINE_SAMPLES);
+        printf("  [BASELINE %d/%d]\r", i + 1, baseline_samples);
     }
 
     /* Compute averages */
     uint8_t valid_count = 0;
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-        if (is_zone_enabled(z) && s_zone_valid[z]) {
-            s_baseline_signal[z] /= VL53L5CX_DET_BASELINE_SAMPLES;
-            s_baseline_distance[z] /= VL53L5CX_DET_BASELINE_SAMPLES;
+        if (s_zone_valid[z]) {
+            s_baseline_signal[z] /= baseline_samples;
+            s_baseline_distance[z] /= baseline_samples;
             valid_count++;
         }
     }
 
+    /* ---- Phase 2: Settle frames ---- */
+    for (uint8_t i = 0; i < settle_frames; i++) {
+        if (!VL53L5CX_WaitForDataReady(1000)) continue;
+        if (VL53L5CX_GetData() != 0) continue;
+        printf("  [SETTLE %d/%d]\r", i + 1, settle_frames);
+    }
+
     s_baseline_ready = 1;
     printf("\n[BASELINE] Done. Valid zones: %d/%d\n", valid_count, VL53L5CX_DET_NUM_ZONES);
+
+    /* Emit baseline frame for Python monitor */
+    VL53L5CX_PrintBaselineFrame();
 }
 
 /* ================================================================
    Detection
    ================================================================ */
 
-/**
- * @brief  Update: wait for data, process, run detection
- * @return 1 if new data was processed, 0 if timeout
- */
 int VL53L5CX_Update(void)
 {
     if (!VL53L5CX_WaitForDataReady(1000)) return 0;
@@ -334,9 +319,8 @@ int VL53L5CX_Update(void)
     uint8_t frame_trig_signal = 0;
     uint8_t frame_trig_motion = 0;
 
-    /* Check each enabled zone */
+    /* Check each zone */
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-        if (!is_zone_enabled(z)) continue;
         if (!s_zone_valid[z]) continue;
 
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
@@ -344,6 +328,26 @@ int VL53L5CX_Update(void)
         if (s_results.target_status[idx] != 0 &&
             s_results.target_status[idx] != 5 &&
             s_results.target_status[idx] != 9)
+            continue;
+
+        /* Clear stale baselines for unreliable zones:
+           If current signal is 0 AND baseline is below MIN_SIGNAL, the zone
+           is unreliable (e.g., pointing at wall, blind spot, or noisy).
+           Clear the baseline so it doesn't cause false 100% drops when signal
+           briefly recovers. Zone will be re-learned during next baseline learn. */
+        if (s_results.signal_per_spad[idx] == 0 &&
+            s_baseline_signal[z] > 0 &&
+            s_baseline_signal[z] < VL53L5CX_DET_MIN_SIGNAL) {
+            s_baseline_signal[z]   = 0;
+            s_baseline_distance[z] = 0;
+        }
+
+        /* Skip zero-signal zones (invalid measurement, not detection) */
+        if (s_results.signal_per_spad[idx] == 0)
+            continue;
+
+        /* Skip zones with signal below minimum threshold */
+        if (s_results.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL)
             continue;
 
         s_last_result.valid_measurements++;
@@ -359,7 +363,7 @@ int VL53L5CX_Update(void)
         /* Check signal drop threshold */
         int signal_triggered = (signal_drop > VL53L5CX_DET_THRESHOLD_PCT);
 
-        /* Check motion indicator threshold (ST API handles persistence internally) */
+        /* Check motion indicator threshold */
         int motion_triggered = 0;
         if (s_motion_initialized) {
             uint32_t motion_val = s_results.motion_indicator.motion[s_motion_config.map_id[z]];
@@ -370,7 +374,6 @@ int VL53L5CX_Update(void)
         if (signal_triggered || motion_triggered) {
             uint8_t k = s_last_result.affected_count;
             s_last_result.affected_zones[k] = (uint8_t)z;
-            /* Store drop% for signal trigger, or motion value for motion trigger */
             s_last_result.affected_drop[k] = signal_triggered ? signal_drop : s_results.motion_indicator.motion[s_motion_config.map_id[z]];
             s_last_result.affected_count++;
 
@@ -378,8 +381,8 @@ int VL53L5CX_Update(void)
             if (motion_triggered) frame_trig_motion = 1;
         }
 
-        /* Only set insect_detected if enough zones are affected (min-zones filter) */
-        if (s_last_result.affected_count >= VL53L5CX_DET_MOTION_MIN_ZONES) {
+        /* Only set insect_detected if enough zones are affected */
+        if (s_last_result.affected_count >= VL53L5CX_DET_MIN_AFFECTED_ZONES) {
             s_last_insect_detected = 1;
             s_last_result.insect_detected = 1;
             s_last_result.trigger_source = (frame_trig_signal | frame_trig_motion)
@@ -389,47 +392,110 @@ int VL53L5CX_Update(void)
         }
     }
 
-    /* Adaptive baseline update (only for non-affected zones) */
-#if VL53L5CX_DET_ADAPTIVE_ENABLED
-    for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-        if (!is_zone_enabled(z)) continue;
-        if (!s_zone_valid[z]) continue;
+    /* ================================================================
+       BASELINE REFRESH — Two modes (choose ONE in header):
 
-        uint8_t is_affected = 0;
-        for (uint8_t k = 0; k < s_last_result.affected_count; k++) {
-            if (s_last_result.affected_zones[k] == (uint8_t)z) {
-                is_affected = 1;
-                break;
-            }
-        }
-        if (is_affected) continue;
+       MODE 1: PERIODIC — refresh every N frames regardless of detections.
+       MODE 2: ADAPTIVE  — refresh only when detection rate is high.
 
-        uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-        if (s_results.target_status[idx] != 0 &&
-            s_results.target_status[idx] != 5 &&
-            s_results.target_status[idx] != 9) continue;
+       FRAME COUNTING:
+         - A static counter increments on EVERY call to VL53L5CX_Update().
+         - It is NOT reset by detections, NOT reset on refresh.
+         - It wraps at the interval/window size (modulo arithmetic).
+         - Counter is monotonically increasing: 1,2,3,...,N,0,1,2,3,...
 
-        if (s_baseline_signal[z] > 0) {
-            int32_t diff = (int32_t)s_results.signal_per_spad[idx] - (int32_t)s_baseline_signal[z];
-            s_baseline_signal[z] += diff / VL53L5CX_DET_EMA_DIVIDER;
-        }
-        if (s_baseline_distance[z] > 0) {
-            int32_t diff = (int32_t)s_results.distance_mm[idx] - (int32_t)s_baseline_distance[z];
-            s_baseline_distance[z] += diff / VL53L5CX_DET_EMA_DIVIDER;
+         Example (interval=500):
+           Frame 1:    counter=1,   no refresh
+           Frame 499:  counter=499, no refresh
+           Frame 500:  counter=500, REFRESH → counter wraps to 0
+           Frame 501:  counter=1,   no refresh
+           Frame 1000: counter=500, REFRESH → counter wraps to 0
+
+       FREE_RTOS SAFETY:
+         - All counters are static locals inside VL53L5CX_Update().
+         - VL53L5CX_Update() is called ONLY from the ToF task (main_thread).
+         - No other task reads/writes these counters → no mutex needed.
+         - Blocking waits use vTaskDelay() (yields CPU) not HAL_Delay()
+           (busy-waits) → other tasks continue running normally.
+         - The only shared variable is s_last_insect_detected (uint8_t),
+           written here and read in main_thread detection handler.
+           uint8_t reads/writes are atomic on Cortex-M → safe without mutex.
+    */
+
+    /* --- MODE 1: Periodic Restart (fixed interval) --- */
+#if VL53L5CX_DET_PERIODIC_RESTART_ENABLED > 0
+    {
+        static uint32_t frame_counter = 0;
+        frame_counter++;
+
+        if (frame_counter >= VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) {
+            frame_counter = 0;
+            printf("[ToF] Periodic refresh (every %d frames)...\n",
+                   VL53L5CX_DET_PERIODIC_RESTART_INTERVAL);
+
+            /* Stop → Start → Re-learn (ranging must be ON for LearnBaseline) */
+            vl53l5cx_stop_ranging(&s_dev);
+            vTaskDelay(pdMS_TO_TICKS(50));
+            vl53l5cx_start_ranging(&s_dev);
+            vTaskDelay(pdMS_TO_TICKS(200));
+            VL53L5CX_LearnBaseline();
+
+            printf("[ToF] Periodic refresh done.\n");
         }
     }
 #endif
 
-    /* Debug output */
-#if VL53L5CX_DET_DEBUG_FRAME_INTERVAL > 0
-    static uint32_t debug_counter = 0;
-    debug_counter++;
-    if (debug_counter >= VL53L5CX_DET_DEBUG_FRAME_INTERVAL) {
-        debug_counter = 0;
+    /* --- MODE 2: Adaptive Refresh (time-based, detection-rate) --- */
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+    {
+        static uint32_t window_start = 0;
+        static uint8_t  detection_count = 0;
+
+        /* Initialize window start on first call */
+        if (window_start == 0)
+            window_start = xTaskGetTickCount();
+
+        if (s_last_insect_detected)
+            detection_count++;
+
+        /* Check if real-time window has expired (uses FreeRTOS tick, always running) */
+        if ((xTaskGetTickCount() - window_start) >= pdMS_TO_TICKS(VL53L5CX_DET_REFRESH_WINDOW_SECS * 1000)) {
+            window_start = xTaskGetTickCount();  /* Reset window */
+
+            if (detection_count > VL53L5CX_DET_MAX_DETECTIONS) {
+                printf("[ToF] Adaptive refresh: %d detections in %ds (max=%d)\n",
+                       detection_count, VL53L5CX_DET_REFRESH_WINDOW_SECS,
+                       VL53L5CX_DET_MAX_DETECTIONS);
+
+                /* Stop -> Start -> Re-learn (ranging must be ON for LearnBaseline) */
+                vl53l5cx_stop_ranging(&s_dev);
+                vTaskDelay(pdMS_TO_TICKS(50));
+                vl53l5cx_start_ranging(&s_dev);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                VL53L5CX_LearnBaseline();
+
+                printf("[ToF] Adaptive refresh done.\n");
+            } else {
+                printf("[ToF] Window: %d detections in %ds (max=%d) — no refresh\n",
+                       detection_count, VL53L5CX_DET_REFRESH_WINDOW_SECS,
+                       VL53L5CX_DET_MAX_DETECTIONS);
+            }
+            detection_count = 0;
+        }
+    }
+#endif
+
+    /* Debug output: ZFRAME (compact, for real-time monitoring) */
+#if VL53L5CX_DET_DEBUG_ZFRAME > 0
+    static uint32_t zframe_counter = 0;
+    zframe_counter++;
+    if (zframe_counter >= VL53L5CX_DET_DEBUG_ZFRAME_INT) {
+        zframe_counter = 0;
         VL53L5CX_PrintZFrame();
     }
 #endif
 
+    /* Debug output: ALLPARAM (detailed, for datalogging + analysis) */
 #if VL53L5CX_DET_DEBUG_ALLPARAMS > 0
     static uint32_t allparam_counter = 0;
     allparam_counter++;
@@ -457,24 +523,18 @@ VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void)
    ================================================================ */
 
 /**
- * @brief  PrintAllZoneParams - prints a detailed table of ALL ToF parameters
+ * @brief  PrintAllZoneParams - detailed table + machine-parseable ALLPARAM block
  *
- * Format (ALLPARAM header):
- *   ALLPARAM,temp,sig,base_sig,dist,base_dist,ambient,sigma,reflect,status,spads,targets,drop%
- *   Then one line per zone (16 zones):
- *   Z0: sig,base_sig,dist,base_dist,ambient,sigma,reflect,status,spads,targets,drop%
- *   Z1: ...
- *   ...
- *   Z15: ...
- *   Motion line:
- *   MOTION:global1,global2,status,nb_detected,nb_agg,motion0,motion1,...,motion15
+ * Human-readable table followed by:
+ *   ALLPARAM,temp,sig0,base_sig0,dist0,base_dist0,amb0,sigma0,reflect0,status0,spads0,targets0,drop0,valid0,...
+ *   MOTION,global1,global2,status,nb_detected,nb_agg,motion0,...,motion15
  */
 void VL53L5CX_PrintAllZoneParams(void)
 {
     int8_t temp = s_results.silicon_temp_degc;
 
     printf("\n=== VL53L5CX All Zone Parameters (temp=%d°C) ===\n", temp);
-    printf("%3s | %6s | %7s | %8s | %7s | %8s | %6s | %7s | %6s | %7s | %6s | %6s\n",
+    printf("%3s | %6s | %8s | %7s | %7s | %8s | %6s | %7s | %6s | %7s | %6s | %6s\n",
            "Z", "status", "dist", "signal", "b_dist", "b_signal", "ambient",
            "sigma", "reflect", "spads", "targs", "drop%");
     printf("-----|--------|----------|----------|---------|------------|----------|--------|---------|----------|--------|------\n");
@@ -482,13 +542,13 @@ void VL53L5CX_PrintAllZoneParams(void)
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
 
-        uint32_t cur_sig    = s_results.signal_per_spad[idx];
-        int16_t  cur_dist   = s_results.distance_mm[idx];
-        uint8_t  cur_stat   = s_results.target_status[idx];
+        uint32_t cur_sig     = s_results.signal_per_spad[idx];
+        int16_t  cur_dist    = s_results.distance_mm[idx];
+        uint8_t  cur_stat    = s_results.target_status[idx];
         uint32_t cur_ambient = 0;
-        uint16_t cur_sigma  = 0;
+        uint16_t cur_sigma   = 0;
         uint8_t  cur_reflect = 0;
-        uint32_t cur_spads  = 0;
+        uint32_t cur_spads   = 0;
         uint8_t  cur_targets = 0;
 
 #ifndef VL53L5CX_DISABLE_AMBIENT_PER_SPAD
@@ -507,7 +567,7 @@ void VL53L5CX_PrintAllZoneParams(void)
         cur_targets = s_results.nb_target_detected[idx];
 #endif
 
-        uint32_t base_sig = s_baseline_signal[z];
+        uint32_t base_sig  = s_baseline_signal[z];
         uint16_t base_dist = s_baseline_distance[z];
 
         uint32_t drop_pct = 0;
@@ -522,7 +582,7 @@ void VL53L5CX_PrintAllZoneParams(void)
                cur_ambient, cur_sigma, cur_reflect, cur_spads, cur_targets, drop_pct);
     }
 
-    /* Print motion indicator data */
+    /* Motion indicator data */
 #ifndef VL53L5CX_DISABLE_MOTION_INDICATOR
     printf("\n--- Motion Indicator ---\n");
     printf("Global1: %lu, Global2: %lu, Status: %d, Detected: %d, Aggregates: %d\n",
@@ -538,18 +598,18 @@ void VL53L5CX_PrintAllZoneParams(void)
     printf("\n");
 #endif
 
-    /* Also emit machine-parseable ALLPARAM block for Python */
+    /* Machine-parseable ALLPARAM block */
     printf("ALLPARAM,");
     printf("%d,", temp);
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-        uint32_t cur_sig    = s_results.signal_per_spad[idx];
-        int16_t  cur_dist   = s_results.distance_mm[idx];
-        uint8_t  cur_stat   = s_results.target_status[idx];
+        uint32_t cur_sig     = s_results.signal_per_spad[idx];
+        int16_t  cur_dist    = s_results.distance_mm[idx];
+        uint8_t  cur_stat    = s_results.target_status[idx];
         uint32_t cur_ambient = 0;
-        uint16_t cur_sigma  = 0;
+        uint16_t cur_sigma   = 0;
         uint8_t  cur_reflect = 0;
-        uint32_t cur_spads  = 0;
+        uint32_t cur_spads   = 0;
         uint8_t  cur_targets = 0;
 
 #ifndef VL53L5CX_DISABLE_AMBIENT_PER_SPAD
@@ -568,7 +628,7 @@ void VL53L5CX_PrintAllZoneParams(void)
         cur_targets = s_results.nb_target_detected[idx];
 #endif
 
-        uint32_t base_sig = s_baseline_signal[z];
+        uint32_t base_sig  = s_baseline_signal[z];
         uint16_t base_dist = s_baseline_distance[z];
         uint32_t drop_pct = 0;
         if (base_sig > 0) {
@@ -594,7 +654,7 @@ void VL53L5CX_PrintAllZoneParams(void)
     }
     printf("\r\n");
 
-    /* Emit MOTION line */
+    /* MOTION line */
 #ifndef VL53L5CX_DISABLE_MOTION_INDICATOR
     printf("MOTION,%lu,%lu,%d,%d,%d,",
            (unsigned long)s_results.motion_indicator.global_indicator_1,
@@ -617,33 +677,24 @@ void VL53L5CX_PrintAllZoneParams(void)
 }
 
 /**
- * @brief  PrintZFrame - emits compact ZFRAME line for Python monitoring
+ * @brief  PrintZFrame - compact ZFRAME line for Python monitoring
  *
- * COMPACT FORMAT (when VL53L5CX_DET_ZFRAME_COMPACT == 1):
- *   ZFRAME,temp,sig0,base0,dist0,motion0,sig1,base1,dist1,motion1,...
- *   Per zone: 4 fields (signal, baseline_signal, distance, motion)
- *   8x8 total: 1 + 64*4 = 257 values (~1500 chars at 115200 baud = ~13ms)
- *
- * LEGACY FORMAT (when VL53L5CX_DET_ZFRAME_COMPACT == 0):
- *   ZFRAME,sig0,base0,dist0,bdist0,...,sig15,base15,dist15,bdist15
- *   Per zone: 4 fields (signal, baseline, distance, baseline_distance)
+ * Format: ZFRAME,temp,sig0,dist0,base_sig0,base_dist0,motion0,sig1,...
+ * Per zone: 5 fields (signal, distance, baseline_signal, baseline_distance, motion)
  */
 void VL53L5CX_PrintZFrame(void)
 {
-#if VL53L5CX_DET_ZFRAME_COMPACT
-    /* Compact ZFRAME: temp + 4 fields per zone (sig, base, dist, motion) */
     int8_t temp = s_results.silicon_temp_degc;
     printf("ZFRAME,%d", temp);
 
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-        uint32_t cur_sig = 0;
+        uint32_t cur_sig  = 0;
         uint16_t cur_dist = 0;
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+        uint8_t status = s_results.target_status[idx];
 
-        if (s_zone_valid[z] && is_zone_enabled(z) &&
-            (s_results.target_status[idx] == 0 ||
-             s_results.target_status[idx] == 5 ||
-             s_results.target_status[idx] == 9)) {
+        /* Output zone data when status is valid (0=good, 5=single target, 9=no target but valid) */
+        if (status == 0 || status == 5 || status == 9) {
             cur_sig  = s_results.signal_per_spad[idx];
             cur_dist = s_results.distance_mm[idx];
         }
@@ -654,36 +705,31 @@ void VL53L5CX_PrintZFrame(void)
         uint32_t motion = 0;
 #endif
 
-        printf(",%lu,%lu,%lu,%lu",
+        printf(",%lu,%lu,%lu,%lu,%lu",
                (unsigned long)cur_sig,
-               (unsigned long)s_baseline_signal[z],
                (unsigned long)cur_dist,
+               (unsigned long)s_baseline_signal[z],
+               (unsigned long)s_baseline_distance[z],
                (unsigned long)motion);
     }
     printf("\r\n");
+}
 
-#else
-    /* Legacy ZFRAME format (backward compatible) */
-    printf("ZFRAME,");
+/**
+ * @brief  PrintBaselineFrame - emits BASELINE line for Python monitoring
+ *
+ * Format: BASELINE,base_sig0,base_dist0,...,base_sig15,base_dist15
+ */
+void VL53L5CX_PrintBaselineFrame(void)
+{
+    printf("BASELINE,");
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-        uint32_t cur_sig = 0, cur_dist = 0;
-        uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-        if (s_zone_valid[z] && is_zone_enabled(z) &&
-            (s_results.target_status[idx] == 0 ||
-             s_results.target_status[idx] == 5 ||
-             s_results.target_status[idx] == 9)) {
-            cur_sig  = s_results.signal_per_spad[idx];
-            cur_dist = s_results.distance_mm[idx];
-        }
         if (z > 0) printf(",");
-        printf("%lu,%lu,%lu,%lu",
-                (unsigned long)cur_sig,
-                (unsigned long)s_baseline_signal[z],
-                (unsigned long)cur_dist,
-                (unsigned long)s_baseline_distance[z]);
+        printf("%lu,%lu",
+               (unsigned long)s_baseline_signal[z],
+               (unsigned long)s_baseline_distance[z]);
     }
     printf("\r\n");
-#endif
 }
 
 int VL53L5CX_ScanI2CBus(void)
@@ -700,7 +746,7 @@ int VL53L5CX_ScanI2CBus(void)
 }
 
 /* ================================================================
-   Legacy Test Functions (kept for backward compatibility)
+   Legacy Test Functions
    ================================================================ */
 
 void VL53L5CX_Validate(void)
@@ -768,6 +814,8 @@ void VL53L5CX_ReadingTest(void)
             if (s_results.target_status[idx] == 0 ||
                 s_results.target_status[idx] == 5 ||
                 s_results.target_status[idx] == 9) {
+                if (s_results.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL)
+                    continue;
                 s_baseline_signal[z] += s_results.signal_per_spad[idx];
                 s_baseline_distance[z] += s_results.distance_mm[idx];
                 s_zone_valid[z] = 1;
@@ -820,6 +868,9 @@ void VL53L5CX_ReadingTest(void)
             if (s_results.target_status[idx] != 0 &&
                 s_results.target_status[idx] != 5 &&
                 s_results.target_status[idx] != 9) continue;
+
+            if (s_results.signal_per_spad[idx] == 0) continue;
+            if (s_results.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) continue;
 
             uint32_t signal_drop = 0;
             if (s_baseline_signal[z] > 0) {
@@ -916,7 +967,6 @@ void VL53L5CX_MotionTest(void)
         if (ready) {
             vl53l5cx_get_ranging_data(&s_dev, &s_results);
             for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-                if (!is_zone_enabled(z)) continue;
                 uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
                 uint8_t s = s_results.target_status[idx];
                 if (s == 0 || s == 5 || s == 9) {
@@ -967,7 +1017,6 @@ void VL53L5CX_MotionTest(void)
         uint8_t valid_measurements = 0;
 
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-            if (!is_zone_enabled(z)) continue;
             if (!valid_baseline_zones[z]) continue;
 
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;

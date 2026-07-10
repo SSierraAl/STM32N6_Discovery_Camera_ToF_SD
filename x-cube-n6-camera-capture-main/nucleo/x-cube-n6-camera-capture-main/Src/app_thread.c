@@ -318,7 +318,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
            (64KB each), 20ms is the minimum tested gap that is stable.
            10ms causes DCRCFAIL at random batches (~65% through). */
         t0 = HAL_GetTick();
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(15));
         uint32_t gap_ms = HAL_GetTick() - t0;
 
         t0 = HAL_GetTick();
@@ -418,10 +418,10 @@ void sensor_task(void *arg)
 #endif
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
 
-#if WS2812_MODE == 1  /* CAPTURE mode: illuminate during camera cycle */
-            WS2812_Illuminate(WS2812_ILLUMINATION_COLOR,
-                              WS2812_ILLUMINATION_BRIGHTNESS,
-                              WS2812_ILLUMINATION_MS);
+#if WS2812_MODE == 1  /* CAPTURE mode: illuminate DURING full capture + SD write */
+            /* Turn LEDs ON before capture, keep them ON until snapshot is saved to SD */
+            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR,
+                              WS2812_ILLUMINATION_BRIGHTNESS);
 #elif WS2812_MODE == 0  /* ALWAYS_ON */
             WS2812_TurnOn();
 #else  /* INDICATOR only */
@@ -437,8 +437,10 @@ void sensor_task(void *arg)
 
             PERF_STOP(t);
 
-            /* Turn off illumination after capture */
-#if WS2812_MODE == 0
+            /* Turn off illumination AFTER capture + SD write is complete */
+#if WS2812_MODE == 1
+            WS2812_FlashStop();
+#elif WS2812_MODE == 0
             WS2812_TurnOff();
 #endif
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);

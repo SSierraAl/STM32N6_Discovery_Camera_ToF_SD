@@ -91,13 +91,13 @@
        - Indoor bright:     1000-1500
      
      Current: 300 (outdoor, bright conditions, minimal noise) */
-#define CAM_GAIN_VALUE       200
+#define CAM_GAIN_VALUE       600
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
     0 = default. Positive = brighter, negative = darker.
     Default: 0 */
-#define CAM_BRIGHTNESS       0
+#define CAM_BRIGHTNESS       10
 
 /** Anti-flicker mode (for AC-powered lighting).
     0 = disabled, 1 = 50Hz (EU), 2 = 60Hz (US/Japan), 3 = auto
@@ -208,7 +208,7 @@
 
 /** When PERF_DEBUG_LEVEL >= 2, print SD batch timing every N batches.
     Set to 1 for every batch (very verbose), 4 for every 4th batch. */
-#define PERF_SD_BATCH_PRINT_EVERY  4
+#define PERF_SD_BATCH_PRINT_EVERY  0
 
 /** Track cumulative waiting time for SD card ready states.
     When enabled, the final summary will show total time spent waiting
@@ -247,7 +247,7 @@
     If you reduce SNAP_WARMUP_FRAMES, adjust this accordingly:
       Formula: (SNAP_WARMUP_FRAMES + 1) × (1000/SNAP_FPS) + 50ms
               = (11 + 1) × (1000/30) + 50 = 450ms */
-#define WS2812_ILLUMINATION_MS     500
+#define WS2812_ILLUMINATION_MS     5000
 
 /** Illumination brightness (0-100%).
     During capture: LEDs run at this brightness.
