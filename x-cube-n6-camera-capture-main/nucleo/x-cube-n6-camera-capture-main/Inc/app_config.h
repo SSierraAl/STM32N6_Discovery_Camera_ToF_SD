@@ -119,7 +119,7 @@
       and reduced gain below, for a much better signal-to-noise ratio while still
       easily freezing motion. Tune down toward 8 if you confirm actual motion blur
       (not noise) at 200 µs; tune up if still too dark. */
-#define CAM_EXPOSURE_VALUE   200
+#define CAM_EXPOSURE_VALUE   80
 
 /** Analog gain (only used in MANUAL mode).
       Range: 0-72000 (IMX335_GAIN_MIN to IMX335_GAIN_MAX).
@@ -138,7 +138,7 @@
       and ~8x more LED brightness, far less analog gain is needed to reach the
       same brightness, and less gain means less sensor noise (sharper-looking
       images). Raise back toward 4000 if images come out too dark. */
-#define CAM_GAIN_VALUE       1500
+#define CAM_GAIN_VALUE       500
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
@@ -216,7 +216,7 @@
 /** Standby mode wakes in ~20ms (IMX335_Start delay) + ~1 frame (33ms) warmup = ~53ms total.
      This is MUCH faster than full init (~400ms) and avoids I2C conflicts with ToF.
      After capture, camera returns to standby (streaming stops, I2C1 released). */
-#define STANDBY_WARMUP_FRAMES    11     /* Frames to discard after wake from standby */
+#define STANDBY_WARMUP_FRAMES    3     /* Frames to discard after wake from standby */
 #define STANDBY_WAKE_TIMEOUT_MS 2000  /* Max wait for standby wake + warmup */
 
 /* ================================================================
@@ -336,7 +336,7 @@
     brighter here has negligible power/thermal impact. Brightness is applied as
     RGB value scaling (not time-based PWM), so it stays perfectly in sync with
     even very short camera exposures - safe to raise further if still too dark. */
-#define WS2812_ILLUMINATION_BRIGHTNESS  80
+#define WS2812_ILLUMINATION_BRIGHTNESS  20
 
 /** Illumination color (0xRRGGBB format).
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
