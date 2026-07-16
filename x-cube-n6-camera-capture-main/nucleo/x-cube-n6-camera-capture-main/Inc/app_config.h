@@ -48,7 +48,7 @@
 
 /** Number of warmup frames to discard after camera power-on.
      The IMX335 sensor outputs garbage on the first frames.
-     REDUCED FROM 11 → 4: Saves ~167ms per capture (33ms saved per frame).
+     REDUCED FROM 11 → 8: Saves ~133ms per capture (33ms saved per frame).
      CRITICAL: Each warmup frame = ~33ms of delay where the insect can move!
      If images have green tint on first few captures, increase this value. */
 #define SNAP_WARMUP_FRAMES   11
@@ -79,7 +79,12 @@
      If readback differs from configured value, sensor driver is clamping.
      Values below ~1000 µs are often clamped to minimum by IMX335 driver.
      
-     Current: 1000 µs (minimum practical for outdoor, bright conditions) */
+     CRITICAL BUG FIX: The ISP library overwrites exposure during startup.
+     app_cam.c now re-applies exposure AFTER CAM_CapturePipe_Start().
+     Check console for "[CAM] Post-start exposure=XXX" to verify.
+     
+     For FAST SHUTTER (freeze insects in flight): use minimum exposure 8-50 µs
+     with HIGH GAIN (2000-4000) and BRIGHT LEDS (100%). */
 #define CAM_EXPOSURE_VALUE   50
 
 /** Analog gain (only used in MANUAL mode).
@@ -90,14 +95,16 @@
        - Outdoor shade:     600-1000
        - Indoor bright:     1000-1500
      
-     Current: 300 (outdoor, bright conditions, minimal noise) */
-#define CAM_GAIN_VALUE       600
+     With very short exposure (8µs), you NEED higher gain + bright LEDs.
+     Recommended for 8µs exposure: 2000-4000
+     Recommended for 1000µs exposure: 200-600 */
+#define CAM_GAIN_VALUE       3000
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
     0 = default. Positive = brighter, negative = darker.
     Default: 0 */
-#define CAM_BRIGHTNESS       10
+#define CAM_BRIGHTNESS       0
 
 /** Anti-flicker mode (for AC-powered lighting).
     0 = disabled, 1 = 50Hz (EU), 2 = 60Hz (US/Japan), 3 = auto
@@ -156,12 +163,42 @@
    ================================================================ */
 
 /** Capture mode for ToF-triggered photography.
-    0 = ON-DEMAND  — Camera off until trigger. Full init → warmup → capture → deinit cycle.
-                      Safe but slow (~400ms latency). Good for stationary/slow objects.
-    1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
-                      Very fast (~5-10ms latency). Good for fast-moving objects.
-                      Requires extra PSRAM buffer (~5MB) for frame copy during SD write. */
-#define CAPTURE_MODE             0
+     0 = ON-DEMAND  — Camera off until trigger. Full init → warmup → capture → deinit cycle.
+                         Safe but slow (~400ms latency). Good for stationary/slow objects.
+                         NOTE: This is the ONLY mode that works reliably because the CMW
+                         camera library needs exclusive I2C1 access, which conflicts with
+                         the VL53L5CX ToF sensor sharing I2C1.
+     1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
+                         Very fast (~5-10ms latency). Good for fast-moving objects.
+                         NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
+     2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
+                         then writes to SD sequentially. FASTEST capture, max data collection.
+                         NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7). */
+#define CAPTURE_MODE            2
+
+/* ================================================================
+    SECTION 5B: BATCH CAPTURE PARAMETERS (CAPTURE_MODE = 2)
+    ================================================================ */
+
+/** Number of frames captured per insect detection event.
+    Each frame is stored in PSRAM (batch_buf), then written to SD sequentially.
+    More frames = higher chance of at least one sharp image, but more PSRAM used
+    and longer total SD write time (happens AFTER capture, so insect can leave).
+
+    PSRAM usage: BATCH_FRAMES × SNAP_FRAME_SIZE
+      - 1296x972@YUV422 (2.4MB/frame): 3 frames = 7.2MB, 5 frames = 12MB
+      - 2592x1944@YUV422 (9.6MB/frame): 3 frames = 28.8MB, 5 frames = 48MB
+
+    Capture time: ~38ms per frame (stop pipe + memcpy + restart + wait 1 frame)
+      - 3 frames = ~114ms total capture window
+      - 5 frames = ~190ms total capture window
+
+    Recommended: 3 (good balance), 5 (max data, still fast) */
+#define BATCH_FRAMES             3
+
+/** Total batch buffer size in bytes = BATCH_FRAMES × SNAP_FRAME_SIZE.
+    This buffer is allocated in PSRAM and holds all frames for one detection event. */
+#define BATCH_BUF_SIZE           (BATCH_FRAMES * SNAP_FRAME_SIZE)
 
 /* ================================================================
    SECTION 5: BUTTON / LED PARAMETERS
@@ -204,11 +241,11 @@
 
     For bottleneck analysis, use level 2 or 3.
     For production deployment, use level 0. */
-#define PERF_DEBUG_LEVEL         1
+#define PERF_DEBUG_LEVEL         2
 
 /** When PERF_DEBUG_LEVEL >= 2, print SD batch timing every N batches.
     Set to 1 for every batch (very verbose), 4 for every 4th batch. */
-#define PERF_SD_BATCH_PRINT_EVERY  0
+#define PERF_SD_BATCH_PRINT_EVERY  1
 
 /** Track cumulative waiting time for SD card ready states.
     When enabled, the final summary will show total time spent waiting
@@ -230,31 +267,25 @@
 /** Illumination mode:
     0 = ALWAYS_ON  — LEDs stay on continuously (power hungry, not recommended)
     1 = CAPTURE    — LEDs turn on at detection, stay on during full camera
-                     capture cycle (warmup + frame grab), then off.
-                     This is the CORRECT mode for insect capture! */
+                      capture cycle (warmup + frame grab + SD write), then off.
+                      Uses FlashStart/FlashStop (non-blocking).
+                      This is the CORRECT mode for insect capture!
+    2 = INDICATOR  — LEDs flash briefly on detection only (no illumination) */
 #define WS2812_MODE                1
 
 /** Illumination ON duration in milliseconds.
-    MUST be LONGER than the full camera capture cycle (warmup + frame grab).
-    
-    Camera timing breakdown:
-      - Warmup frames: 11 × 33ms = 363ms
-      - Capture frame: 1 × 33ms = 33ms
-      - Total capture: ~396ms (confirmed in logs)
-      - Safety margin: +50ms
-    
-    Recommended minimum: 450ms
-    If you reduce SNAP_WARMUP_FRAMES, adjust this accordingly:
-      Formula: (SNAP_WARMUP_FRAMES + 1) × (1000/SNAP_FPS) + 50ms
-              = (11 + 1) × (1000/30) + 50 = 450ms */
-#define WS2812_ILLUMINATION_MS     5000
+    NOTE: With FlashStart/FlashStop approach (WS2812_MODE=1), this value
+    is NOT used. LEDs stay on for the exact duration of the capture cycle
+    (determined by semaphores, not timers).
+    Kept here for backward compatibility with WS2812_Illuminate(). */
+#define WS2812_ILLUMINATION_MS     500
 
 /** Illumination brightness (0-100%).
     During capture: LEDs run at this brightness.
     Higher = brighter image but more power consumption.
     At 100%: Maximum LED output
     At 50%:  Half brightness (may need higher camera gain to compensate) */
-#define WS2812_ILLUMINATION_BRIGHTNESS  100
+#define WS2812_ILLUMINATION_BRIGHTNESS  10
 
 /** Illumination color (0xRRGGBB format).
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED

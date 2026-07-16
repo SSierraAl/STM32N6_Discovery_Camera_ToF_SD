@@ -69,6 +69,7 @@
 #include "app_cam.h"
 #include "app_fuseprogramming.h"
 #include "app_thread.h"
+#include "debug_color.h"
 #include "main.h"
 #include "npu_cache.h"
 #include "utils.h"
@@ -191,6 +192,19 @@ uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
     This prevents buffer corruption during the SD write. */
 #if CAPTURE_MODE == 1
 static uint8_t save_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
+#endif
+
+/** Batch buffer for batch capture mode — allocated in PSRAM.
+    In BATCH mode (CAPTURE_MODE=2), the camera writes continuously to
+    capture_buf. On ToF trigger, we grab BATCH_FRAMES into batch_buf
+    (each slot = SNAP_FRAME_SIZE), then send them to storage_task
+    sequentially for SD writing.
+    
+    Size = BATCH_FRAMES × SNAP_FRAME_SIZE
+    For 1296x972@YUV422 (2.5MB/frame), BATCH_FRAMES=3 → 7.5MB total.
+    NOTE: Not static — referenced via extern by app_thread.c (camera_task). */
+#if CAPTURE_MODE == 2
+uint8_t batch_buf[BATCH_BUF_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
 /** Capture-in-progress guard — prevents simultaneous captures.
@@ -862,12 +876,20 @@ static int main_freertos(void)
                             sensor_thread_stack, &sensor_thread_cb);
     assert(hdl != NULL);
 
-    /* ---- Button task (manual capture) ---- */
+    /* ---- Button task (manual capture, ON-DEMAND mode only) ---- */
+#if CAPTURE_MODE == 0
     hdl = xTaskCreateStatic(btn_thread_fct, "btn",
                             4 * configMINIMAL_STACK_SIZE, NULL,
                             tskIDLE_PRIORITY + 3,
                             btn_thread_stack, &btn_thread_cb);
     assert(hdl != NULL);
+#else
+    /* In CONTINUOUS/BATCH mode the camera pipe is always running.
+       btn_thread would conflict with CAM_ContinuousStart().
+       Manual capture is not available — use ToF detection only. */
+    (void)btn_thread_stack;
+    (void)btn_thread_cb;
+#endif
 
     vTaskStartScheduler();
     assert(0);
@@ -915,15 +937,16 @@ static void main_thread_fct(void *arg)
     CONSOLE_Config();
     Fuse_Programming();
 
+    /* ---- I2C1 for VL53L5CX ToF (MUST be before tasks start) ---- */
+    VL53L5CX_I2C_Init();
+
     /* ---- Illumination System (WS2812) ---- */
     printf("[INIT] Light system\n");
     MX_GPDMA1_Init();
     MX_TIM1_Init();
     WS2812_Init();
 
-    /* ---- VL53L5CX ToF Sensor (I2C1 + Power-Up) ---- */
-    VL53L5CX_I2C_Init();
-    VL53L5CX_PowerUp();
+    /* ----
 
     /* ---- PSRAM Initialization ---- */
 #ifdef STM32N6570_DK_REV
@@ -1084,7 +1107,9 @@ static void main_thread_fct(void *arg)
     printf("[INFO]   - storage_task (SD writes)\n");
     printf("[INFO]   - btn_thread   (manual capture)\n");
 
-#if CAPTURE_MODE == 1
+#if CAPTURE_MODE == 2
+    printf("[INFO] Capture Mode: BATCH (%d frames/detection)\n", BATCH_FRAMES);
+#elif CAPTURE_MODE == 1
     printf("[INFO] Capture Mode: CONTINUOUS (camera_task starts pipe)\n");
 #else
     printf("[INFO] Capture Mode: ON-DEMAND (camera_task inits per capture)\n");
@@ -1254,6 +1279,10 @@ static void VL53L5CX_I2C_Init(void)
     hi2c1.Init.OwnAddress2Masks = I2C_OA2_NOMASK;
     hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
+
+    /* CRITICAL: MSP init configures GPIO pins (PC1=SCL, PH9=SDA) as I2C AF.
+       Without this, the I2C peripheral has no electrical connection to the sensor. */
+    HAL_I2C_MspInit(&hi2c1);
 
     if (HAL_I2C_Init(&hi2c1) != HAL_OK) {
         //Error_Handler();

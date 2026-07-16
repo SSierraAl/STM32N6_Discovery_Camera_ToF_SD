@@ -219,52 +219,52 @@ static const struct regval framerate_30fps_regs[] = {
 
 static const struct regval mirrorflip_mode_regs[][10] = {
   {
-    {AREA3_ST_ADR_1_LSB, 0xc8}, //AREA3_ST_ADR_1 LSB
-    {AREA3_ST_ADR_1_MSB, 0x00}, //AREA3_ST_ADR_1 MSB
-    {IMX335_REG_HREVERSE, 0x00}, //HREVERSE 0
-    {IMX335_REG_VREVERSE, 0x00}, //VREVERSE 0
-    {0x3081, 0x02}, //RESERVED
-    {0x3083, 0x02}, //RESERVED
-    {0x30b6, 0x00}, //RESERVED
-    {0x30b7, 0x00}, //RESERVED
-    {0x3116, 0x08}, //RESERVED
-    {0x3117, 0x00}, //RESERVED
+    {AREA3_ST_ADR_1_LSB, 0xc8},
+    {AREA3_ST_ADR_1_MSB, 0x00},
+    {IMX335_REG_HREVERSE, 0x00},
+    {IMX335_REG_VREVERSE, 0x00},
+    {0x3081, 0x02},
+    {0x3083, 0x02},
+    {0x30b6, 0x00},
+    {0x30b7, 0x00},
+    {0x3116, 0x08},
+    {0x3117, 0x00},
   },
   {
-    {AREA3_ST_ADR_1_LSB, 0xf8}, //AREA3_ST_ADR_1 LSB
-    {AREA3_ST_ADR_1_MSB, 0x0f}, //AREA3_ST_ADR_1 MSB
-    {IMX335_REG_HREVERSE, 0x00}, //HREVERSE 0
-    {IMX335_REG_VREVERSE, 0x01}, //VREVERSE 1
-    {0x3081, 0xfe}, //RESERVED
-    {0x3083, 0xfe}, //RESERVED
-    {0x30b6, 0xfa}, //RESERVED
-    {0x30b7, 0x01}, //RESERVED
-    {0x3116, 0x02}, //RESERVED
-    {0x3117, 0x00}, //RESERVED
+    {AREA3_ST_ADR_1_LSB, 0xf8},
+    {AREA3_ST_ADR_1_MSB, 0x0f},
+    {IMX335_REG_HREVERSE, 0x00},
+    {IMX335_REG_VREVERSE, 0x01},
+    {0x3081, 0xfe},
+    {0x3083, 0xfe},
+    {0x30b6, 0xfa},
+    {0x30b7, 0x01},
+    {0x3116, 0x02},
+    {0x3117, 0x00},
   },
   {
-    {AREA3_ST_ADR_1_LSB, 0xc8}, //AREA3_ST_ADR_1 LSB
-    {AREA3_ST_ADR_1_MSB, 0x00}, //AREA3_ST_ADR_1 MSB
-    {IMX335_REG_HREVERSE, 0x01}, //HREVERSE 1
-    {IMX335_REG_VREVERSE, 0x00}, //VREVERSE 0
-    {0x3081, 0x02}, //RESERVED
-    {0x3083, 0x02}, //RESERVED
-    {0x30b6, 0x00}, //RESERVED
-    {0x30b7, 0x00}, //RESERVED
-    {0x3116, 0x08}, //RESERVED
-    {0x3117, 0x00}, //RESERVED
+    {AREA3_ST_ADR_1_LSB, 0xc8},
+    {AREA3_ST_ADR_1_MSB, 0x00},
+    {IMX335_REG_HREVERSE, 0x01},
+    {IMX335_REG_VREVERSE, 0x00},
+    {0x3081, 0x02},
+    {0x3083, 0x02},
+    {0x30b6, 0x00},
+    {0x30b7, 0x00},
+    {0x3116, 0x08},
+    {0x3117, 0x00},
   },
   {
-    {AREA3_ST_ADR_1_LSB, 0xf8}, //AREA3_ST_ADR_1 LSB
-    {AREA3_ST_ADR_1_MSB, 0x0f}, //AREA3_ST_ADR_1 MSB
-    {IMX335_REG_HREVERSE, 0x01}, //HREVERSE 1
-    {IMX335_REG_VREVERSE, 0x01}, //VREVERSE 1
-    {0x3081, 0xfe}, //RESERVED
-    {0x3083, 0xfe}, //RESERVED
-    {0x30b6, 0xfa}, //RESERVED
-    {0x30b7, 0x01}, //RESERVED
-    {0x3116, 0x02}, //RESERVED
-    {0x3117, 0x00}, //RESERVED
+    {AREA3_ST_ADR_1_LSB, 0xf8},
+    {AREA3_ST_ADR_1_MSB, 0x0f},
+    {IMX335_REG_HREVERSE, 0x01},
+    {IMX335_REG_VREVERSE, 0x01},
+    {0x3081, 0xfe},
+    {0x3083, 0xfe},
+    {0x30b6, 0xfa},
+    {0x30b7, 0x01},
+    {0x3116, 0x02},
+    {0x3117, 0x00},
   },
 };
 
@@ -314,7 +314,6 @@ static int32_t IMX335_WriteTable(IMX335_Object_t *pObj, const struct regval *reg
   uint32_t index;
   int32_t ret = IMX335_OK;
 
-  /* Set registers */
   for(index=0; index<size ; index++)
   {
     if(ret != IMX335_ERROR)
@@ -328,12 +327,6 @@ static int32_t IMX335_WriteTable(IMX335_Object_t *pObj, const struct regval *reg
   return ret;
 }
 
-/**
-  * @brief This function provides accurate delay (in milliseconds)
-  * @param pObj   pointer to component object
-  * @param Delay  specifies the delay time length, in milliseconds
-  * @retval IMX335_OK
-  */
 static int32_t IMX335_Delay(IMX335_Object_t *pObj, uint32_t Delay)
 {
   uint32_t tickstart;
@@ -344,33 +337,15 @@ static int32_t IMX335_Delay(IMX335_Object_t *pObj, uint32_t Delay)
   return IMX335_OK;
 }
 
-/**
-  * @brief  Wrap component ReadReg to Bus Read function
-  * @param  handle  Component object handle
-  * @param  Reg  The target register address to write
-  * @param  pData  The target register value to be written
-  * @param  Length  buffer size to be written
-  * @retval error status
-  */
 static int32_t IMX335_ReadRegWrap(void *handle, uint16_t Reg, uint8_t* pData, uint16_t Length)
 {
   IMX335_Object_t *pObj = (IMX335_Object_t *)handle;
-
   return pObj->IO.ReadReg(pObj->IO.Address, Reg, pData, Length);
 }
 
-/**
-  * @brief  Wrap component WriteReg to Bus Write function
-  * @param  handle  Component object handle
-  * @param  Reg  The target register address to write
-  * @param  pData  The target register value to be written
-  * @param  Length  buffer size to be written
-  * @retval error status
-  */
 static int32_t IMX335_WriteRegWrap(void *handle, uint16_t Reg, uint8_t* pData, uint16_t Length)
 {
   IMX335_Object_t *pObj = (IMX335_Object_t *)handle;
-
   return pObj->IO.WriteReg(pObj->IO.Address, Reg, pData, Length);
 }
 
@@ -381,11 +356,7 @@ static int32_t IMX335_WriteRegWrap(void *handle, uint16_t Reg, uint8_t* pData, u
 /** @defgroup IMX335_Exported_Functions IMX335 Exported Functions
   * @{
   */
-/**
-  * @brief  Register component IO bus
-  * @param  Component object pointer
-  * @retval Component status
-  */
+
 int32_t IMX335_RegisterBusIO(IMX335_Object_t *pObj, IMX335_IO_t *pIO)
 {
   int32_t ret;
@@ -420,13 +391,6 @@ int32_t IMX335_RegisterBusIO(IMX335_Object_t *pObj, IMX335_IO_t *pIO)
   return ret;
 }
 
-/**
-  * @brief  Initializes the IMX335 CAMERA component.
-  * @param  pObj  pointer to component object
-  * @param  Resolution  Camera resolution
-  * @param  PixelFormat pixel format to be configured
-  * @retval Component status
-  */
 int32_t IMX335_Init(IMX335_Object_t *pObj, uint32_t Resolution, uint32_t PixelFormat)
 {
   int32_t ret = IMX335_OK;
@@ -441,9 +405,7 @@ int32_t IMX335_Init(IMX335_Object_t *pObj, uint32_t Resolution, uint32_t PixelFo
           ret = IMX335_ERROR;
         }
         break;
-      /* Add new resolution here */
       default:
-        /* Resolution not supported */
         ret = IMX335_ERROR;
     }
 
@@ -463,18 +425,10 @@ int32_t IMX335_Init(IMX335_Object_t *pObj, uint32_t Resolution, uint32_t PixelFo
   return ret;
 }
 
-/**
-  * @brief  Initializes the IMX335 CAMERA component.
-  * @param  pObj  pointer to component object
-  * @param  Resolution  Camera resolution
-  * @param  PixelFormat pixel format to be configured
-  * @retval Component status
-  */
 int32_t IMX335_Start(IMX335_Object_t *pObj)
 {
   uint8_t tmp;
   int32_t ret = IMX335_OK;
-  /* Start streaming */
   tmp = IMX335_MODE_STREAMING;
   ret = imx335_write_reg(&pObj->Ctx, IMX335_REG_MODE_SELECT, &tmp, 1);
   if (ret != IMX335_OK)
@@ -485,37 +439,23 @@ int32_t IMX335_Start(IMX335_Object_t *pObj)
   return ret;
 }
 
-/**
-  * @brief  De-initializes the camera sensor.
-  * @param  pObj  pointer to component object
-  * @retval Component status
-  */
 int32_t IMX335_DeInit(IMX335_Object_t *pObj)
 {
   if(pObj->IsInitialized == 1U)
   {
-    /* De-initialize camera sensor interface */
     pObj->IsInitialized = 0U;
   }
-
   return IMX335_OK;
 }
 
-/**
-  * @brief  Read the IMX335 Camera identity.
-  * @param  pObj  pointer to component object
-  * @param  Id    pointer to component ID
-  * @retval Component status
-  */
 int32_t IMX335_ReadID(IMX335_Object_t *pObj, uint32_t *Id)
 {
   int32_t ret;
   uint8_t tmp;
 
-  /* Initialize I2C */
   pObj->IO.Init();
 
-  if(imx335_read_reg(&pObj->Ctx, IMX335_REG_ID, &tmp, 1)!= IMX335_OK)
+  if(imx335_read_reg(&pObj->Ctx, IMX335_REG_ID, &tmp, 1) != IMX335_OK)
   {
     ret = IMX335_ERROR;
   }
@@ -525,16 +465,9 @@ int32_t IMX335_ReadID(IMX335_Object_t *pObj, uint32_t *Id)
     ret = IMX335_OK;
   }
 
-  /* Component status */
   return ret;
 }
 
-/**
-  * @brief  Read the IMX335 Camera Capabilities.
-  * @param  pObj          pointer to component object
-  * @param  Capabilities  pointer to component Capabilities
-  * @retval Component status
-  */
 int32_t IMX335_GetCapabilities(IMX335_Object_t *pObj, IMX335_Capabilities_t *Capabilities)
 {
   int32_t ret;
@@ -567,12 +500,6 @@ int32_t IMX335_GetCapabilities(IMX335_Object_t *pObj, IMX335_Capabilities_t *Cap
   return ret;
 }
 
-/**
-  * @brief  Set the gain
-  * @param  pObj  pointer to component object
-  * @param  Gain Gain in mdB
-  * @retval Component status
-  */
 int32_t IMX335_SetGain(IMX335_Object_t *pObj, int32_t gain)
 {
   int32_t ret = IMX335_OK;
@@ -584,7 +511,6 @@ int32_t IMX335_SetGain(IMX335_Object_t *pObj, int32_t gain)
   }
   else
   {
-    /* Convert to IMX335 gain unit (0.3 dB = 300 mdB) */
     gain /= IMX335_GAIN_UNIT_MDB;
 
     hold = 1;
@@ -609,13 +535,13 @@ int32_t IMX335_SetGain(IMX335_Object_t *pObj, int32_t gain)
     }
   }
 
-return ret;
+  return ret;
 }
 
 /**
   * @brief  Set the exposure
   * @param  pObj  pointer to component object
-  * @param  Exposure Exposure in micro seconds
+  * @param  exposure Exposure in micro seconds
   * @retval Component status
   */
 int32_t IMX335_SetExposure(IMX335_Object_t *pObj, int32_t exposure)
@@ -624,6 +550,9 @@ int32_t IMX335_SetExposure(IMX335_Object_t *pObj, int32_t exposure)
   uint32_t vmax, shutter;
   uint8_t hold;
 
+  /* Clamp to sensor minimum (8us per datasheet) */
+  if (exposure < IMX335_EXPOSURE_MIN)
+    exposure = IMX335_EXPOSURE_MIN;
 
   if (imx335_read_reg(&pObj->Ctx, IMX335_REG_VMAX, (uint8_t *)&vmax, 4) != IMX335_OK)
   {
@@ -633,30 +562,31 @@ int32_t IMX335_SetExposure(IMX335_Object_t *pObj, int32_t exposure)
   {
     shutter = (uint32_t) (vmax - (exposure / IMX335_1H_PERIOD_USEC));
 
-    if (shutter < IMX335_SHUTTER_MIN)
+    /* RELAXED CLAMP: Allow shutter down to 1 (enables ~8us exposure)
+       Original: IMX335_SHUTTER_MIN = 9, which clamped exposure to ~100us
+       Sensor supports 8us minimum per imx335_reg.h */
+    if (shutter < 1)
+    {
+      shutter = 1;
+    }
+
+    hold = 1;
+    if(imx335_write_reg(&pObj->Ctx, IMX335_REG_HOLD, &hold, 1) != IMX335_OK)
     {
       ret = IMX335_ERROR;
     }
     else
     {
-      hold = 1;
-      if(imx335_write_reg(&pObj->Ctx, IMX335_REG_HOLD, &hold, 1) != IMX335_OK)
+      if(imx335_write_reg(&pObj->Ctx, IMX335_REG_SHUTTER, (uint8_t *)&shutter, 3) != IMX335_OK)
       {
         ret = IMX335_ERROR;
       }
       else
       {
-        if(imx335_write_reg(&pObj->Ctx, IMX335_REG_SHUTTER, (uint8_t *)&shutter, 3) != IMX335_OK)
+        hold = 0;
+        if(imx335_write_reg(&pObj->Ctx, IMX335_REG_HOLD, &hold, 1) != IMX335_OK)
         {
           ret = IMX335_ERROR;
-        }
-        else
-        {
-          hold = 0;
-          if(imx335_write_reg(&pObj->Ctx, IMX335_REG_HOLD, &hold, 1) != IMX335_OK)
-          {
-            ret = IMX335_ERROR;
-          }
         }
       }
     }
@@ -665,12 +595,6 @@ int32_t IMX335_SetExposure(IMX335_Object_t *pObj, int32_t exposure)
   return ret;
 }
 
-/**
-  * @brief  Set the Frequency
-  * @param  pObj  pointer to component object
-  * @param  frequency in Mhz
-  * @retval Component status
-  */
 int32_t IMX335_SetFrequency(IMX335_Object_t *pObj, int32_t frequency)
 {
   uint32_t ret = IMX335_OK;
@@ -702,7 +626,6 @@ int32_t IMX335_SetFrequency(IMX335_Object_t *pObj, int32_t frequency)
       }
       break;
     default:
-      /* IMX335_INCK_6MHZ */
       if(IMX335_WriteTable(pObj, inck_6Mhz_regs, ARRAY_SIZE(inck_6Mhz_regs)) != IMX335_OK)
       {
         ret = IMX335_ERROR;
@@ -713,12 +636,6 @@ int32_t IMX335_SetFrequency(IMX335_Object_t *pObj, int32_t frequency)
   return ret;
 }
 
-/**
-  * @brief  Set the Framerate
-  * @param  pObj  pointer to component object
-  * @param  framerate 10, 15, 20, 25 or 30fps
-  * @retval Component status
-  */
 int32_t IMX335_SetFramerate(IMX335_Object_t *pObj, int32_t framerate)
 {
   uint32_t ret = IMX335_OK;
@@ -739,7 +656,7 @@ int32_t IMX335_SetFramerate(IMX335_Object_t *pObj, int32_t framerate)
     case 20:
       if(IMX335_WriteTable(pObj, framerate_20fps_regs, ARRAY_SIZE(framerate_20fps_regs)) != IMX335_OK)
       {
-       ret = IMX335_ERROR;
+        ret = IMX335_ERROR;
       }
       break;
     case 25:
@@ -749,7 +666,6 @@ int32_t IMX335_SetFramerate(IMX335_Object_t *pObj, int32_t framerate)
       }
       break;
     default:
-      /* 30fps */
       if(IMX335_WriteTable(pObj, framerate_30fps_regs, ARRAY_SIZE(framerate_30fps_regs)) != IMX335_OK)
       {
         ret = IMX335_ERROR;
@@ -760,12 +676,6 @@ int32_t IMX335_SetFramerate(IMX335_Object_t *pObj, int32_t framerate)
   return ret;
 }
 
-/**
-  * @brief  Control imx335 camera mirror/vflip.
-  * @param  pObj  pointer to component object
-  * @param  Config To configure mirror, flip, both or none
-  * @retval Component status
-  */
 int32_t IMX335_MirrorFlipConfig(IMX335_Object_t *pObj, uint32_t Config)
 {
   int32_t ret = IMX335_OK;
@@ -789,25 +699,6 @@ int32_t IMX335_MirrorFlipConfig(IMX335_Object_t *pObj, uint32_t Config)
   return ret;
 }
 
-/**
-  * @brief  Set the Test Pattern Generator
-  * @param  pObj  pointer to component object
-  * @param  mode Pattern mode:
-  *              -1 : Disable
-  *               0 : All 000h
-  *               1 : All FFFh
-  *               2 : All 555h
-  *               3 : All AAAh
-  *               4 : Toggle 555/AAAh
-  *               5 : Toggle AAA/555h
-  *               6 : Toggle 000/555h
-  *               7 : Toggle 555/000h
-  *               8 : Toggle 000/FFFh
-  *               9 : Toggle FFF/000h
-  *               10: Horizontal color bars
-  *               11: Vertical color bars
-  * @retval Component status
-  */
 int32_t IMX335_SetTestPattern(IMX335_Object_t *pObj, int32_t mode)
 {
   int32_t ret = IMX335_OK;
@@ -815,7 +706,6 @@ int32_t IMX335_SetTestPattern(IMX335_Object_t *pObj, int32_t mode)
 
   if (mode >= 0)
   {
-    /* Enable Test Pattern #mode */
     val = mode;
     if (imx335_write_reg(&pObj->Ctx, IMX335_REG_TPG, &val, 1) != IMX335_OK)
     {
@@ -828,7 +718,6 @@ int32_t IMX335_SetTestPattern(IMX335_Object_t *pObj, int32_t mode)
   }
   else
   {
-    /* Disable Test Pattern */
     if (IMX335_WriteTable(pObj, test_pattern_disable_regs, ARRAY_SIZE(test_pattern_disable_regs)) != IMX335_OK)
     {
       return IMX335_ERROR;

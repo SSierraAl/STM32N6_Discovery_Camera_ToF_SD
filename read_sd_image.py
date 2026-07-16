@@ -25,7 +25,7 @@ HDR_FIELDS = ['magic', 'width', 'height', 'pixel_format', 'data_size', 'timestam
 
 # FIXED block per snapshot: ceil((64 + 2592*1944*2) / 512) = 19661
 # This matches the C code calculation exactly
-SNAP_W, SNAP_H = 2592, 1944 #640, 480  #1296, 972 #2592, 1944
+SNAP_W, SNAP_H = 1296, 972 #640, 480  #1296, 972 #2592, 1944
 SNAP_FRAME_SIZE = SNAP_W * SNAP_H * 2
 SNAP_BLOCKS = (HEADER_SIZE + SNAP_FRAME_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE  # 19661
 

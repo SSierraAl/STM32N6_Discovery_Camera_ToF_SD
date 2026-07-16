@@ -128,11 +128,14 @@ typedef struct {
 #define STORAGE_TASK_STACK_SIZE   (6 * configMINIMAL_STACK_SIZE)
 
 /* ================================================================
-   QUEUE SIZES
-   ================================================================ */
+    QUEUE SIZES
+    ================================================================ */
 
 #define CAMERA_CMD_QUEUE_LEN      4
-#define STORAGE_CMD_QUEUE_LEN     4
+/** Storage queue depth.
+    In BATCH mode, camera_task sends BATCH_FRAMES StorageCmd entries rapidly.
+    Must be ≥ BATCH_FRAMES to avoid drops. Set to 8 for headroom. */
+#define STORAGE_CMD_QUEUE_LEN     8
 #define SENSOR_EVENT_QUEUE_LEN    4
 
 /* ================================================================

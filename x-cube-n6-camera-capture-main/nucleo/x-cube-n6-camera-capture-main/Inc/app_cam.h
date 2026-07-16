@@ -42,7 +42,8 @@ typedef struct {
    PUBLIC API — BASIC CAMERA CONTROL
    ================================================================ */
 
-void CAM_Init(CAM_conf_t *conf);
+/** Returns 0 on success, -1 on failure */
+int CAM_Init(CAM_conf_t *conf);
 void CAM_CapturePipe_Start(uint8_t *capture_pipe_dst, uint32_t cam_mode);
 void CAM_IspUpdate(void);
 void CAM_Deinit(void);
@@ -102,6 +103,49 @@ int CAM_ContinuousSnap(uint8_t *dest_buf, uint32_t frame_size);
  * @brief  Stop continuous capture and deinit camera (shutdown).
  */
 int CAM_ContinuousStop(void);
+
+/* ================================================================
+   PUBLIC API — BATCH CAPTURE MODE (CAPTURE_MODE = 2)
+   One init+warmup+deinit cycle, N consecutive frames captured rapidly.
+   ================================================================ */
+
+/**
+ * @brief  Capture multiple frames with ONE init+warmup+deinit cycle.
+ *
+ *   Strategy:
+ *     1. Init camera (once)
+ *     2. Start continuous capture
+ *     3. Warmup: discard SNAP_WARMUP_FRAMES (once)
+ *     4. Capture frame_count consecutive frames (~33ms each at 30fps)
+ *     5. Stop & deinit camera (once)
+ *
+ *   Much faster than calling CAM_CaptureSingleFrame N times:
+ *     CAM_CaptureBatchFrames:  ~400ms + N×33ms
+ *     N×CAM_CaptureSingleFrame: N×(~664ms)
+ *
+ * @param  batch_buf    Pre-allocated buffer ≥ frame_count × frame_size bytes
+ * @param  frame_size   Size of one frame in bytes (width*height*2)
+ * @param  frame_count  Number of frames to capture (e.g., 3)
+ * @param  width        Capture width
+ * @param  height       Capture height
+ * @param  fps          Sensor frame rate
+ * @return number of frames captured (0..frame_count), -1 on error
+ */
+int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count,
+                            int width, int height, int fps);
+
+/**
+ * @brief  Capture BATCH_FRAMES quickly from continuous camera into batch_buf.
+ *
+ *   For each frame: stop pipe → copy → restart pipe → wait 1 frame.
+ *   LEDs should stay ON during this entire call.
+ *   Only used when camera is already running in continuous mode.
+ *
+ * @param  batch_buf    Pre-allocated buffer ≥ BATCH_FRAMES × frame_size bytes
+ * @param  frame_size   Size of one frame in bytes (width*height*2)
+ * @return number of frames captured (0..BATCH_FRAMES), -1 on error
+ */
+int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
 
 /* ================================================================
    PUBLIC API — FRAME COUNTER (used by vsync IRQ handler)

@@ -1,0 +1,117 @@
+# Build artifacts
+build/
+*.o *.d *.elf *.hex *.bin *.axf
+
+# Documentation
+Doc/
+*.pdf *.html *.md
+
+# IDE projects
+EWARM/
+STM32CubeIDE/
+.GCC/
+
+# Makefiles
+mks/
+Makefile
+*.mk
+
+# Gcc syscalls
+Gcc/Src/console.c
+Gcc/Src/syscalls.c
+Gcc/Src/freertos_libc.c
+
+# ============================================
+# EXCLUDE ENTIRE STM32Cube_FW_N6 - HAL LIBRARY NOISE
+# ============================================
+STM32Cube_FW_N6/
+
+# ============================================
+# Inc/ - EXCLUDE DUPLICATE COPIED HEADERS
+# Keep only YOUR application headers
+# ============================================
+
+# FileX headers (copied from STM32Cube_FW_N6/Middlewares/ST/filex)
+Inc/fx_api.h
+Inc/fx_directory.h
+Inc/fx_directory_exFAT.h
+Inc/fx_fault_tolerant.h
+Inc/fx_file.h
+Inc/fx_media.h
+Inc/fx_port.h
+Inc/fx_stm32_sd_driver.h
+Inc/fx_stm32_sram_driver.h
+Inc/fx_system.h
+Inc/fx_unicode.h
+Inc/fx_user_sample.h
+Inc/fx_utility.h
+
+# TrueSTUDIO headers (not used with GCC)
+Inc/tx_api.h
+Inc/tx_port.h
+Inc/tx_secure_interface.h
+
+# STM32 HAL headers (copied from FW package)
+Inc/stm32n6xx_hal_conf.h
+Inc/stm32n6xx_hal_conf_template.h
+Inc/stm32n6xx_hal_sd.h
+Inc/stm32n6xx_hal_sd_ex.h
+Inc/stm32n6xx_it.h
+Inc/stm32n6xx_ll_sdmmc.h
+
+# Discovery board headers (copied from BSP)
+Inc/stm32n6570_discovery.h
+Inc/stm32n6570_discovery_bus.h
+Inc/stm32n6570_discovery_conf.h
+Inc/stm32n6570_discovery_errno.h
+Inc/stm32n6570_discovery_xspi.h
+
+# ISP param config headers (copied/binary configs)
+Inc/imx335_isp_param_conf.h
+Inc/isp_conf.h
+Inc/isp_param_conf.h
+Inc/vd66gy_isp_param_conf.h
+Inc/vd1943_isp_param_conf.h
+Inc/mx25um51245g_conf.h
+Inc/mx66uw1g45g_conf.h
+Inc/aps256xx_conf.h
+Inc/cmw_camera_conf.h
+
+# Other copied headers
+Inc/stm32_assert_template.h
+Inc/stm32_lcd_ex.h
+Inc/stm32n6xx_nucleo_conf.h
+Inc/stm32n6xx_util_i3c.h
+Inc/partition_stm32n657xx.h
+Inc/stm32n6570_discovery.h
+
+# ============================================
+# Lib - Exclude documentation & unused sensors
+# (You only use IMX335, not VD55G1, VD1943, OV5640, etc.)
+# ============================================
+Lib/Camera_Middleware/_htmresc/
+Lib/Camera_Middleware/.github/
+Lib/Camera_Middleware/*.md
+Lib/Camera_Middleware/sensors/cmw_ov5640.c
+Lib/Camera_Middleware/sensors/cmw_vd1943.c
+Lib/Camera_Middleware/sensors/cmw_vd55g1.c
+Lib/Camera_Middleware/sensors/cmw_vd56g3.c
+Lib/Camera_Middleware/sensors/cmw_vd5943.c
+Lib/Camera_Middleware/sensors/cmw_vd65g4.c
+Lib/Camera_Middleware/sensors/cmw_vd66gy.c
+Lib/Camera_Middleware/sensors/vd1943/
+Lib/Camera_Middleware/sensors/vd55g1/
+Lib/Camera_Middleware/sensors/vd6g/
+Lib/Camera_Middleware/sensors/ov5640/
+Lib/Camera_Middleware/ISP_Library/isp_param_conf/
+Lib/Camera_Middleware/ISP_Library/*.md
+
+Lib/FreeRTOS/.github/
+Lib/FreeRTOS/Source/CMSIS_RTOS_V2/
+Lib/FreeRTOS/Source/portable/RVDS/
+Lib/FreeRTOS/Source/portable/IAR/
+Lib/FreeRTOS/*.md
+
+Lib/uvcl/.github/
+Lib/uvcl/mks/
+Lib/uvcl/*.md

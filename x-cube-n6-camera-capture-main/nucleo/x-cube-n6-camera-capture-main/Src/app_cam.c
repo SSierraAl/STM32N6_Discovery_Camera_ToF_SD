@@ -20,6 +20,7 @@
 #include "app_cam.h"
 #include "app_config.h"
 #include "perf_debug.h"
+#include "debug_color.h"
 #include "stm32n6xx.h"
 #include "stm32n6xx_hal.h"
 #include "utils.h"
@@ -28,6 +29,9 @@
 
 /* External reference to shared perf timer */
 extern PerfTimer_t g_perf_timer;
+
+/* External reference to capture buffer (defined in main.c) */
+extern uint8_t capture_buf[];
 
 /* Define sensor orientation */
 #if CAMERA_SELFY == 1
@@ -86,7 +90,7 @@ static int CAM_getFlipMode(CMW_Sensor_Name_t sensor)
 
   return sensor_mirror_flip;
 }
-
+// MARK: Camera capture functions
 static int CAM_FormatToBpp(int dcmipp_output_format)
 {
   int bpp = 0;
@@ -169,7 +173,7 @@ static void DCMIPP_PipeInitCapture(CAM_conf_t *cam_conf, int sensor_width, int s
     CAM_EnableYuv(DCMIPP_PIPE1);
 }
 
-void CAM_Init(CAM_conf_t *conf)
+int CAM_Init(CAM_conf_t *conf)
 {
   CMW_CameraInit_t cam_conf;
   int ret;
@@ -225,7 +229,7 @@ void CAM_Deinit()
   int ret;
 
   ret = CMW_CAMERA_DeInit();
-  assert(ret == CMW_ERROR_NONE);
+  assert(ret == HAL_OK);
 }
 
 void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe)
@@ -442,8 +446,111 @@ int CAM_CaptureSingleFrame_DefaultWarmup(uint8_t *buf, int buf_size, int width, 
   return CAM_CaptureSingleFrame(buf, buf_size, width, height, fps, 8);
 }
 
-/* External reference to capture_buf (defined in main.c) */
-extern uint8_t capture_buf[];
+/**
+ * @brief Capture multiple frames with ONE init+warmup+deinit cycle.
+ *
+ *   Much faster than calling CAM_CaptureSingleFrame N times:
+ *     - Single warmup (8 frames discarded once)
+ *     - N consecutive frames captured rapidly (~33ms each at 30fps)
+ *     - Single deinit at end
+ *
+ *   Total time: ~1 init + 8 warmup + N capture + 1 deinit ≈ 400ms + N×33ms
+ *   vs N×CAM_CaptureSingleFrame: N×(400ms + 8×33ms) ≈ N×664ms
+ *
+ * @param batch_buf    Pre-allocated buffer ≥ frame_count × frame_size
+ * @param frame_size   Size of one frame in bytes
+ * @param frame_count  Number of frames to capture (e.g., 3)
+ * @param width        Capture width
+ * @param height       Capture height
+ * @param fps          Sensor frame rate
+ * @return number of frames captured (0..frame_count), -1 on error
+ */
+int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count,
+                           int width, int height, int fps)
+{
+  int min_size = width * height * 2;  /* YUV422 = 2 bpp */
+  if (batch_buf == NULL || frame_size < min_size || frame_count < 1) return -1;
+
+  /* 1. Init camera */
+#if PERF_DEBUG_LEVEL >= 1
+  printf("[CAM] Batch init %dx%d@%d YUV422 (%d frames)...\n", width, height, fps, frame_count);
+#endif
+
+  CAM_conf_t conf = {0};
+  conf.capture_width = width;
+  conf.capture_height = height;
+  conf.fps = fps;
+  conf.dcmipp_output_format = DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1;
+  conf.is_rgb_swap = 0;
+  CAM_Init(&conf);
+
+  /* 2. Apply exposure */
+  CMW_CAMERA_SetExposureMode(CMW_EXPOSUREMODE_MANUAL);
+  CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+  CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+
+  DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
+
+   /* 3. Start continuous capture */
+   CAM_CapturePipe_Start(capture_buf, CMW_MODE_CONTINUOUS);
+
+  /* Re-apply exposure after start */
+  if (CAM_EXPOSURE_MODE == 1) {
+      CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+      CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+      CAM_IspUpdate();
+  }
+
+  /* 4. Warmup: discard SNAP_WARMUP_FRAMES */
+#if PERF_DEBUG_LEVEL >= 1
+  printf("[CAM] Warmup: discarding %d frames...\n", SNAP_WARMUP_FRAMES);
+#endif
+  CAM_ResetFrameCounter(SNAP_WARMUP_FRAMES);
+  uint32_t t0 = HAL_GetTick();
+  while (g_wait_frames != 0) {
+    CAM_IspUpdate();
+    vTaskDelay(pdMS_TO_TICKS(5));
+    if (HAL_GetTick() - t0 > 5000) {
+#if PERF_DEBUG_LEVEL >= 1
+      printf("[CAM] WARMUP TIMEOUT!\n");
+#endif
+      HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
+      CAM_Deinit();
+      return -1;
+    }
+  }
+
+  /* 5. Capture frame_count frames */
+  int captured = 0;
+  for (int i = 0; i < frame_count; i++) {
+    /* Wait for one frame */
+    CAM_ResetFrameCounter(1);
+    t0 = HAL_GetTick();
+    while (g_wait_frames != 0) {
+      CAM_IspUpdate();
+      vTaskDelay(pdMS_TO_TICKS(5));
+      if (HAL_GetTick() - t0 > 500) break;
+    }
+
+    /* Copy to batch buffer */
+    uint8_t *dest = batch_buf + (i * frame_size);
+    SCB_InvalidateDCache_by_Addr((uint32_t *)capture_buf, frame_size);
+    memcpy(dest, capture_buf, frame_size);
+    SCB_CleanDCache_by_Addr((uint32_t *)dest, frame_size);
+    captured++;
+  }
+
+  /* 6. Stop and deinit */
+  HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
+  CAM_Deinit();
+
+#if PERF_DEBUG_LEVEL >= 1
+  printf("[CAM] Batch: %d/%d frames in %lu ms\n", captured, frame_count,
+         (unsigned long)(HAL_GetTick() - t0));
+#endif
+
+  return captured;
+}
 
 /* ================================================================
    CONTINUOUS MODE IMPLEMENTATION (CAPTURE_MODE = 1)
@@ -524,6 +631,27 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size,
 #endif
 
   CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
+
+  /* ---- CRITICAL: Re-apply manual exposure AFTER ISP starts ----
+     The ISP library's auto-exposure engine may overwrite sensor exposure
+     during ISP_Start() / CAM_IspUpdate(). For MANUAL mode, we must force
+     the exposure value again after the camera pipe is running. */
+  if (CAM_EXPOSURE_MODE == 1) {
+    int32_t ret_expo2 = CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+    int32_t ret_gain2 = CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+
+    /* Force ISP to process the new values */
+    CAM_IspUpdate();
+
+    int32_t readback_expo2, readback_gain2;
+    CMW_CAMERA_GetExposure(&readback_expo2);
+    CMW_CAMERA_GetGain(&readback_gain2);
+
+#if PERF_DEBUG_LEVEL >= 1
+    printf("[CAM] Post-start exposure=%ld, gain=%ld (rc=%ld,%ld)\n",
+           (long)readback_expo2, (long)readback_gain2, (long)ret_expo2, (long)ret_gain2);
+#endif
+  }
 
   /* ---- 3. Wait for warmup frames (if requested) ---- */
   if (warmup_frames > 0) {
@@ -642,4 +770,91 @@ int CAM_ContinuousStop(void)
   printf("[CAM] Continuous mode stopped.\n");
 #endif
   return 0;
+}
+
+/* ================================================================
+   BATCH CAPTURE MODE (CAPTURE_MODE = 2)
+   ================================================================ */
+
+/**
+ * @brief  Capture BATCH_FRAMES quickly from continuous camera into batch_buf.
+ *
+ *   Strategy:
+ *     The camera is running in CONTINUOUS mode, overwriting capture_buf.
+ *     On each grab:
+ *       1. STOP pipe
+ *       2. Invalidate D-Cache for capture_buf
+ *       3. memcpy capture_buf → batch_buf[frame_index * frame_size]
+ *       4. RESTART pipe (immediately, next frame arrives ~33ms at 30FPS)
+ *       5. Wait for 1 new frame to complete (poll g_frame_count)
+ *       6. Repeat for BATCH_FRAMES
+ *
+ *   Total grab time: BATCH_FRAMES × (~33ms + copy_time) ≈ 3 × 38ms = 114ms
+ *   LEDs stay ON during this entire window.
+ *
+ * @param  batch_buf    Pre-allocated buffer ≥ BATCH_FRAMES × frame_size
+ * @param  frame_size   Size of one frame in bytes
+ * @return number of frames successfully captured (0..BATCH_FRAMES), -1 on error
+ */
+int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
+{
+#if CAPTURE_MODE != 2
+    (void)batch_buf; (void)frame_size;
+    return -1;
+#endif
+    if (!batch_buf) return -1;
+
+    DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
+    if (!hhandle) return -1;
+
+    uint32_t t0 = HAL_GetTick();
+    uint8_t frames_captured = 0;
+
+#if PERF_DEBUG_LEVEL >= 1
+    printf("[CAM] BatchSnap: grabbing %d frames...\n", BATCH_FRAMES);
+#endif
+
+    for (uint8_t i = 0; i < BATCH_FRAMES; i++) {
+        uint8_t *dest = batch_buf + (i * frame_size);
+
+        /* --- Step 1: STOP DCMIPP pipe --- */
+        HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
+        for (volatile int d = 0; d < 100; d++);
+
+        /* --- Step 2: Invalidate D-Cache (read fresh DMA data) --- */
+        SCB_InvalidateDCache_by_Addr((uint32_t *)capture_buf, frame_size);
+
+        /* --- Step 3: memcpy capture_buf → batch slot --- */
+        memcpy(dest, capture_buf, frame_size);
+
+        /* --- Step 4: Clean destination for SD DMA later --- */
+        SCB_CleanDCache_by_Addr((uint32_t *)dest, frame_size);
+
+        /* --- Step 5: RESTART pipe immediately --- */
+        CMW_CAMERA_Start(DCMIPP_PIPE1, capture_buf, CMW_MODE_CONTINUOUS);
+
+        frames_captured++;
+
+        /* --- Step 6: Wait for 1 new frame before next grab (except last) --- */
+        if (i < BATCH_FRAMES - 1) {
+            CAM_ResetFrameCounter(1);  /* wait for exactly 1 frame */
+            uint32_t t_wait = HAL_GetTick();
+            while (g_wait_frames != 0) {
+                CAM_IspUpdate();
+                vTaskDelay(pdMS_TO_TICKS(2));
+                if (HAL_GetTick() - t_wait > 200) break;  /* safety timeout */
+            }
+        }
+    }
+
+    uint32_t elapsed = HAL_GetTick() - t0;
+
+#if PERF_DEBUG_LEVEL >= 1
+    printf("[CAM] BatchSnap: %d frames in %lu ms (%lu ms/frame)\n",
+           (unsigned long)frames_captured,
+           (unsigned long)elapsed,
+           frames_captured > 0 ? elapsed / frames_captured : 0);
+#endif
+
+    return (int)frames_captured;
 }
