@@ -242,6 +242,7 @@ void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe)
    here so we can discard exactly N warmup frames instead of guessing
    with a time-based delay. */
 static volatile uint32_t g_frame_count = 0;
+/* ISR/task-shared countdown; updated from VSYNC callback and polled by tasks. */
 static volatile int      g_wait_frames = 0;  /* target: frames to wait before done */
 
 /**
@@ -272,14 +273,23 @@ uint32_t CAM_GetFrameCount(void)
   return g_frame_count;
 }
 
+/**
+ * @brief Wait for a number of VSYNC frames, with timeout.
+ * @param frame_count Number of frames to wait for.
+ * @param timeout_ms  Timeout in milliseconds.
+ * @param poll_ticks  Delay between polls.
+ * @return 0 on success, -1 on timeout.
+ */
 static int CAM_WaitFrames(int frame_count, uint32_t timeout_ms, TickType_t poll_ticks)
 {
-  uint32_t t0 = HAL_GetTick();
+  uint32_t deadline = HAL_GetTick() + timeout_ms;
   CAM_ResetFrameCounter(frame_count);
   while (g_wait_frames != 0) {
     CAM_IspUpdate();
     vTaskDelay(poll_ticks);
-    if (HAL_GetTick() - t0 > timeout_ms) {
+    uint32_t now = HAL_GetTick();
+    /* Signed delta comparison keeps timeout check valid across tick wraparound. */
+    if ((int32_t)(now - deadline) >= 0) {
       return -1;
     }
   }
@@ -745,6 +755,9 @@ int CAM_ContinuousSnap(uint8_t *dest_buf, uint32_t frame_size)
 
     /* Wait for NEXT frame after trigger so we never store a stale frame. */
     if (CAM_WaitFrames(1, 200, pdMS_TO_TICKS(2)) != 0) {
+#if PERF_DEBUG_LEVEL >= 1
+        printf("[CAM] ContinuousSnap timeout waiting next VSYNC\n");
+#endif
         return -1;
     }
 
@@ -835,6 +848,9 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 
     /* Ensure first copied frame is fresh after trigger. */
     if (CAM_WaitFrames(1, 200, pdMS_TO_TICKS(2)) != 0) {
+#if PERF_DEBUG_LEVEL >= 1
+        printf("[CAM] BatchSnap timeout waiting first fresh VSYNC\n");
+#endif
         return -1;
     }
 

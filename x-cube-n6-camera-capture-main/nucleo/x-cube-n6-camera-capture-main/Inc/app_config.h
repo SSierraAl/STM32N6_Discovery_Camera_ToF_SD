@@ -235,7 +235,8 @@
 #ifndef STANDALONE_MODE
 #define MAX_IMG_FRAME_SIZE (800 * 480 * 2)
 #else
-#define MAX_IMG_FRAME_SIZE (1)  /* keep non-zero for static placeholders */
+#define MIN_STANDALONE_LEGACY_BUF_SIZE (64)
+#define MAX_IMG_FRAME_SIZE MIN_STANDALONE_LEGACY_BUF_SIZE /* Avoid zero-sized legacy static buffers in standalone mode. */
 #endif
 
 /* ================================================================

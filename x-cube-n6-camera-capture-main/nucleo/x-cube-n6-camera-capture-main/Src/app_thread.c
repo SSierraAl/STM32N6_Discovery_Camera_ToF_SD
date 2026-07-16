@@ -499,14 +499,16 @@ void camera_task(void *arg)
             rc = CAM_ContinuousSnap(save_buf, frame_size);
             if (rc == 0) frame_to_save = save_buf;
 #elif CAPTURE_MODE == 2
-            int captured = CAM_ContinuousBatchSnap(batch_buf, frame_size);
-            rc = (captured > 0) ? 0 : -1;
+            int captured_frame_count = CAM_ContinuousBatchSnap(batch_buf, frame_size);
+            rc = (captured_frame_count > 0) ? 0 : -1;
             if (rc == 0) {
-                for (int i = 0; i < captured; i++) {
-                    const uint8_t *frame = batch_buf + ((uint32_t)i * frame_size);
-                    uint32_t snap_id = g_snap_count + (uint32_t)i;
+                uint32_t frame_offset = 0;
+                for (int frame_idx = 0; frame_idx < captured_frame_count; frame_idx++) {
+                    const uint8_t *frame = batch_buf + frame_offset;
+                    uint32_t snap_id = g_snap_count;
                     if (SD_StoreRawImage(frame, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0, snap_id) == 0) {
                         g_snap_count++;
+                        frame_offset += frame_size;
                     } else {
                         rc = -1;
                         break;
