@@ -1,10 +1,6 @@
 /**
  * @file    app_thread.c
  * @brief   Multi-threaded Camera + Sensor + Storage
- *
- *   SD STORE: Based on the PROVEN working implementation from main.c.
- *   Key: Must check BOTH card state AND HAL state. Must wait for card
- *   to be truly ready before each batch (not just rely on fixed delay).
  */
 
 #include <stdio.h>
@@ -24,6 +20,9 @@ extern uint8_t capture_buf[];
 #if CAPTURE_MODE == 1
 extern uint8_t save_buf[];
 #endif
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3
+extern uint8_t batch_buf[];
+#endif
 
 QueueHandle_t    camera_cmd_queue   = NULL;
 QueueHandle_t    storage_cmd_queue  = NULL;
@@ -33,6 +32,8 @@ SemaphoreHandle_t storage_done_sem  = NULL;
 volatile SensorState_t g_sensor_state = SENSOR_STATE_IDLE;
 
 static volatile int g_capture_busy = 0;
+static volatile int g_last_storage_rc = 0;
+static volatile int g_last_batch_frames = 0;
 static uint32_t g_snap_count = 0;
 static uint32_t g_sd_img_base_block;
 #define SD_IMG_HEADER_SIZE  64
@@ -48,8 +49,6 @@ typedef struct {
 
 extern SD_HandleTypeDef hsd1;
 extern uint8_t sd_batch_buf[];
-
-/* Shared performance timer */
 PerfTimer_t g_perf_timer;
 
 /* ==================== IPC ==================== */
@@ -63,7 +62,7 @@ BaseType_t IPC_Init(void)
     if (!sensor_event_queue) return pdFALSE;
     camera_ready_sem = xSemaphoreCreateBinary();
     if (!camera_ready_sem) return pdFALSE;
-    storage_done_sem = xSemaphoreCreateBinary();
+    storage_done_sem = xSemaphoreCreateCounting(STORAGE_CMD_QUEUE_LEN, 0);
     if (!storage_done_sem) return pdFALSE;
     xSemaphoreTake(camera_ready_sem, 0);
     xSemaphoreTake(storage_done_sem, 0);
@@ -90,40 +89,23 @@ BaseType_t Capture_RequestSnapOnly(void)
 }
 
 /* ==================== SD AUTO-RECOVERY ==================== */
-
-/** Reinitialize the SD card after a fatal error.
-    Preserves g_sd_img_base_block so existing photos are NOT overwritten.
-    Returns 0 on success, -1 on failure. */
 static int SD_Reinit(void)
 {
 #if PERF_DEBUG_LEVEL >= 1
     printf("[SD] === SD RECOVERY STARTED ===\n");
 #endif
-
-    /* Save current block offset BEFORE reinit (preserve existing photos!) */
     uint32_t saved_block = g_sd_img_base_block;
-
-    /* Pause sensor task to prevent new capture requests during recovery */
-    g_sensor_state = SENSOR_STATE_PAUSED;
-
-    /* Deinit current SD */
     HAL_SD_Abort(&hsd1);
     HAL_SD_DeInit(&hsd1);
     vTaskDelay(pdMS_TO_TICKS(100));
-
-    /* Full peripheral reset */
     __HAL_RCC_SDMMC2_FORCE_RESET();
     vTaskDelay(pdMS_TO_TICKS(10));
     __HAL_RCC_SDMMC2_RELEASE_RESET();
     vTaskDelay(pdMS_TO_TICKS(10));
-
-    /* Reconfigure clock */
     RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
     PeriphClkInit.PeriphClockSelection  = RCC_PERIPHCLK_SDMMC2;
     PeriphClkInit.Sdmmc2ClockSelection  = RCC_SDMMC2CLKSOURCE_HCLK;
     HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit);
-
-    /* Reinit SD */
     hsd1.Instance             = SDMMC2;
     hsd1.Init.ClockEdge       = SDMMC_CLOCK_EDGE_RISING;
     hsd1.Init.ClockPowerSave  = SDMMC_CLOCK_POWER_SAVE_DISABLE;
@@ -131,23 +113,13 @@ static int SD_Reinit(void)
     hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
     hsd1.Init.ClockDiv        = 2;
     hsd1.State                = HAL_SD_STATE_RESET;
-
     HAL_SD_MspInit(&hsd1);
     HAL_StatusTypeDef status = HAL_SD_Init(&hsd1);
-
     if (status == HAL_OK) {
         status = HAL_SD_ConfigWideBusOperation(&hsd1, SDMMC_BUS_WIDE_4B);
-        if (status == HAL_OK) {
-            hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
-        }
+        if (status == HAL_OK) { hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B; }
     }
-
-    /* Restore saved block offset — CRITICAL: don't overwrite existing photos! */
     g_sd_img_base_block = saved_block;
-
-    /* Resume sensor task */
-    g_sensor_state = SENSOR_STATE_RUNNING;
-
     if (status == HAL_OK) {
 #if PERF_DEBUG_LEVEL >= 1
         printf("[SD] Recovery OK! Next write from block %lu\n", (unsigned long)g_sd_img_base_block);
@@ -161,23 +133,14 @@ static int SD_Reinit(void)
     }
 }
 
-/* ==================== SD STORE (PROVEN from main.c) ==================== */
-
-/** Wait for SD card ready.
-    This is the PROVEN approach from main.c that works reliably. */
+/* ==================== SD STORE ==================== */
 static int SD_WaitForReady(void)
 {
     uint32_t wait_ms = 0;
-    uint32_t last_print = 0;
-
-    /* CRITICAL: Must check BOTH conditions. HAL_SD_GetCardState() checks
-       the card hardware state, while hsd1.State tracks the HAL driver
-       state machine. Both must be ready. */
     while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 2000) {
         vTaskDelay(pdMS_TO_TICKS(1));
         wait_ms++;
     }
-
     if (wait_ms >= 2000) {
 #if PERF_DEBUG_LEVEL >= 1
         printf("[SD] timeout before next batch\n");
@@ -187,17 +150,13 @@ static int SD_WaitForReady(void)
     return 0;
 }
 
-/** Store raw image to SD card.
-    This implementation is based on the PROVEN working code from main.c.
-    Changes: Added timing markers and progress prints only. */
-static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
-                            uint32_t w, uint32_t h, uint32_t pixel_format,
-                            uint32_t snap_id)
+static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t w, uint32_t h, uint32_t pixel_format, uint32_t snap_id)
 {
-    uint32_t         base = g_sd_img_base_block;
-    uint32_t         batch_blocks = SD_BATCH_WRITE_BLOCKS;
-    uint32_t         batch_size = batch_blocks * SD_BLOCK_SIZE;
-    uint32_t         i, checksum = 0;
+    uint32_t base = g_sd_img_base_block;
+    uint32_t batch_blocks = SD_BATCH_WRITE_BLOCKS;
+    uint32_t batch_size = batch_blocks * SD_BLOCK_SIZE;
+    uint32_t local_batch_count = 0;
+    uint32_t i, checksum = 0;
 
     if (hsd1.SdCard.BlockNbr > 0) {
         uint32_t total_blocks = (SD_IMG_HEADER_SIZE + img_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
@@ -219,21 +178,11 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
 
 #if PERF_DEBUG_LEVEL >= 1
     printf("[SD] #%" PRIu32 " %lux%lu %lu bytes (%.3f MB)\n",
-           snap_id, (unsigned long)w, (unsigned long)h, img_size,
-           img_size / 1048576.0f);
+           snap_id, (unsigned long)w, (unsigned long)h, img_size, img_size / 1048576.0f);
 #endif
-
-    /* ---- PERF: Reset SD batch counters ---- */
-    g_perf_timer.sd_total_wait_ms = 0;
-    g_perf_timer.sd_total_write_ms = 0;
-    g_perf_timer.sd_total_gap_ms = 0;
-    g_perf_timer.sd_batch_count = 0;
-    g_perf_timer.sd_max_batch_ms = 0;
-    g_perf_timer.sd_max_wait_ms = 0;
 
     PERF_MARK(g_perf_timer, STORAGE);
 
-    /* ---- Wait for card + HAL ready BEFORE first write ---- */
     uint32_t t_wait = HAL_GetTick();
     if (SD_WaitForReady() != 0) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -243,7 +192,6 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
     }
     uint32_t wait_ms = HAL_GetTick() - t_wait;
 
-    /* ---- Step 1: Write header + first chunk ---- */
     memset(sd_batch_buf, 0, batch_size);
     memcpy(sd_batch_buf, &hdr, SD_IMG_HEADER_SIZE);
     uint32_t first_chunk = SD_BLOCK_SIZE - SD_IMG_HEADER_SIZE;
@@ -279,16 +227,14 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
     }
 
     Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, 0);
+    local_batch_count++;
     uint32_t current_block = base + batch_blk;
 
-    /* ---- Step 2: Write remaining image data in full batches ---- */
     while (img_offset < img_size) {
         uint32_t remaining_bytes = img_size - img_offset;
         uint32_t remaining_blocks_full = (remaining_bytes + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
-        uint32_t blocks_in_batch = (remaining_blocks_full < batch_blocks)
-                                    ? remaining_blocks_full : batch_blocks;
+        uint32_t blocks_in_batch = (remaining_blocks_full < batch_blocks) ? remaining_blocks_full : batch_blocks;
 
-        /* Fill the batch buffer */
         for (uint32_t b = 0; b < blocks_in_batch; b++) {
             uint32_t src = img_offset + b * SD_BLOCK_SIZE;
             uint32_t dst = b * SD_BLOCK_SIZE;
@@ -302,8 +248,6 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
         }
 
         SCB_CleanDCache_by_Addr((uint32_t *)sd_batch_buf, blocks_in_batch * SD_BLOCK_SIZE);
-
-        /* Wait for card ready (PROVEN: checks card state via HAL) */
         t0 = HAL_GetTick();
         if (SD_WaitForReady() != 0) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -312,15 +256,9 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
             return -1;
         }
         wait_ms = HAL_GetTick() - t0;
-
-        /* CRITICAL: SDXC cards need significant time between multi-block writes
-           for internal flash programming and wear leveling. With 128-block batches
-           (64KB each), 20ms is the minimum tested gap that is stable.
-           10ms causes DCRCFAIL at random batches (~65% through). */
         t0 = HAL_GetTick();
         vTaskDelay(pdMS_TO_TICKS(15));
         uint32_t gap_ms = HAL_GetTick() - t0;
-
         t0 = HAL_GetTick();
         st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
         write_ms = HAL_GetTick() - t0;
@@ -334,40 +272,31 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
         }
 
         Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, gap_ms);
-
-        /* Progress print (throttled) */
-        uint32_t batch_num = g_perf_timer.sd_batch_count;
+        local_batch_count++;
 #if PERF_DEBUG_LEVEL >= 2
-        if (batch_num % PERF_SD_BATCH_PRINT_EVERY == 0) {
+        if (PERF_SD_BATCH_PRINT_EVERY > 0 && (local_batch_count % PERF_SD_BATCH_PRINT_EVERY) == 0) {
             uint32_t done_bytes = img_offset + blocks_in_batch * SD_BLOCK_SIZE;
             float pct = (100.0f * done_bytes) / img_size;
             printf("[SD] #%lu wait=%lums write=%lums gap=%lums | %.1f%%\n",
-                   (unsigned long)batch_num,
-                   (unsigned long)wait_ms,
-                   (unsigned long)write_ms,
-                   (unsigned long)gap_ms, pct);
+               (unsigned long)local_batch_count, (unsigned long)wait_ms, (unsigned long)write_ms, (unsigned long)gap_ms, pct);
         }
 #elif PERF_DEBUG_LEVEL >= 1
-        if (batch_num % 64 == 0) {
+        if ((local_batch_count % 64) == 0) {
             uint32_t done_bytes = img_offset + blocks_in_batch * SD_BLOCK_SIZE;
             float pct = (100.0f * done_bytes) / img_size;
             printf("[SD] ... %.1f%%\n", pct);
         }
 #endif
-
         img_offset += blocks_in_batch * SD_BLOCK_SIZE;
         current_block += blocks_in_batch;
     }
 
     g_sd_img_base_block = current_block;
     PERF_MARK(g_perf_timer, DONE);
-
 #if PERF_DEBUG_LEVEL >= 1
     printf("[SD] OK blocks %lu..%lu (%lu batches)\n",
-           (unsigned long)base, (unsigned long)(current_block - 1),
-           (unsigned long)g_perf_timer.sd_batch_count);
+           (unsigned long)base, (unsigned long)(current_block - 1), (unsigned long)local_batch_count);
 #endif
-
     return 0;
 }
 
@@ -384,9 +313,9 @@ void sensor_task(void *arg)
     }
 
 #if VL53L5CX_DET_RESOLUTION == 8
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 800, 15);
+    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 400, 30);
 #else
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 800, 15);
+    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 400, 30);
 #endif
     VL53L5CX_StartRanging();
     VL53L5CX_LearnBaseline();
@@ -397,7 +326,6 @@ void sensor_task(void *arg)
 
     g_sensor_state = SENSOR_STATE_RUNNING;
     printf("[SENSOR] Running\n");
-
     uint32_t capture_count = 0, cooldown = 0;
 
     while (1) {
@@ -418,13 +346,11 @@ void sensor_task(void *arg)
 #endif
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
 
-#if WS2812_MODE == 1  /* CAPTURE mode: illuminate DURING full capture + SD write */
-            /* Turn LEDs ON before capture, keep them ON until snapshot is saved to SD */
-            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR,
-                              WS2812_ILLUMINATION_BRIGHTNESS);
-#elif WS2812_MODE == 0  /* ALWAYS_ON */
+#if WS2812_MODE == 1
+            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
+#elif WS2812_MODE == 0
             WS2812_TurnOn();
-#else  /* INDICATOR only */
+#else
             WS2812_TurnOn();
             vTaskDelay(pdMS_TO_TICKS(WS2812_INDICATOR_MS));
             WS2812_TurnOff();
@@ -432,17 +358,8 @@ void sensor_task(void *arg)
 
             PerfTimer_t t;
             PERF_START(t);
-
             int rc = Capture_RequestSnapshot(60000);
-
             PERF_STOP(t);
-
-            /* Turn off illumination AFTER capture + SD write is complete */
-#if WS2812_MODE == 1
-            WS2812_FlashStop();
-#elif WS2812_MODE == 0
-            WS2812_TurnOff();
-#endif
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
             g_sensor_state = SENSOR_STATE_RUNNING;
             g_capture_busy = 0;
@@ -451,11 +368,10 @@ void sensor_task(void *arg)
             if (rc == 0) {
                 capture_count++;
 #if PERF_PRINT_SUMMARY
-                PERF_PRINT(t, capture_count);
-                PERF_STATS(t);
+                Perf_PrintSummary(&g_perf_timer, capture_count);
+                Perf_UpdateStats(&g_perf_timer);
 #else
-                printf("Snapshot #%lu SAVED (%lu ms)\n",
-                       (unsigned long)capture_count, (unsigned long)Perf_TotalElapsed(&t));
+                printf("Snapshot #%lu SAVED (%lu ms)\n", (unsigned long)capture_count, (unsigned long)Perf_TotalElapsed(&t));
 #endif
             } else {
 #if PERF_DEBUG_LEVEL >= 1
@@ -477,6 +393,7 @@ void camera_task(void *arg)
 #if CAPTURE_MODE == 1
     CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
 #endif
+
     uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
 
     while (1) {
@@ -487,28 +404,26 @@ void camera_task(void *arg)
         if (xQueueReceive(camera_cmd_queue, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) continue;
 
         if (cmd.type == CAM_CMD_SNAP) {
-            PERF_MARK(g_perf_timer, START);
+            Perf_Start(&g_perf_timer);
+            g_perf_timer.sd_total_wait_ms = 0;
+            g_perf_timer.sd_total_write_ms = 0;
+            g_perf_timer.sd_total_gap_ms = 0;
+            g_perf_timer.sd_batch_count = 0;
+            g_perf_timer.sd_max_batch_ms = 0;
+            g_perf_timer.sd_max_wait_ms = 0;
             int rc = -1;
-            const uint8_t *frame_to_save = NULL;
+            g_last_batch_frames = 0;
 
 #if CAPTURE_MODE == 1
             extern uint8_t save_buf[];
             rc = CAM_ContinuousSnap(save_buf, frame_size);
-            if (rc == 0) frame_to_save = save_buf;
-#else
-            rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                        SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS, SNAP_WARMUP_FRAMES);
-            if (rc == 0) frame_to_save = capture_buf;
-#endif
-
             if (rc == 0) {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[CAM] OK %lu ms\n",
-                       (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
+                printf("[CAM] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
 #endif
                 xSemaphoreGive(camera_ready_sem);
                 StorageCmd_t sc = {0};
-                sc.type = STORAGE_CMD_SAVE; sc.image_buf = frame_to_save;
+                sc.type = STORAGE_CMD_SAVE; sc.image_buf = save_buf;
                 sc.image_size = frame_size; sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
                 sc.pixel_format = 0; sc.snap_id = g_snap_count;
                 xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000));
@@ -518,6 +433,57 @@ void camera_task(void *arg)
 #endif
                 xSemaphoreGive(camera_ready_sem);
             }
+#elif CAPTURE_MODE == 2 || CAPTURE_MODE == 3
+            extern uint8_t batch_buf[];
+#if CAPTURE_MODE == 2
+            rc = CAM_ContinuousBatchSnap(batch_buf, frame_size);
+#else
+            rc = CAM_StandbyBatchSnap(batch_buf, frame_size);
+#endif
+            if (rc > 0) {
+                g_last_batch_frames = rc;
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[CAM] Batch: %d frames captured\n", rc);
+#endif
+                xSemaphoreGive(camera_ready_sem);
+                for (int f = 0; f < rc; f++) {
+                    StorageCmd_t sc = {0};
+                    sc.type = STORAGE_CMD_SAVE;
+                    sc.image_buf = batch_buf + (f * frame_size);
+                    sc.image_size = frame_size;
+                    sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
+                    sc.pixel_format = 0; sc.snap_id = g_snap_count + (uint32_t)f;
+                    if (xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000)) != pdTRUE) {
+#if PERF_DEBUG_LEVEL >= 1
+                        printf("[CAM] Storage queue full, dropping frame %d\n", f);
+#endif
+                    }
+                }
+            } else {
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[CAM] Batch FAIL\n");
+#endif
+                xSemaphoreGive(camera_ready_sem);
+            }
+#else
+            rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS, SNAP_WARMUP_FRAMES);
+            if (rc == 0) {
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[CAM] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
+#endif
+                xSemaphoreGive(camera_ready_sem);
+                StorageCmd_t sc = {0};
+                sc.type = STORAGE_CMD_SAVE; sc.image_buf = capture_buf;
+                sc.image_size = frame_size; sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
+                sc.pixel_format = 0; sc.snap_id = g_snap_count;
+                xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000));
+            } else {
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[CAM] FAIL\n");
+#endif
+                xSemaphoreGive(camera_ready_sem);
+            }
+#endif
         }
     }
 }
@@ -534,21 +500,18 @@ void storage_task(void *arg)
         if (xQueueReceive(storage_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) continue;
         if (cmd.type == STORAGE_CMD_SAVE) {
             PERF_MARK(g_perf_timer, STORAGE);
-            int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size,
-                                      cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
+            int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
+            g_last_storage_rc = rc;
             PERF_MARK(g_perf_timer, DONE);
             if (rc == 0) {
                 g_snap_count++;
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[SD] OK %lu ms\n",
-                       (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
+                printf("[SD] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
 #endif
             } else {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[SD] FAIL %lu ms — attempting recovery...\n",
-                       (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
+                printf("[SD] FAIL %lu ms — attempting recovery...\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
 #endif
-                /* Auto-recover: reinit SD card, preserve existing photos */
                 int rec = SD_Reinit();
                 if (rec == 0) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -566,17 +529,40 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
 {
     uint32_t t_start = HAL_GetTick();
     CameraCmd_t cmd = {0}; cmd.type = CAM_CMD_SNAP;
+    g_last_storage_rc = 0;
+    while (xSemaphoreTake(storage_done_sem, 0) == pdTRUE) {
+        /* Drain stale completion tokens from previous capture cycles. */
+    }
     if (xQueueSend(camera_cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) return -2;
 
     TickType_t ticks = (timeout_ms > 0) ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY;
     if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) return -1;
 
+#if WS2812_MODE == 1
+    WS2812_FlashStop();
+#elif WS2812_MODE == 0
+    WS2812_TurnOff();
+#endif
+
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3
+    /* Wait for ALL BATCH_FRAMES to be stored before returning */
+    int frames_to_wait = g_last_batch_frames > 0 ? g_last_batch_frames : BATCH_FRAMES;
+    for (int i = 0; i < frames_to_wait; i++) {
+        if (timeout_ms > 0) {
+            uint32_t elapsed = HAL_GetTick() - t_start;
+            if (elapsed >= timeout_ms) return -1;
+            ticks = pdMS_TO_TICKS(timeout_ms - elapsed);
+        } else { ticks = portMAX_DELAY; }
+        if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE) return -1;
+    }
+#else
     if (timeout_ms > 0) {
         uint32_t elapsed = HAL_GetTick() - t_start;
         if (elapsed >= timeout_ms) return -1;
         ticks = pdMS_TO_TICKS(timeout_ms - elapsed);
     } else { ticks = portMAX_DELAY; }
-
     if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE) return -1;
+#endif
+    if (g_last_storage_rc != 0) return -1;
     return 0;
 }

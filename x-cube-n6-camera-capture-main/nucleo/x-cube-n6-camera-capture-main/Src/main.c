@@ -195,15 +195,15 @@ static uint8_t save_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
 /** Batch buffer for batch capture mode — allocated in PSRAM.
-    In BATCH mode (CAPTURE_MODE=2), the camera writes continuously to
-    capture_buf. On ToF trigger, we grab BATCH_FRAMES into batch_buf
+    Used in BATCH mode (CAPTURE_MODE=2) and STANDBY-BATCH mode (CAPTURE_MODE=3).
+    On ToF trigger, we grab BATCH_FRAMES into batch_buf
     (each slot = SNAP_FRAME_SIZE), then send them to storage_task
     sequentially for SD writing.
     
     Size = BATCH_FRAMES × SNAP_FRAME_SIZE
     For 1296x972@YUV422 (2.5MB/frame), BATCH_FRAMES=3 → 7.5MB total.
     NOTE: Not static — referenced via extern by app_thread.c (camera_task). */
-#if CAPTURE_MODE == 2
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3
 uint8_t batch_buf[BATCH_BUF_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
@@ -1097,6 +1097,24 @@ static void main_thread_fct(void *arg)
         printf("[FATAL] IPC_Init failed! Cannot start threaded tasks.\n");
         while (1);
     }
+
+    /* ---- Camera Standby Init (CAPTURE_MODE=3) ----
+       CRITICAL: Must be done BEFORE system_ready=1 to avoid I2C1 conflict.
+       The IMX335 camera and VL53L5CX ToF sensor share I2C1. If camera_task
+       tries to init camera after system_ready=1, it races with sensor_task
+       which is already using I2C1 for ToF → CMW_CAMERA_Init fails (ret=-7).
+       
+       Solution: Init camera HERE in main_thread (single-threaded, no ToF yet),
+       then put camera in standby mode. When ToF triggers later, camera just
+       wakes from standby (no I2C needed until wakeup). */
+#if CAPTURE_MODE == 3
+    printf("[INIT] Camera standby init (before tasks start to avoid I2C conflict)...\n");
+    if (CAM_StandbyInit(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS) != 0) {
+        printf("[WARN] Camera standby init FAILED! Captures may fail.\n");
+    } else {
+        printf("[INIT] Camera in STANDBY mode, ready for fast wakeup.\n");
+    }
+#endif
 
     /* ---- System Ready ---- */
     printf("\n===========================================\n");

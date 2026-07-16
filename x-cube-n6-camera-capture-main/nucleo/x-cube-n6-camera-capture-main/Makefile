@@ -64,7 +64,6 @@ C_SOURCES += Src/perf_debug.c
 C_SOURCES += Src/freertos_bsp.c
 C_SOURCES += Src/app_filex.c
 C_SOURCES += Src/app_sdcard.c
-C
 
 # ASM sources
 ASM_SOURCES =

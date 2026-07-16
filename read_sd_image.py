@@ -25,7 +25,7 @@ HDR_FIELDS = ['magic', 'width', 'height', 'pixel_format', 'data_size', 'timestam
 
 # FIXED block per snapshot: ceil((64 + 2592*1944*2) / 512) = 19661
 # This matches the C code calculation exactly
-SNAP_W, SNAP_H = 1296, 972 #640, 480  #1296, 972 #2592, 1944
+SNAP_W, SNAP_H = 1296, 972  #640, 480  #1296, 972 #2592, 1944
 SNAP_FRAME_SIZE = SNAP_W * SNAP_H * 2
 SNAP_BLOCKS = (HEADER_SIZE + SNAP_FRAME_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE  # 19661
 
@@ -34,26 +34,69 @@ SNAP_BASE_NEW = 3072
 SNAP_BASE_OLD = 1000
 
 _gf = None
+_gfd = None
+_gpath = None
+
+
+def _open_source(path):
+    global _gf, _gfd, _gpath
+    if _gpath == path:
+        return
+    close_drive()
+
+    _gpath = path
+    if path.startswith('\\\\.\\PhysicalDrive'):
+        flags = os.O_RDONLY
+        if hasattr(os, 'O_BINARY'):
+            flags |= os.O_BINARY
+        _gfd = os.open(path, flags)
+    else:
+        _gf = open(path, 'rb')
 
 
 def rblk(path, blk):
-    global _gf
-    if _gf is None or _gf.name != path:
-        if _gf: _gf.close()
-        _gf = open(path, 'rb')
-    _gf.seek(blk * BLOCK_SIZE)
+    global _gf, _gfd
+    _open_source(path)
+    offset = int(blk) * BLOCK_SIZE
+
+    if _gfd is not None:
+        if hasattr(os, 'pread'):
+            data = os.pread(_gfd, BLOCK_SIZE, offset)
+        else:
+            os.lseek(_gfd, offset, os.SEEK_SET)
+            data = os.read(_gfd, BLOCK_SIZE)
+        return data
+
+    _gf.seek(offset, os.SEEK_SET)
     return _gf.read(BLOCK_SIZE)
 
 
 def close_drive():
-    global _gf
+    global _gf, _gfd, _gpath
     if _gf:
         _gf.close()
         _gf = None
+    if _gfd is not None:
+        os.close(_gfd)
+        _gfd = None
+    _gpath = None
 
 
 def parse_hdr(b):
-    return dict(zip(HDR_FIELDS, struct.unpack(HDR_FMT, b)))
+    # Firmware header writes 8 u32 fields first; the remaining bytes are reserved.
+    if len(b) < HEADER_SIZE:
+        raise ValueError("Header too short")
+    head = struct.unpack('<8I', b[:32])
+    return {
+        'magic': head[0],
+        'width': head[1],
+        'height': head[2],
+        'pixel_format': head[3],
+        'data_size': head[4],
+        'timestamp': head[5],
+        'checksum': head[6],
+        'snap_id': head[7],
+    }
 
 
 def get_drives():
@@ -254,6 +297,13 @@ class SDVisualizer(ctk.CTk):
                         # Always advance by FIXED SNAP_BLOCKS (matches C code)
                         probe += SNAP_BLOCKS
 
+                    except OSError as e:
+                        if getattr(e, 'errno', None) == 22:
+                            print(f"[SCAN {label}] Invalid argument at block {probe}. "
+                                  f"Run as Administrator and ensure no other app is locking {self.drive}.")
+                        else:
+                            print(f"[SCAN {label}] OSError at block {probe}: {e}")
+                        break
                     except Exception as e:
                         print(f"[SCAN {label}] Exception at block {probe}: {e}")
                         break
@@ -286,7 +336,8 @@ class SDVisualizer(ctk.CTk):
         for s in self.snapshots:
             fmt = FMT_NAME.get(s.header['pixel_format'], "?")
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(s.header.get('timestamp', 0)))
-            self.listbox.insert(tk.END, f"#{s.idx+1:03d}   {s.header['width']}×{s.header['height']}   {fmt}   {ts}")
+            sid = s.header.get('snap_id', s.idx)
+            self.listbox.insert(tk.END, f"#{s.idx+1:03d} (id:{sid})   {s.header['width']}×{s.header['height']}   {fmt}   {ts}")
 
     def on_select(self, event=None):
         sel = self.listbox.curselection()
@@ -303,11 +354,30 @@ class SDVisualizer(ctk.CTk):
         w, hh = h['width'], h['height']
         data_size = h['data_size']
 
+        if w <= 0 or hh <= 0:
+            print(f"[LOAD] Invalid dimensions: {w}x{hh}")
+            return None
+
+        expected_size = w * hh * 2 if h.get('pixel_format', 0) == 0 else w * hh
+        # Prefer the expected pixel payload size; reject unreasonable header values.
+        if data_size <= 0 or data_size > expected_size * 2:
+            print(f"[LOAD] Suspicious data_size={data_size}, expected={expected_size}. Using expected size.")
+            data_size = expected_size
+        elif abs(data_size - expected_size) > (BLOCK_SIZE * 4):
+            print(f"[LOAD] data_size mismatch ({data_size} vs {expected_size}). Using expected size.")
+            data_size = expected_size
+
         # Calculate total blocks for this image
         nb = (HEADER_SIZE + data_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+        if nb <= 0 or nb > 16384:
+            print(f"[LOAD] Invalid block count: {nb}")
+            return None
 
         # Read first block: header at offset 0, image data at offset HEADER_SIZE
         hd = rblk(self.drive, snap.block)
+        if len(hd) < BLOCK_SIZE:
+            print(f"[LOAD] Short read on header block {snap.block}: {len(hd)} bytes")
+            return None
         img_bytes = bytearray(hd[HEADER_SIZE:BLOCK_SIZE])
 
         # Read remaining blocks
@@ -316,10 +386,16 @@ class SDVisualizer(ctk.CTk):
             if remaining <= 0:
                 break
             chunk = rblk(self.drive, snap.block + i)
+            if not chunk:
+                print(f"[LOAD] Empty read at block {snap.block + i}")
+                break
             img_bytes.extend(chunk[:remaining])
 
         # Trim to exact data_size
         img_data = bytes(img_bytes[:data_size])
+        if len(img_data) < expected_size:
+            print(f"[LOAD] Incomplete image payload: got {len(img_data)}, expected {expected_size}")
+            return None
 
         # Convert to PIL Image
         try:

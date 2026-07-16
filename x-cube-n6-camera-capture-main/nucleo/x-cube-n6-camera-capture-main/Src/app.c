@@ -747,6 +747,9 @@ int CMW_CAMERA_PIPE_FrameEventCallback(uint32_t pipe)
 {
   if (pipe == DCMIPP_PIPE1)
   {
+    /* Notify standalone capture logic that one full frame is complete. */
+    CAM_NotifyFrameEvent();
+
     /* Guard: capture_sem may be NULL when camera is used standalone
        (without app_run / UVC streaming). Only signal if valid. */
     if (capture_sem != NULL)
@@ -756,6 +759,7 @@ int CMW_CAMERA_PIPE_FrameEventCallback(uint32_t pipe)
 }
 
 /* External frame counter from app_cam.c (standalone warmup) */
+extern void CAM_NotifyFrameEvent(void);
 extern void CAM_CountVsyncFrame(void);
 
 int CMW_CAMERA_PIPE_VsyncEventCallback(uint32_t pipe)

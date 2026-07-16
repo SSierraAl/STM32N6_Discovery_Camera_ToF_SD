@@ -23,10 +23,33 @@
    Change these to adjust snapshot behavior.
    ================================================================ */
 
+#ifndef CAPTURE_MODE
+#define CAPTURE_MODE            3
+#endif
+
+/** Capture mode for ToF-triggered photography.
+    0 = ON-DEMAND  — Legacy button/manual single-frame mode.
+    1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
+                    Very fast (~5-10ms latency). Good for fast-moving objects.
+                    NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
+    2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
+                    then writes to SD sequentially. FASTEST capture, max data collection.
+                    NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
+    3 = STANDBY-BATCH — Camera init+warmup ONCE at boot, then enters IMX335 standby (register 0x3000=0x01).
+                    On ToF trigger: wake from standby (~20ms) → restart pipe → grab 3 frames rapidly →
+                    back to standby. Best of both worlds: fast wake + batch capture + no I2C conflict
+                    during idle (ToF can use I2C1 while camera is in standby).
+    Snapshot mode is the same as ON-DEMAND (CAPTURE_MODE = 0). */
+
+
 /** Camera binning mode — simple toggle to switch resolutions.
-    0 = FULL RESOLUTION (2592x1944, 5MPX) — Default, best for species ID
+    0 = FULL RESOLUTION (2592x1944, 5MPX) — Use this for snapshot mode
     1 = 2x2 BINNING (1296x972, 1.3MPX) — Faster readout, less rolling shutter */
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3
 #define CAM_BINNING          1
+#else
+#define CAM_BINNING          0
+#endif
 
 /** Snapshot resolution (auto-calculated from CAM_BINNING).
     YUV422 format = 2 bytes per pixel */
@@ -51,7 +74,7 @@
      REDUCED FROM 11 → 8: Saves ~133ms per capture (33ms saved per frame).
      CRITICAL: Each warmup frame = ~33ms of delay where the insect can move!
      If images have green tint on first few captures, increase this value. */
-#define SNAP_WARMUP_FRAMES   11
+#define SNAP_WARMUP_FRAMES    8
 
 /** Maximum time to wait for warmup + capture frames (milliseconds). */
 #define SNAP_TIMEOUT_MS      200
@@ -69,42 +92,64 @@
 #define CAM_EXPOSURE_MODE    1
 
 /** Exposure time in MICROSECONDS (only used in MANUAL mode).
-     The IMX335 sensor expects exposure in µs.
-     Valid range: ~1000-33000 µs (depends on FPS setting).
-     
-     NOTE: At 30 FPS, one frame period = 33,333 µs. Exposure cannot exceed this.
-     For OUTDOOR (bright light): 2000-5000 µs works well.
-     
-     IMPORTANT: Check console output for "[CAM] Readback: exposure=XXX"
-     If readback differs from configured value, sensor driver is clamping.
-     Values below ~1000 µs are often clamped to minimum by IMX335 driver.
-     
-     CRITICAL BUG FIX: The ISP library overwrites exposure during startup.
-     app_cam.c now re-applies exposure AFTER CAM_CapturePipe_Start().
-     Check console for "[CAM] Post-start exposure=XXX" to verify.
-     
-     For FAST SHUTTER (freeze insects in flight): use minimum exposure 8-50 µs
-     with HIGH GAIN (2000-4000) and BRIGHT LEDS (100%). */
-#define CAM_EXPOSURE_VALUE   50
+      The IMX335 sensor expects exposure in µs.
+      Valid range: 8-33266 µs (IMX335_EXPOSURE_MIN to IMX335_EXPOSURE_MAX).
+
+      NOTE: At 30 FPS, one frame period = 33,333 µs. Exposure cannot exceed this.
+      At 8 µs: Shutter = VMAX - 1 line = FASTEST POSSIBLE (freezes vibration blur).
+
+      IMPORTANT: Check console output for "[CAM] Readback: exposure=XXX"
+      If readback differs from configured value, sensor driver is clamping.
+
+      CRITICAL BUG FIX: The ISP library overwrites exposure during startup.
+      app_cam.c now re-applies exposure AFTER CAM_CapturePipe_Start().
+      Check console for "[CAM] Post-start exposure=XXX" to verify.
+
+      For FAST SHUTTER (freeze vibrating objects): use minimum exposure 8 µs
+      with moderate GAIN (2000-4000). Good lighting required.
+
+      TUNING NOTE (2026-07-16): confirmed via readback that 8 µs was genuinely
+      applied, yet images were still soft/blurry. At 8 µs the sensor collects
+      ~25x less light than at 200 µs, and 200 µs is still >150x faster than a
+      typical 1/1000s "frozen motion" shutter speed - more than fast enough
+      for an insect, which moves a negligible sub-pixel distance in 200 µs.
+      Going shorter than necessary only starves the sensor of light, forcing
+      more analog gain and more visible noise, which looks like blur/softness.
+      Raised to 200 µs paired with brighter illumination (see WS2812_ILLUMINATION_BRIGHTNESS)
+      and reduced gain below, for a much better signal-to-noise ratio while still
+      easily freezing motion. Tune down toward 8 if you confirm actual motion blur
+      (not noise) at 200 µs; tune up if still too dark. */
+#define CAM_EXPOSURE_VALUE   200
 
 /** Analog gain (only used in MANUAL mode).
-     Range: 0-2047. Higher = brighter image but more noise/grain.
-     For OUTDOOR (bright light): Lower gain is better (less noise).
-     Good starting points:
-       - Outdoor bright:    200-400 (clean image, short exposure)
-       - Outdoor shade:     600-1000
-       - Indoor bright:     1000-1500
-     
-     With very short exposure (8µs), you NEED higher gain + bright LEDs.
-     Recommended for 8µs exposure: 2000-4000
-     Recommended for 1000µs exposure: 200-600 */
-#define CAM_GAIN_VALUE       3000
+      Range: 0-72000 (IMX335_GAIN_MIN to IMX335_GAIN_MAX).
+      Gain is internally represented as value * 1000 (e.g., 2000 = 2.0x gain).
+      Higher = brighter image but more noise/grain.
+
+      With 8µs exposure (fastest shutter), the sensor collects very little light,
+      so gain MUST be high enough to produce a usable image.
+      Good starting points:
+        - 8µs exposure + bright light:    2000-4000 (2x-4x gain)
+        - 8µs exposure + medium light:    4000-8000 (4x-8x gain)
+        - 1000µs exposure:                200-600
+
+      TUNING NOTE (2026-07-16): lowered alongside the CAM_EXPOSURE_VALUE and
+      WS2812_ILLUMINATION_BRIGHTNESS increase - with ~25x more exposure time
+      and ~8x more LED brightness, far less analog gain is needed to reach the
+      same brightness, and less gain means less sensor noise (sharper-looking
+      images). Raise back toward 4000 if images come out too dark. */
+#define CAM_GAIN_VALUE       1500
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
     0 = default. Positive = brighter, negative = darker.
     Default: 0 */
 #define CAM_BRIGHTNESS       0
+
+/** Contrast adjustment.
+    0 = default. Use small positive values only if the image looks flat.
+    Default: 0 */
+#define CAM_CONTRAST         0
 
 /** Anti-flicker mode (for AC-powered lighting).
     0 = disabled, 1 = 50Hz (EU), 2 = 60Hz (US/Japan), 3 = auto
@@ -149,7 +194,7 @@
     SD card needs time between batches for internal flash programming.
     Use smaller batches + longer waits = more reliable.
 
-    Reduced from 128 to 64: More batches but more reliable. */
+    Reduced to 32 for more SD stability during large full-res frames. */
 #define SD_BATCH_WRITE_BLOCKS 64
 
 /** Maximum snapshots that can be stored before SD card overflow.
@@ -162,19 +207,17 @@
    SECTION 4: CAPTURE MODE SELECTION
    ================================================================ */
 
-/** Capture mode for ToF-triggered photography.
-     0 = ON-DEMAND  — Camera off until trigger. Full init → warmup → capture → deinit cycle.
-                         Safe but slow (~400ms latency). Good for stationary/slow objects.
-                         NOTE: This is the ONLY mode that works reliably because the CMW
-                         camera library needs exclusive I2C1 access, which conflicts with
-                         the VL53L5CX ToF sensor sharing I2C1.
-     1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
-                         Very fast (~5-10ms latency). Good for fast-moving objects.
-                         NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
-     2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
-                         then writes to SD sequentially. FASTEST capture, max data collection.
-                         NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7). */
-#define CAPTURE_MODE            2
+
+
+/* ================================================================
+   SECTION 5C: STANDBY-BATCH PARAMETERS (CAPTURE_MODE = 3)
+   ================================================================ */
+
+/** Standby mode wakes in ~20ms (IMX335_Start delay) + ~1 frame (33ms) warmup = ~53ms total.
+     This is MUCH faster than full init (~400ms) and avoids I2C conflicts with ToF.
+     After capture, camera returns to standby (streaming stops, I2C1 released). */
+#define STANDBY_WARMUP_FRAMES    11     /* Frames to discard after wake from standby */
+#define STANDBY_WAKE_TIMEOUT_MS 2000  /* Max wait for standby wake + warmup */
 
 /* ================================================================
     SECTION 5B: BATCH CAPTURE PARAMETERS (CAPTURE_MODE = 2)
@@ -207,7 +250,7 @@
 /** Debounce time for USER button press detection (milliseconds).
     Reduced from 50 to 20 for faster response. */
 #define BTN_DEBOUNCE_MS      20
-
+/* CAPTURE_MODE is defined above so CAM_BINNING sees it early. */
 /** Delay between button poll iterations (milliseconds).
     Reduced from 30 to 10 for faster detection. */
 #define BTN_POLL_DELAY_MS    10
@@ -245,7 +288,7 @@
 
 /** When PERF_DEBUG_LEVEL >= 2, print SD batch timing every N batches.
     Set to 1 for every batch (very verbose), 4 for every 4th batch. */
-#define PERF_SD_BATCH_PRINT_EVERY  1
+#define PERF_SD_BATCH_PRINT_EVERY  0
 
 /** Track cumulative waiting time for SD card ready states.
     When enabled, the final summary will show total time spent waiting
@@ -284,14 +327,22 @@
     During capture: LEDs run at this brightness.
     Higher = brighter image but more power consumption.
     At 100%: Maximum LED output
-    At 50%:  Half brightness (may need higher camera gain to compensate) */
-#define WS2812_ILLUMINATION_BRIGHTNESS  10
+    At 50%:  Half brightness (may need higher camera gain to compensate)
+
+    TUNING NOTE (2026-07-16): raised from 10% - at only 10% brightness combined
+    with an ultra-short exposure, the sensor was starved of light, forcing high
+    gain and visible noise that looked like blur. WS2812_MODE=1 only flashes the
+    LEDs for the duration of one capture burst (not continuously), so running
+    brighter here has negligible power/thermal impact. Brightness is applied as
+    RGB value scaling (not time-based PWM), so it stays perfectly in sync with
+    even very short camera exposures - safe to raise further if still too dark. */
+#define WS2812_ILLUMINATION_BRIGHTNESS  80
 
 /** Illumination color (0xRRGGBB format).
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
     Green (0x00FF00): Insects less sensitive, more natural behavior
     Red (0xFF0000): Least disruptive to insects but camera needs more gain */
-#define WS2812_ILLUMINATION_COLOR       0xFFFFFF
+#define WS2812_ILLUMINATION_COLOR       0xA0FF28
 
 /** Visual indicator flash (optional).
     After illumination stops, flash LEDs briefly to confirm detection.
