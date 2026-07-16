@@ -272,6 +272,20 @@ uint32_t CAM_GetFrameCount(void)
   return g_frame_count;
 }
 
+static int CAM_WaitFrames(int frame_count, uint32_t timeout_ms, TickType_t poll_ticks)
+{
+  uint32_t t0 = HAL_GetTick();
+  CAM_ResetFrameCounter(frame_count);
+  while (g_wait_frames != 0) {
+    CAM_IspUpdate();
+    vTaskDelay(poll_ticks);
+    if (HAL_GetTick() - t0 > timeout_ms) {
+      return -1;
+    }
+  }
+  return 0;
+}
+
 /**
  * @brief Capture a single frame WITHOUT UVC streaming.
  *
@@ -729,6 +743,11 @@ int CAM_ContinuousSnap(uint8_t *dest_buf, uint32_t frame_size)
 
     DCMIPP_HandleTypeDef *hhandle = CMW_CAMERA_GetDCMIPPHandle();
 
+    /* Wait for NEXT frame after trigger so we never store a stale frame. */
+    if (CAM_WaitFrames(1, 200, pdMS_TO_TICKS(2)) != 0) {
+        return -1;
+    }
+
     /* --- Step 1: STOP DCMIPP pipe to prevent torn frames --- */
     HAL_DCMIPP_PIPE_Stop(hhandle, DCMIPP_PIPE1);
 
@@ -814,6 +833,11 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
     printf("[CAM] BatchSnap: grabbing %d frames...\n", BATCH_FRAMES);
 #endif
 
+    /* Ensure first copied frame is fresh after trigger. */
+    if (CAM_WaitFrames(1, 200, pdMS_TO_TICKS(2)) != 0) {
+        return -1;
+    }
+
     for (uint8_t i = 0; i < BATCH_FRAMES; i++) {
         uint8_t *dest = batch_buf + (i * frame_size);
 
@@ -837,12 +861,8 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 
         /* --- Step 6: Wait for 1 new frame before next grab (except last) --- */
         if (i < BATCH_FRAMES - 1) {
-            CAM_ResetFrameCounter(1);  /* wait for exactly 1 frame */
-            uint32_t t_wait = HAL_GetTick();
-            while (g_wait_frames != 0) {
-                CAM_IspUpdate();
-                vTaskDelay(pdMS_TO_TICKS(2));
-                if (HAL_GetTick() - t_wait > 200) break;  /* safety timeout */
+            if (CAM_WaitFrames(1, 200, pdMS_TO_TICKS(2)) != 0) {
+                break;
             }
         }
     }

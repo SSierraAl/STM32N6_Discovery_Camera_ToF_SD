@@ -24,13 +24,18 @@
    ================================================================ */
 
 /** Camera binning mode — simple toggle to switch resolutions.
-    0 = FULL RESOLUTION (2592x1944, 5MPX) — Default, best for species ID
-    1 = 2x2 BINNING (1296x972, 1.3MPX) — Faster readout, less rolling shutter */
+    0 = FULL RESOLUTION (2592x1944, 5MPX)
+    1 = 2x2 BINNING (1296x972, 1.3MPX) */
 #define CAM_BINNING          1
 
 /** Snapshot resolution (auto-calculated from CAM_BINNING).
     YUV422 format = 2 bytes per pixel */
-#if CAM_BINNING == 1
+#if defined(STM32N6570_NUCLEO_REV)
+    /* NUCLEO linker places .psram_section in 1.5MB AXISRAM.
+       Keep snapshot buffer under this limit. */
+    #define SNAP_WIDTH       640
+    #define SNAP_HEIGHT      480
+#elif CAM_BINNING == 1
     #define SNAP_WIDTH       1296   /* 2x2 binned: 2592/2 */
     #define SNAP_HEIGHT      972    /* 2x2 binned: 1944/2 */
 #else
@@ -174,7 +179,11 @@
      2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
                          then writes to SD sequentially. FASTEST capture, max data collection.
                          NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7). */
+#if defined(STM32N6570_NUCLEO_REV)
+#define CAPTURE_MODE            0
+#else
 #define CAPTURE_MODE            2
+#endif
 
 /* ================================================================
     SECTION 5B: BATCH CAPTURE PARAMETERS (CAPTURE_MODE = 2)
@@ -226,7 +235,7 @@
 #ifndef STANDALONE_MODE
 #define MAX_IMG_FRAME_SIZE (800 * 480 * 2)
 #else
-#define MAX_IMG_FRAME_SIZE (0)  /* UVC buffers not allocated in standalone */
+#define MAX_IMG_FRAME_SIZE (1)  /* keep non-zero for static placeholders */
 #endif
 
 /* ================================================================

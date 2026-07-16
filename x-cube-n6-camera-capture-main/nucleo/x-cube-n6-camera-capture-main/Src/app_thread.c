@@ -24,6 +24,9 @@ extern uint8_t capture_buf[];
 #if CAPTURE_MODE == 1
 extern uint8_t save_buf[];
 #endif
+#if CAPTURE_MODE == 2
+extern uint8_t batch_buf[];
+#endif
 
 QueueHandle_t    camera_cmd_queue   = NULL;
 QueueHandle_t    storage_cmd_queue  = NULL;
@@ -474,7 +477,7 @@ void camera_task(void *arg)
     extern volatile int system_ready;
     while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 
-#if CAPTURE_MODE == 1
+#if CAPTURE_MODE == 1 || CAPTURE_MODE == 2
     CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
 #endif
     uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
@@ -495,6 +498,21 @@ void camera_task(void *arg)
             extern uint8_t save_buf[];
             rc = CAM_ContinuousSnap(save_buf, frame_size);
             if (rc == 0) frame_to_save = save_buf;
+#elif CAPTURE_MODE == 2
+            int captured = CAM_ContinuousBatchSnap(batch_buf, frame_size);
+            rc = (captured > 0) ? 0 : -1;
+            if (rc == 0) {
+                for (int i = 0; i < captured; i++) {
+                    const uint8_t *frame = batch_buf + ((uint32_t)i * frame_size);
+                    uint32_t snap_id = g_snap_count + (uint32_t)i;
+                    if (SD_StoreRawImage(frame, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0, snap_id) == 0) {
+                        g_snap_count++;
+                    } else {
+                        rc = -1;
+                        break;
+                    }
+                }
+            }
 #else
             rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
                                         SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS, SNAP_WARMUP_FRAMES);
@@ -507,16 +525,23 @@ void camera_task(void *arg)
                        (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
 #endif
                 xSemaphoreGive(camera_ready_sem);
+#if CAPTURE_MODE == 2
+                xSemaphoreGive(storage_done_sem);
+#else
                 StorageCmd_t sc = {0};
                 sc.type = STORAGE_CMD_SAVE; sc.image_buf = frame_to_save;
                 sc.image_size = frame_size; sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
                 sc.pixel_format = 0; sc.snap_id = g_snap_count;
                 xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000));
+#endif
             } else {
 #if PERF_DEBUG_LEVEL >= 1
                 printf("[CAM] FAIL\n");
 #endif
                 xSemaphoreGive(camera_ready_sem);
+#if CAPTURE_MODE == 2
+                xSemaphoreGive(storage_done_sem);
+#endif
             }
         }
     }

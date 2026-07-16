@@ -64,7 +64,6 @@ C_SOURCES += Src/perf_debug.c
 C_SOURCES += Src/freertos_bsp.c
 C_SOURCES += Src/app_filex.c
 C_SOURCES += Src/app_sdcard.c
-C
 
 # ASM sources
 ASM_SOURCES =
@@ -123,6 +122,7 @@ endif
 
 ifeq ($(call is_nucleo),1)
 C_DEFS += -DSTM32N6570_NUCLEO_REV
+C_DEFS += -DSTANDALONE_MODE
 else
 C_DEFS += -DSTM32N6570_DK_REV
 endif
