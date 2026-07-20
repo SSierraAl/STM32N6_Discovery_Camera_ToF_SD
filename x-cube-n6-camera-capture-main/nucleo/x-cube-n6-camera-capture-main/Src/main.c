@@ -185,25 +185,30 @@ uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
     NOTE: Not static — referenced by app_thread.c (storage_task). */
 uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
 
-/** Save buffer for continuous mode — allocated in PSRAM.
+/** Save buffer — allocated in PSRAM.
     In CONTINUOUS mode (CAPTURE_MODE=1), the camera writes continuously
     to capture_buf. On ToF trigger, we stop the pipe, copy the frame
     to save_buf, restart the pipe, then write save_buf to SD card.
-    This prevents buffer corruption during the SD write. */
-#if CAPTURE_MODE == 1
-static uint8_t save_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
+    In CALLBACK-BATCH mode (CAPTURE_MODE=4), save_buf is used as the
+    second ping-pong buffer for hardware double-buffering (DCMIPP
+    alternates DMA between capture_buf and save_buf automatically).
+    NOTE: Not static — referenced via extern by app_thread.c (mode 1)
+    and app_cam.c (mode 4). */
+#if CAPTURE_MODE == 1 || CAPTURE_MODE == 4
+uint8_t save_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
 /** Batch buffer for batch capture mode — allocated in PSRAM.
-    Used in BATCH mode (CAPTURE_MODE=2) and STANDBY-BATCH mode (CAPTURE_MODE=3).
-    On ToF trigger, we grab BATCH_FRAMES into batch_buf
-    (each slot = SNAP_FRAME_SIZE), then send them to storage_task
-    sequentially for SD writing.
-    
-    Size = BATCH_FRAMES × SNAP_FRAME_SIZE
-    For 1296x972@YUV422 (2.5MB/frame), BATCH_FRAMES=3 → 7.5MB total.
-    NOTE: Not static — referenced via extern by app_thread.c (camera_task). */
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3
+     Used in BATCH mode (CAPTURE_MODE=2), STANDBY-BATCH mode (CAPTURE_MODE=3),
+     and CALLBACK-BATCH mode (CAPTURE_MODE=4).
+     On ToF trigger, we grab BATCH_FRAMES into batch_buf
+     (each slot = SNAP_FRAME_SIZE), then send them to storage_task
+     sequentially for SD writing.
+
+     Size = BATCH_FRAMES × SNAP_FRAME_SIZE
+     For 1296x972@YUV422 (2.5MB/frame), BATCH_FRAMES=3 → 7.5MB total.
+     NOTE: Not static — referenced via extern by app_thread.c (camera_task). */
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
 uint8_t batch_buf[BATCH_BUF_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
@@ -1098,12 +1103,12 @@ static void main_thread_fct(void *arg)
         while (1);
     }
 
-    /* ---- Camera Standby Init (CAPTURE_MODE=3) ----
+    /* ---- Camera Standby Init (CAPTURE_MODE=3) / Callback Init (CAPTURE_MODE=4) ----
        CRITICAL: Must be done BEFORE system_ready=1 to avoid I2C1 conflict.
        The IMX335 camera and VL53L5CX ToF sensor share I2C1. If camera_task
        tries to init camera after system_ready=1, it races with sensor_task
        which is already using I2C1 for ToF → CMW_CAMERA_Init fails (ret=-7).
-       
+
        Solution: Init camera HERE in main_thread (single-threaded, no ToF yet),
        then put camera in standby mode. When ToF triggers later, camera just
        wakes from standby (no I2C needed until wakeup). */
@@ -1113,6 +1118,13 @@ static void main_thread_fct(void *arg)
         printf("[WARN] Camera standby init FAILED! Captures may fail.\n");
     } else {
         printf("[INIT] Camera in STANDBY mode, ready for fast wakeup.\n");
+    }
+#elif CAPTURE_MODE == 4
+    printf("[INIT] Camera callback-batch init (before tasks start to avoid I2C conflict)...\n");
+    if (CAM_CallbackInit(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS) != 0) {
+        printf("[WARN] Camera callback init FAILED! Captures may fail.\n");
+    } else {
+        printf("[INIT] Camera in STANDBY mode, ready for callback-batch wakeup.\n");
     }
 #endif
 
@@ -1127,6 +1139,10 @@ static void main_thread_fct(void *arg)
 
 #if CAPTURE_MODE == 2
     printf("[INFO] Capture Mode: BATCH (%d frames/detection)\n", BATCH_FRAMES);
+#elif CAPTURE_MODE == 3
+    printf("[INFO] Capture Mode: STANDBY-BATCH (%d frames/detection)\n", BATCH_FRAMES);
+#elif CAPTURE_MODE == 4
+    printf("[INFO] Capture Mode: CALLBACK-BATCH (%d frames/detection, NO stop/restart)\n", CALLBACK_FRAMES);
 #elif CAPTURE_MODE == 1
     printf("[INFO] Capture Mode: CONTINUOUS (camera_task starts pipe)\n");
 #else

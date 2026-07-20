@@ -24,28 +24,36 @@
    ================================================================ */
 
 #ifndef CAPTURE_MODE
-#define CAPTURE_MODE            3
+#define CAPTURE_MODE            4
 #endif
 
 /** Capture mode for ToF-triggered photography.
-    0 = ON-DEMAND  — Legacy button/manual single-frame mode.
-    1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
-                    Very fast (~5-10ms latency). Good for fast-moving objects.
-                    NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
-    2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
-                    then writes to SD sequentially. FASTEST capture, max data collection.
-                    NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
-    3 = STANDBY-BATCH — Camera init+warmup ONCE at boot, then enters IMX335 standby (register 0x3000=0x01).
-                    On ToF trigger: wake from standby (~20ms) → restart pipe → grab 3 frames rapidly →
-                    back to standby. Best of both worlds: fast wake + batch capture + no I2C conflict
-                    during idle (ToF can use I2C1 while camera is in standby).
-    Snapshot mode is the same as ON-DEMAND (CAPTURE_MODE = 0). */
+     0 = ON-DEMAND  — Legacy button/manual single-frame mode.
+     1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
+                     Very fast (~5-10ms latency). Good for fast-moving objects.
+                     NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
+     2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
+                     then writes to SD sequentially. FASTEST capture, max data collection.
+                     NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
+     3 = STANDBY-BATCH — Camera init+warmup ONCE at boot, then enters IMX335 standby (register 0x3000=0x01).
+                     On ToF trigger: wake from standby (~20ms) → restart pipe → grab 3 frames rapidly →
+                     back to standby. Best of both worlds: fast wake + batch capture + no I2C conflict
+                     during idle (ToF can use I2C1 while camera is in standby).
+     4 = CALLBACK-BATCH — Camera init+warmup ONCE at boot, stays in standby between triggers.
+                     On ToF trigger: wake → start continuous pipe → warmup using FRAME EVENT CALLBACK
+                     (g_frame_event_count incremented by DCMIPP ISR) → capture N frames WITHOUT
+                     stopping the pipe between them → memcpy each frame as callback fires →
+                     stop pipe once at end → return to standby.
+                     ALL frames are sharp because the pipe never restarts mid-batch.
+                     Uses the SAME callback infrastructure as STANDBY-BATCH but eliminates
+                     the Stop/Restart tearing that causes blurry frames.
+     Snapshot mode is the same as ON-DEMAND (CAPTURE_MODE = 0). */
 
 
 /** Camera binning mode — simple toggle to switch resolutions.
-    0 = FULL RESOLUTION (2592x1944, 5MPX) — Use this for snapshot mode
-    1 = 2x2 BINNING (1296x972, 1.3MPX) — Faster readout, less rolling shutter */
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3
+     0 = FULL RESOLUTION (2592x1944, 5MPX) — Use this for snapshot mode
+     1 = 2x2 BINNING (1296x972, 1.3MPX) — Faster readout, less rolling shutter */
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
 #define CAM_BINNING          1
 #else
 #define CAM_BINNING          0
@@ -74,7 +82,7 @@
      REDUCED FROM 11 → 8: Saves ~133ms per capture (33ms saved per frame).
      CRITICAL: Each warmup frame = ~33ms of delay where the insect can move!
      If images have green tint on first few captures, increase this value. */
-#define SNAP_WARMUP_FRAMES    8
+#define SNAP_WARMUP_FRAMES    11
 
 /** Maximum time to wait for warmup + capture frames (milliseconds). */
 #define SNAP_TIMEOUT_MS      200
@@ -88,7 +96,15 @@
     0 = AUTO (sensor decides, can be slow in low light = motion blur)
     1 = MANUAL (fixed exposure, faster = less motion blur)
     2 = FREEZE  (use last auto value, good for consistent lighting)
-    Recommended: 0 (AUTO) - IMX335 auto-exposure works well */
+
+    IMPORTANT: For batch/burst capture across a standby wake cycle (CAPTURE_MODE
+    2/3/4), MANUAL (1) is strongly recommended over AUTO/FREEZE. In AUTO or
+    FREEZE the software 3A (AE/AWB) library keeps re-converging (or freezes
+    onto whatever value it happened to be at, which is not deterministic
+    across standby/wake cycles), which is what was causing shot-to-shot
+    brightness/color drift and inconsistent sharpness. MANUAL pins exposure
+    and gain to fixed values every single capture, giving repeatable
+    brightness/color and a guaranteed-fast shutter to freeze motion. */
 #define CAM_EXPOSURE_MODE    1
 
 /** Exposure time in MICROSECONDS (only used in MANUAL mode).
@@ -119,7 +135,7 @@
       and reduced gain below, for a much better signal-to-noise ratio while still
       easily freezing motion. Tune down toward 8 if you confirm actual motion blur
       (not noise) at 200 µs; tune up if still too dark. */
-#define CAM_EXPOSURE_VALUE   80
+#define CAM_EXPOSURE_VALUE   100
 
 /** Analog gain (only used in MANUAL mode).
       Range: 0-72000 (IMX335_GAIN_MIN to IMX335_GAIN_MAX).
@@ -138,7 +154,7 @@
       and ~8x more LED brightness, far less analog gain is needed to reach the
       same brightness, and less gain means less sensor noise (sharper-looking
       images). Raise back toward 4000 if images come out too dark. */
-#define CAM_GAIN_VALUE       500
+#define CAM_GAIN_VALUE       200
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
@@ -210,8 +226,8 @@
 
 
 /* ================================================================
-   SECTION 5C: STANDBY-BATCH PARAMETERS (CAPTURE_MODE = 3)
-   ================================================================ */
+    SECTION 5C: STANDBY-BATCH PARAMETERS (CAPTURE_MODE = 3)
+    ================================================================ */
 
 /** Standby mode wakes in ~20ms (IMX335_Start delay) + ~1 frame (33ms) warmup = ~53ms total.
      This is MUCH faster than full init (~400ms) and avoids I2C conflicts with ToF.
@@ -220,24 +236,54 @@
 #define STANDBY_WAKE_TIMEOUT_MS 2000  /* Max wait for standby wake + warmup */
 
 /* ================================================================
+    SECTION 5D: CALLBACK-BATCH PARAMETERS (CAPTURE_MODE = 4)
+    ================================================================ */
+
+/** Callback-based batch capture: uses DCMIPP frame event callback (ISR-driven)
+     to know exactly when each frame is ready. The pipe runs continuously through
+     the entire batch — no Stop/Restart between frames = no tearing = ALL frames sharp.
+     
+     Flow on trigger:
+       Wake sensor (20ms) → Start pipe → Wait for warmup frames via callback →
+       For each capture frame: wait for callback → memcpy → repeat →
+       Stop pipe once → Return to standby
+     
+     Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
+     With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
+#define CALLBACK_WARMUP_FRAMES   11     /* Frames to discard after wake (callback-based) */
+#define CALLBACK_FRAMES          4    /* Number of frames to capture per trigger */
+#define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
+
+/** Total PSRAM needed for callback batch: CALLBACK_FRAMES × frame_size
+     At 1296x972 YUV422: 3 × 2.5MB = 7.5MB (fits in 16MB PSRAM) */
+#define CALLBACK_BUF_SIZE        (CALLBACK_FRAMES * SNAP_FRAME_SIZE)
+
+/* ================================================================
     SECTION 5B: BATCH CAPTURE PARAMETERS (CAPTURE_MODE = 2)
     ================================================================ */
 
 /** Number of frames captured per insect detection event.
-    Each frame is stored in PSRAM (batch_buf), then written to SD sequentially.
-    More frames = higher chance of at least one sharp image, but more PSRAM used
-    and longer total SD write time (happens AFTER capture, so insect can leave).
+     Each frame is stored in PSRAM (batch_buf), then written to SD sequentially.
+     More frames = higher chance of at least one sharp image, but more PSRAM used
+     and longer total SD write time (happens AFTER capture, so insect can leave).
 
-    PSRAM usage: BATCH_FRAMES × SNAP_FRAME_SIZE
-      - 1296x972@YUV422 (2.4MB/frame): 3 frames = 7.2MB, 5 frames = 12MB
-      - 2592x1944@YUV422 (9.6MB/frame): 3 frames = 28.8MB, 5 frames = 48MB
+     PSRAM usage: BATCH_FRAMES × SNAP_FRAME_SIZE
+       - 1296x972@YUV422 (2.4MB/frame): 3 frames = 7.2MB, 5 frames = 12MB
+       - 2592x1944@YUV422 (9.6MB/frame): 3 frames = 28.8MB, 5 frames = 48MB
 
-    Capture time: ~38ms per frame (stop pipe + memcpy + restart + wait 1 frame)
-      - 3 frames = ~114ms total capture window
-      - 5 frames = ~190ms total capture window
+     Capture time: ~38ms per frame (stop pipe + memcpy + restart + wait 1 frame)
+       - 3 frames = ~114ms total capture window
+       - 5 frames = ~190ms total capture window
 
-    Recommended: 3 (good balance), 5 (max data, still fast) */
+     Recommended: 3 (good balance), 5 (max data, still fast) */
 #define BATCH_FRAMES             3
+
+/** For CALLBACK-BATCH mode (CAPTURE_MODE=4): override BATCH_FRAMES to use CALLBACK_FRAMES.
+     This ensures app_thread.c uses the correct frame count for SD storage. */
+#if CAPTURE_MODE == 4
+#undef BATCH_FRAMES
+#define BATCH_FRAMES             CALLBACK_FRAMES
+#endif
 
 /** Total batch buffer size in bytes = BATCH_FRAMES × SNAP_FRAME_SIZE.
     This buffer is allocated in PSRAM and holds all frames for one detection event. */

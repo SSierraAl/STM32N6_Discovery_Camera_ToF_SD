@@ -20,7 +20,7 @@ extern uint8_t capture_buf[];
 #if CAPTURE_MODE == 1
 extern uint8_t save_buf[];
 #endif
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
 extern uint8_t batch_buf[];
 #endif
 
@@ -433,17 +433,24 @@ void camera_task(void *arg)
 #endif
                 xSemaphoreGive(camera_ready_sem);
             }
-#elif CAPTURE_MODE == 2 || CAPTURE_MODE == 3
+#elif CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
             extern uint8_t batch_buf[];
 #if CAPTURE_MODE == 2
             rc = CAM_ContinuousBatchSnap(batch_buf, frame_size);
-#else
+#elif CAPTURE_MODE == 3
             rc = CAM_StandbyBatchSnap(batch_buf, frame_size);
+#else
+            /* CAPTURE_MODE == 4: Callback-Batch (continuous, NO stop/restart) */
+            rc = CAM_CallbackBatchSnap(batch_buf, frame_size);
 #endif
             if (rc > 0) {
                 g_last_batch_frames = rc;
 #if PERF_DEBUG_LEVEL >= 1
+#if CAPTURE_MODE == 4
+                printf("[CAM] Callback-Batch: %d frames captured (continuous)\n", rc);
+#else
                 printf("[CAM] Batch: %d frames captured\n", rc);
+#endif
 #endif
                 xSemaphoreGive(camera_ready_sem);
                 for (int f = 0; f < rc; f++) {
@@ -461,7 +468,11 @@ void camera_task(void *arg)
                 }
             } else {
 #if PERF_DEBUG_LEVEL >= 1
+#if CAPTURE_MODE == 4
+                printf("[CAM] Callback-Batch FAIL\n");
+#else
                 printf("[CAM] Batch FAIL\n");
+#endif
 #endif
                 xSemaphoreGive(camera_ready_sem);
             }
@@ -544,7 +555,7 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
     WS2812_TurnOff();
 #endif
 
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
     /* Wait for ALL BATCH_FRAMES to be stored before returning */
     int frames_to_wait = g_last_batch_frames > 0 ? g_last_batch_frames : BATCH_FRAMES;
     for (int i = 0; i < frames_to_wait; i++) {

@@ -191,6 +191,63 @@ int CAM_StandbyBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
  */
 int CAM_IsStandbyReady(void);
 
+/* ================================================================
+   PUBLIC API — CALLBACK-BATCH MODE (CAPTURE_MODE = 4)
+   Callback-driven continuous batch capture — NO Stop/Restart between frames.
+
+   Uses the DCMIPP frame event callback (ISR-driven, g_frame_event_count)
+   to know EXACTLY when each frame is DMA'd. The pipe runs continuously
+   through the entire batch, eliminating the Stop/Restart tearing that
+   causes blurry frames in STANDBY-BATCH mode.
+
+   Flow on trigger:
+     Wake sensor (20ms) → Start continuous pipe → Warmup via callback →
+     For each frame: wait for callback → memcpy → repeat →
+     Stop pipe ONCE → Return to standby
+
+   ALL frames are sharp because the DCMIPP pipe never restarts mid-batch.
+   ================================================================ */
+
+/**
+ * @brief  Initialize camera and put in standby mode (called ONCE at boot).
+ *
+ *   Same as CAM_StandbyInit: full init + warmup + standby.
+ *
+ * @param  buf            Pre-allocated buffer for capture
+ * @param  buf_size       Size of buf in bytes
+ * @param  width          Capture width
+ * @param  height         Capture height
+ * @param  fps            Sensor frame rate
+ * @return 0 on success, -1 on error
+ */
+int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps);
+
+/**
+ * @brief  Wake from standby, capture CALLBACK_FRAMES continuously, return to standby.
+ *
+ *   KEY DIFFERENCE from CAM_StandbyBatchSnap:
+ *   - Does NOT Stop/Restart the DCMIPP pipe between frames
+ *   - Uses frame event callback (g_frame_event_count, ISR-driven) to know
+ *     exactly when each frame's DMA is complete
+ *   - Copies each frame to batch_buf immediately after callback fires
+ *   - Stops the pipe ONLY ONCE after all frames are captured
+ *
+ *   This eliminates the Stop/Restart tearing that caused frames 2&3 to be
+ *   blurry in STANDBY-BATCH mode. All frames come from a continuously
+ *   running, perfectly synchronized DCMIPP pipeline.
+ *
+ * @param  batch_buf    Pre-allocated buffer ≥ CALLBACK_FRAMES × frame_size
+ * @param  frame_size   Size of one frame in bytes
+ * @return number of frames captured (0..CALLBACK_FRAMES), -1 on error
+ */
+int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
+
+/**
+ * @brief  Check if camera is initialized and ready for callback batch.
+ * @return 1 if ready, 0 if not
+ */
+int CAM_IsCallbackReady(void);
+
 /* Called by CMW frame callback when a full frame transfer is complete. */
 void CAM_NotifyFrameEvent(void);
 
