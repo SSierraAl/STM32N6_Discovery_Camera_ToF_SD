@@ -135,7 +135,7 @@
       and reduced gain below, for a much better signal-to-noise ratio while still
       easily freezing motion. Tune down toward 8 if you confirm actual motion blur
       (not noise) at 200 µs; tune up if still too dark. */
-#define CAM_EXPOSURE_VALUE   100
+#define CAM_EXPOSURE_VALUE   30
 
 /** Analog gain (only used in MANUAL mode).
       Range: 0-72000 (IMX335_GAIN_MIN to IMX335_GAIN_MAX).
@@ -154,7 +154,7 @@
       and ~8x more LED brightness, far less analog gain is needed to reach the
       same brightness, and less gain means less sensor noise (sharper-looking
       images). Raise back toward 4000 if images come out too dark. */
-#define CAM_GAIN_VALUE       200
+#define CAM_GAIN_VALUE       8
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
@@ -251,7 +251,7 @@
      Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
      With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
 #define CALLBACK_WARMUP_FRAMES   11     /* Frames to discard after wake (callback-based) */
-#define CALLBACK_FRAMES          4    /* Number of frames to capture per trigger */
+#define CALLBACK_FRAMES          4   /* Number of frames to capture per trigger */
 #define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
 
 /** Total PSRAM needed for callback batch: CALLBACK_FRAMES × frame_size
