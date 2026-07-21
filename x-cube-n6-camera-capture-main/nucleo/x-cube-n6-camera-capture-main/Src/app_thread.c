@@ -277,9 +277,9 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         }
         wait_ms = HAL_GetTick() - t0;
 
-        /* Minimum inter-batch recovery gap (20ms) */
+        /* Minimum inter-batch recovery gap (configurable via SD_BATCH_RECOVERY_GAP_MS in app_config.h) */
         t0 = HAL_GetTick();
-        vTaskDelay(pdMS_TO_TICKS(15));
+        vTaskDelay(pdMS_TO_TICKS(SD_BATCH_RECOVERY_GAP_MS));
         uint32_t gap_ms = HAL_GetTick() - t0;
 
         t0 = HAL_GetTick();

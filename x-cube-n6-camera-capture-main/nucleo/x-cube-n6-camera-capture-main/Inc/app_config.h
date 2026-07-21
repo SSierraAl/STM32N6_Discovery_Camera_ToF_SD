@@ -204,10 +204,23 @@
     - 128 blocks/call = 154 calls (too aggressive, causes CRC errors)
 
     SD card needs time between batches for internal flash programming.
-    Use smaller batches + longer waits = more reliable.
-
-    Reduced to 32 for more SD stability during large full-res frames. */
+    Use smaller batches + longer waits = more reliable. */
 #define SD_BATCH_WRITE_BLOCKS 64
+
+/** Minimum inter-batch recovery gap (milliseconds).
+    After the SD card reports TRANSFER-ready (via CMD13 poll), we wait this
+    many additional milliseconds before sending the next write command. The
+    card's CMD13 "ready" status is optimistic — the host controller reports
+    ready before the internal NAND flash erase/program cycles complete.
+    Without this gap, STA=0x5000 (Data CRC timeout) errors occur on many
+    SDXC cards when the next write arrives too early.
+
+    Recommended values:
+    - 15ms: good balance of speed and reliability (default)
+    - 20ms: more reliable for slower/failing cards
+    -  0ms: fastest but may cause CRC errors on some cards
+    - 30ms+: only if you still see CRC failures at 20ms */
+#define SD_BATCH_RECOVERY_GAP_MS  15
 
 /** Maximum snapshots that can be stored before SD card overflow.
     For a 32 GB SDHC card (64,000,000 blocks):

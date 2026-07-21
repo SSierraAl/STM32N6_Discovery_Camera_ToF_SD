@@ -738,8 +738,9 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
            programming. The card's CMD13 status may say "ready" but the physical
            flash still needs time to complete erase/program cycles. Without this
            15ms gap, STA=0x5000 (Data Command Response Timeout) occurs on many
-           SDXC cards when sending the next write command too quickly. */
-        vTaskDelay(pdMS_TO_TICKS(15));
+           SDXC cards when sending the next write command too quickly.
+           Configurable via SD_BATCH_RECOVERY_GAP_MS in app_config.h. */
+        vTaskDelay(pdMS_TO_TICKS(SD_BATCH_RECOVERY_GAP_MS));
 
         st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
         if (st != HAL_OK) {
