@@ -37,6 +37,11 @@ extern "C" {
 #define CAMERA_VD56G3_FREQ_IN_HZ       12000000U
 #define CAMERA_VD1943_ADDRESS          0x20U
 
+/* Discovery board: BSP_I2C1_* is redirected through I2C_Arbiter_Camera*
+   (see i2c_arbiter.h) below, to serialize access against the VL53L5CX ToF
+   sensor which drives the same physical I2C1 bus via its own handle. */
+#include "i2c_arbiter.h"
+
 #if defined (STM32N657xx)
 
 #ifdef STM32N6570_NUCLEO_REV
@@ -75,8 +80,8 @@ extern "C" {
 /* Discovery board */
   #define CMW_I2C_INIT BSP_I2C1_Init
   #define CMW_I2C_DEINIT BSP_I2C1_DeInit
-  #define CMW_I2C_READREG16 BSP_I2C1_ReadReg16
-  #define CMW_I2C_WRITEREG16 BSP_I2C1_WriteReg16
+  #define CMW_I2C_READREG16 I2C_Arbiter_CameraReadReg16
+  #define CMW_I2C_WRITEREG16 I2C_Arbiter_CameraWriteReg16
 #endif /* STM32N6570_NUCLEO_REV */
 
 #define CSI2_CLK_ENABLE()               __HAL_RCC_CSI_CLK_ENABLE()

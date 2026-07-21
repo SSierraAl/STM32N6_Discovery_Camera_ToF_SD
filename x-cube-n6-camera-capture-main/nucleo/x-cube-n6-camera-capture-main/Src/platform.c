@@ -61,8 +61,14 @@
 *******************************************************************************/
 
 #include "platform.h"
+#include "i2c_arbiter.h"
 
 extern I2C_HandleTypeDef 	hi2c1;
+
+/* The physical I2C1 bus is ALSO driven by the camera (via a separate
+   BSP_I2C1_* handle, see i2c_arbiter.h). Every transaction here takes
+   g_i2c1_mutex so the ToF driver and the camera/ISP never interleave
+   mid-transaction on the shared bus. */
 
 uint8_t VL53L5CX_RdByte(
 		VL53L5CX_Platform *p_platform,
@@ -75,8 +81,10 @@ uint8_t VL53L5CX_RdByte(
 
 	data_write[0] = (RegisterAdress >> 8) & 0xFF;
 	data_write[1] = RegisterAdress & 0xFF;
+	if (g_i2c1_mutex) xSemaphoreTake(g_i2c1_mutex, portMAX_DELAY);
 	status = HAL_I2C_Master_Transmit(&hi2c1, (p_platform->address << 1), data_write, 2, 100);
 	status = HAL_I2C_Master_Receive(&hi2c1, (p_platform->address << 1), data_read, 1, 100);
+	if (g_i2c1_mutex) xSemaphoreGive(g_i2c1_mutex);
 	*p_value = data_read[0];
   
 	return status;
@@ -93,7 +101,9 @@ uint8_t VL53L5CX_WrByte(
 	data_write[0] = (RegisterAdress >> 8) & 0xFF;
 	data_write[1] = RegisterAdress & 0xFF;
 	data_write[2] = value & 0xFF;
+	if (g_i2c1_mutex) xSemaphoreTake(g_i2c1_mutex, portMAX_DELAY);
 	status = HAL_I2C_Master_Transmit(&hi2c1,(p_platform->address << 1), data_write, 3, 100);
+	if (g_i2c1_mutex) xSemaphoreGive(g_i2c1_mutex);
 
 	return status;
 }
@@ -104,8 +114,11 @@ uint8_t VL53L5CX_WrMulti(
 		uint8_t *p_values,
 		uint32_t size)
 {
-	uint8_t status = HAL_I2C_Mem_Write(&hi2c1, (p_platform->address << 1), RegisterAdress,
+	uint8_t status;
+	if (g_i2c1_mutex) xSemaphoreTake(g_i2c1_mutex, portMAX_DELAY);
+	status = HAL_I2C_Mem_Write(&hi2c1, (p_platform->address << 1), RegisterAdress,
 									I2C_MEMADD_SIZE_16BIT, p_values, size, 65535);
+	if (g_i2c1_mutex) xSemaphoreGive(g_i2c1_mutex);
 	return status;
 }
 
@@ -119,8 +132,10 @@ uint8_t VL53L5CX_RdMulti(
 	uint8_t data_write[2];
 	data_write[0] = (RegisterAdress>>8) & 0xFF;
 	data_write[1] = RegisterAdress & 0xFF;
+	if (g_i2c1_mutex) xSemaphoreTake(g_i2c1_mutex, portMAX_DELAY);
 	status = HAL_I2C_Master_Transmit(&hi2c1, (p_platform->address << 1), data_write, 2, 100);
 	status += HAL_I2C_Master_Receive(&hi2c1, (p_platform->address << 1), p_values, size, 100);
+	if (g_i2c1_mutex) xSemaphoreGive(g_i2c1_mutex);
 
 	return status;
 }

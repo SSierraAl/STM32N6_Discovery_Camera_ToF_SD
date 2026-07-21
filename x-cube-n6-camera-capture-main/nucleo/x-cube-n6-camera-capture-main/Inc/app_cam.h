@@ -148,50 +148,6 @@ int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count,
 int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
 
 /* ================================================================
-   PUBLIC API — STANDBY-BATCH MODE (CAPTURE_MODE = 3)
-   Init once at boot, sleep in standby, fast wakeup + batch capture.
-   ================================================================ */
-
-/**
- * @brief  Initialize camera and put in standby mode (called ONCE at boot).
- *
- *   Full init + warmup + then stop pipe + IMX335 standby (0x3000=0x01).
- *   Camera stays powered and configured, I2C1 released for ToF.
- *   Wakeup: ~20ms + 3 warmup frames (~100ms) = ~120ms total.
- *
- * @param  buf            Pre-allocated buffer for capture
- * @param  buf_size       Size of buf in bytes
- * @param  width          Capture width
- * @param  height         Capture height
- * @param  fps            Sensor frame rate
- * @return 0 on success, -1 on error
- */
-int CAM_StandbyInit(uint8_t *buf, int buf_size, int width, int height, int fps);
-
-/**
- * @brief  Wake from standby, capture BATCH_FRAMES, return to standby.
- *
- *   Called on each ToF detection:
- *     1. Wake sensor (0x3000=0x00) + 20ms delay
- *     2. Restart DCMIPP pipe
- *     3. Re-apply exposure/gain
- *     4. Warmup: discard STANDBY_WARMUP_FRAMES
- *     5. Grab BATCH_FRAMES into batch_buf (stop/copy/restart each)
- *     6. Return to standby
- *
- * @param  batch_buf    Pre-allocated buffer ≥ BATCH_FRAMES × frame_size
- * @param  frame_size   Size of one frame in bytes
- * @return number of frames captured (0..BATCH_FRAMES), -1 on error
- */
-int CAM_StandbyBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
-
-/**
- * @brief  Check if camera is initialized and ready for standby wakeup.
- * @return 1 if ready, 0 if not
- */
-int CAM_IsStandbyReady(void);
-
-/* ================================================================
    PUBLIC API — CALLBACK-BATCH MODE (CAPTURE_MODE = 4)
    Callback-driven continuous batch capture — NO Stop/Restart between frames.
 

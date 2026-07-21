@@ -28,17 +28,13 @@
 #endif
 
 /** Capture mode for ToF-triggered photography.
-     0 = ON-DEMAND  — Legacy button/manual single-frame mode.
-     1 = CONTINUOUS — Camera always running in continuous mode. On trigger: stop → copy → restart.
-                     Very fast (~5-10ms latency). Good for fast-moving objects.
-                     NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
+     0 = ON-DEMAND  — Legacy button/manual single-frame mode. //Validated !
+    1 = CONTINUOUS — Camera always running in continuous mode at low resolution.
+                 On trigger: grab one completed frame while pipe stays running.
+                 Used with ToF enabled.
      2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
                      then writes to SD sequentially. FASTEST capture, max data collection.
                      NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
-     3 = STANDBY-BATCH — Camera init+warmup ONCE at boot, then enters IMX335 standby (register 0x3000=0x01).
-                     On ToF trigger: wake from standby (~20ms) → restart pipe → grab 3 frames rapidly →
-                     back to standby. Best of both worlds: fast wake + batch capture + no I2C conflict
-                     during idle (ToF can use I2C1 while camera is in standby).
      4 = CALLBACK-BATCH — Camera init+warmup ONCE at boot, stays in standby between triggers.
                      On ToF trigger: wake → start continuous pipe → warmup using FRAME EVENT CALLBACK
                      (g_frame_event_count incremented by DCMIPP ISR) → capture N frames WITHOUT
@@ -53,7 +49,7 @@
 /** Camera binning mode — simple toggle to switch resolutions.
      0 = FULL RESOLUTION (2592x1944, 5MPX) — Use this for snapshot mode
      1 = 2x2 BINNING (1296x972, 1.3MPX) — Faster readout, less rolling shutter */
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 1 || CAPTURE_MODE == 2 || CAPTURE_MODE == 4
 #define CAM_BINNING          1
 #else
 #define CAM_BINNING          0
@@ -97,8 +93,8 @@
     1 = MANUAL (fixed exposure, faster = less motion blur)
     2 = FREEZE  (use last auto value, good for consistent lighting)
 
-    IMPORTANT: For batch/burst capture across a standby wake cycle (CAPTURE_MODE
-    2/3/4), MANUAL (1) is strongly recommended over AUTO/FREEZE. In AUTO or
+    IMPORTANT: For burst capture across standby wake (CAPTURE_MODE 4),
+    MANUAL (1) is strongly recommended over AUTO/FREEZE. In AUTO or
     FREEZE the software 3A (AE/AWB) library keeps re-converging (or freezes
     onto whatever value it happened to be at, which is not deterministic
     across standby/wake cycles), which is what was causing shot-to-shot
@@ -224,16 +220,6 @@
    ================================================================ */
 
 
-
-/* ================================================================
-    SECTION 5C: STANDBY-BATCH PARAMETERS (CAPTURE_MODE = 3)
-    ================================================================ */
-
-/** Standby mode wakes in ~20ms (IMX335_Start delay) + ~1 frame (33ms) warmup = ~53ms total.
-     This is MUCH faster than full init (~400ms) and avoids I2C conflicts with ToF.
-     After capture, camera returns to standby (streaming stops, I2C1 released). */
-#define STANDBY_WARMUP_FRAMES    3     /* Frames to discard after wake from standby */
-#define STANDBY_WAKE_TIMEOUT_MS 2000  /* Max wait for standby wake + warmup */
 
 /* ================================================================
     SECTION 5D: CALLBACK-BATCH PARAMETERS (CAPTURE_MODE = 4)

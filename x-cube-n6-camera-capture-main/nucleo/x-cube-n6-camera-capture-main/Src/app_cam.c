@@ -146,20 +146,41 @@ int CAM_Init(CAM_conf_t *conf)
 {
   CMW_CameraInit_t cam_conf;
   int ret;
+
+  /* Camera I2C can become corrupted if the board was power-cycled or the
+     program was interrupted while the camera was active. Retry up to 3 times
+     with I2C bus reset between attempts instead of asserting. */
   if (!is_sensor_valid) {
     is_sensor_valid = 1;
-    ret = CMW_CAMERA_GetSensorName(&sensor);
-    assert(ret == CMW_ERROR_NONE);
+    for (int attempt = 1; attempt <= 3; attempt++) {
+      ret = CMW_CAMERA_GetSensorName(&sensor);
+      if (ret == CMW_ERROR_NONE) break;
+      printf("[CAM] I2C not ready (attempt %d/3, ret=%d)\n", attempt, ret);
+      vTaskDelay(pdMS_TO_TICKS(200));
+    }
+    if (ret != CMW_ERROR_NONE) {
+      printf("[CAM] FATAL: Cannot detect sensor after 3 retries (ret=%d)\n", ret);
+      assert(0);
+    }
   }
+
   cam_conf.width = SENSOR_WIDTH;
   cam_conf.height = SENSOR_HEIGHT;
   cam_conf.fps = conf->fps;
   cam_conf.mirror_flip = CAM_getFlipMode(sensor);
   ret = CMW_CAMERA_Init(&cam_conf, NULL);
-  assert(ret == CMW_ERROR_NONE);
+  if (ret != CMW_ERROR_NONE) {
+    printf("[CAM] Init failed (ret=%d), retrying with delay...\n", ret);
+    vTaskDelay(pdMS_TO_TICKS(500));
+    ret = CMW_CAMERA_Init(&cam_conf, NULL);
+  }
+  if (ret != CMW_ERROR_NONE) {
+    printf("[CAM] FATAL: Init failed after retry (ret=%d)\n", ret);
+    assert(0);
+  }
   assert(cam_conf.width && cam_conf.height);
   DCMIPP_PipeInitCapture(conf, cam_conf.width, cam_conf.height, conf);
-  return ret; // Return the actual initialization result
+  return ret;
 }
 
 void CAM_SetSliceROI(uint16_t y_start, uint16_t height)
@@ -549,159 +570,6 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   printf("[CAM] BatchSnap: %d frames in %lu ms\n", (unsigned long)captured, (unsigned long)elapsed);
 #endif
   return (int)captured;
-}
-
-/* ================================================================
-   STANDBY-BATCH MODE (CAPTURE_MODE = 3)
-   ================================================================ */
-int CAM_StandbyInit(uint8_t *buf, int buf_size, int width, int height, int fps)
-{
-  uint32_t t0 = HAL_GetTick();
-#if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Standby init: full init + warmup + standby...\n");
-#endif
-
-  int rc = CAM_InitAndStartContinuous(buf, buf_size, width, height, fps, SNAP_WARMUP_FRAMES);
-  if (rc != 0) {
-#if PERF_DEBUG_LEVEL >= 1
-    printf("[CAM] Standby init FAILED rc=%d\n", rc);
-#endif
-    return -1;
-  }
-
-  DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
-  HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
-  CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
-
-  g_cam_ready = 1;
-#if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Standby init done in %lu ms.\n", (unsigned long)(HAL_GetTick() - t0));
-#endif
-  return 0;
-}
-
-/**
- * @brief  Wake from standby, capture BATCH_FRAMES, return to standby.
- */
-int CAM_StandbyBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
-{
-#if CAPTURE_MODE != 3
-  (void)batch_buf; (void)frame_size; return -1;
-#endif
-  if (!batch_buf || !g_cam_ready) return -1;
-
-  PERF_MARK(g_perf_timer, CAM_INIT);
-  uint32_t t0 = HAL_GetTick();
-  uint8_t captured = 0;
-  DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
-  if (!h) return -1;
-
-#if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Standby-Batch: wakeup + %d frames...\n", BATCH_FRAMES);
-#endif
-
-  /* Step 1: Wake sensor */
-  CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STREAMING);
-  HAL_Delay(35);
-
-  /* Step 2: Start continuous pipe (stable path for this project). */
-  if (CAM_CapturePipe_StartRetry(capture_buf, CMW_MODE_CONTINUOUS, 2) != 0) {
-#if PERF_DEBUG_LEVEL >= 1
-    printf("[CAM] Continuous start failed after standby wake\n");
-#endif
-    goto standby_exit;
-  }
-
-  /* Step 3: Re-apply exposure */
-  PERF_MARK(g_perf_timer, CAM_EXPO);
-  CMW_CAMERA_SetExposureMode(CAM_EXPOSURE_MODE == 1 ? CMW_EXPOSUREMODE_MANUAL :
-                             CAM_EXPOSURE_MODE == 2 ? CMW_EXPOSUREMODE_AUTOFREEZE : CMW_EXPOSUREMODE_AUTO);
-  if (CAM_EXPOSURE_MODE == 1) {
-    CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
-    CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
-    CAM_IspUpdate();
-#if PERF_DEBUG_LEVEL >= 1
-    int32_t re = -1, rg = -1;
-    CMW_CAMERA_GetExposure(&re);
-    CMW_CAMERA_GetGain(&rg);
-    printf("[CAM] Standby-wake exposure=%ld gain=%ld (target %d/%d)\n",
-           (long)re, (long)rg, (int)CAM_EXPOSURE_VALUE, (int)CAM_GAIN_VALUE);
-#endif
-  }
-
-  /* Step 4: Warmup after wakeup (discard N completed frames). */
-  PERF_MARK(g_perf_timer, CAM_WARMUP);
-#if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Standby warmup %d frames...\n", STANDBY_WARMUP_FRAMES);
-#endif
-  for (uint8_t w = 0; w < STANDBY_WARMUP_FRAMES; w++) {
-    uint32_t frame_ms = 0;
-    if (CAM_WaitNextFrameReady(120, &frame_ms) != 0) {
-#if PERF_DEBUG_LEVEL >= 1
-      printf("[CAM] Standby WARMUP TIMEOUT!\n");
-#endif
-      goto standby_exit;
-    }
-#if PERF_DEBUG_LEVEL >= 2
-    printf("[CAM] warmup[%u] frame in %lu ms\n", (unsigned)w, (unsigned long)frame_ms);
-#endif
-  }
-
-  /* Step 5: Capture BATCH_FRAMES from continuous stream with frame-ready gating. */
-  while (captured < BATCH_FRAMES) {
-    uint32_t frame_ms = 0;
-    if (CAM_WaitNextFrameReady(120, &frame_ms) != 0) {
-#if PERF_DEBUG_LEVEL >= 1
-      printf("[CAM] Frame wait timeout at index %u\n", (unsigned)captured);
-#endif
-      break;
-    }
-
-    /* NOTE: Stop must happen immediately after the frame-ready event, with
-       nothing (not even a printf) in between. capture_buf is being
-       continuously overwritten until Stop() actually lands, so any delay
-       here risks copying a frame Stop() only partially caught. */
-    HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
-    HAL_Delay(2);
-
-    uint8_t *dest = batch_buf + (captured * frame_size);
-    SCB_InvalidateDCache_by_Addr((uint32_t*)capture_buf, frame_size);
-    memcpy(dest, capture_buf, frame_size);
-    SCB_CleanDCache_by_Addr((uint32_t*)dest, frame_size);
-#if PERF_DEBUG_LEVEL >= 2
-    printf("[CAM] capture[%u] frame in %lu ms\n", (unsigned)captured, (unsigned long)frame_ms);
-#endif
-    captured++;
-
-    if (captured < BATCH_FRAMES) {
-      if (CAM_CapturePipe_StartRetry(capture_buf, CMW_MODE_CONTINUOUS, 2) != 0) {
-#if PERF_DEBUG_LEVEL >= 1
-        printf("[CAM] Restart failed at index %u\n", (unsigned)captured);
-#endif
-        break;
-      }
-    }
-  }
-
-  PERF_MARK(g_perf_timer, CAM_SNAP);
-
-#if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Standby-Batch: %d frames in %lu ms\n",
-         (unsigned long)captured, (unsigned long)(HAL_GetTick()-t0));
-#endif
-
-standby_exit:
-  /* Step 6: Return to standby */
-  PERF_MARK(g_perf_timer, CAM_STOP);
-  HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
-  CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
-  PERF_MARK(g_perf_timer, CAM_DEINIT);
-  return (int)captured;
-}
-
-int CAM_IsStandbyReady(void)
-{
-  return g_cam_ready;
 }
 
 /* ================================================================

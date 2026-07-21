@@ -23,11 +23,13 @@ FMT_NAME = {0: "YUV422", 1: "RGB565", 2: "GRAY8"}
 HDR_FMT = '<IIIIIII36s'
 HDR_FIELDS = ['magic', 'width', 'height', 'pixel_format', 'data_size', 'timestamp', 'checksum', '_rsv']
 
-# FIXED block per snapshot: ceil((64 + 2592*1944*2) / 512) = 19661
-# This matches the C code calculation exactly
+# Block count per snapshot: matches C code exactly
+# (HEADER_SIZE + frame_size + BLOCK_SIZE - 1) // BLOCK_SIZE
+# For 2592x1944 YUV422: (64 + 10077696 + 511) // 512 = 19684 blocks
+# For 1296x972 YUV422:  (64 +  2519424 + 511) // 512 =  4913 blocks
 SNAP_W, SNAP_H = 1296, 972  #640, 480  #1296, 972 #2592, 1944
 SNAP_FRAME_SIZE = SNAP_W * SNAP_H * 2
-SNAP_BLOCKS = (HEADER_SIZE + SNAP_FRAME_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE  # 19661
+SNAP_BLOCKS = (HEADER_SIZE + SNAP_FRAME_SIZE + BLOCK_SIZE - 1) // BLOCK_SIZE  # 19684 for full res
 
 # Try both old base (1000) and new base (3072) to support both firmware versions
 SNAP_BASE_NEW = 3072
@@ -69,6 +71,28 @@ def rblk(path, blk):
 
     _gf.seek(offset, os.SEEK_SET)
     return _gf.read(BLOCK_SIZE)
+
+
+def rbulk(path, start_blk, num_blks):
+    """Read multiple consecutive blocks in ONE I/O call (much faster than rblk loop).
+    
+    For full-res images (19684 blocks), reading block-by-block takes forever.
+    This function does a single seek + read of all bytes at once."""
+    global _gf, _gfd
+    _open_source(path)
+    offset = int(start_blk) * BLOCK_SIZE
+    total_bytes = int(num_blks) * BLOCK_SIZE
+
+    if _gfd is not None:
+        if hasattr(os, 'pread'):
+            data = os.pread(_gfd, total_bytes, offset)
+        else:
+            os.lseek(_gfd, offset, os.SEEK_SET)
+            data = os.read(_gfd, total_bytes)
+        return data
+
+    _gf.seek(offset, os.SEEK_SET)
+    return _gf.read(total_bytes)
 
 
 def close_drive():
@@ -259,71 +283,99 @@ class SDVisualizer(ctk.CTk):
     def scan_snapshots(self):
         """Scan SD card for snapshots.
 
-        The C code stores snapshots at FIXED intervals:
-        - snap_base_block = SD_SNAP_BASE_BLOCK
-        - Snapshot N at: snap_base_block + (N * SNAP_BLOCKS)
-        - SNAP_BLOCKS = 19661 (fixed for 2592x1944 YUV422)
-
-        We try both base=3072 (new firmware) and base=1000 (old firmware).
+        Strategy: For each base block position, first try the FIXED-stride
+        approach (fast, works when all images are same resolution). Then do
+        a SECOND pass with VARIABLE stride: read the header, compute actual
+        block count from data_size in the header, advance by that amount.
+        This handles mixed-resolution SD cards (e.g., some images from
+        callback-batch at 1296x972 and some from button at 2592x1944).
         """
         def task():
             self.set_status("Escaneando...")
-            new_snaps = []
-            old_snaps = []
+            best_results = []
+            best_label = ""
 
             for snap_base, label in [(SNAP_BASE_NEW, "new"), (SNAP_BASE_OLD, "old")]:
+
+                # --- Pass 1: Fixed stride (fast) ---
                 probe = snap_base
                 count = 0
                 gaps = 0
-                results = []
+                fixed_results = []
 
                 while count < 300:
                     try:
                         raw = rblk(self.drive, probe)
                         if len(raw) < HEADER_SIZE:
                             break
-
                         h = parse_hdr(raw[:HEADER_SIZE])
-
                         if self._validate_header(h):
-                            results.append(Snapshot(count, probe, h))
+                            fixed_results.append(Snapshot(count, probe, h))
                             count += 1
                             gaps = 0
                         else:
                             gaps += 1
                             if gaps >= 3:
                                 break
-
-                        # Always advance by FIXED SNAP_BLOCKS (matches C code)
                         probe += SNAP_BLOCKS
-
                     except OSError as e:
-                        if getattr(e, 'errno', None) == 22:
-                            print(f"[SCAN {label}] Invalid argument at block {probe}. "
-                                  f"Run as Administrator and ensure no other app is locking {self.drive}.")
-                        else:
+                        if getattr(e, 'errno', None) != 22:
                             print(f"[SCAN {label}] OSError at block {probe}: {e}")
                         break
                     except Exception as e:
                         print(f"[SCAN {label}] Exception at block {probe}: {e}")
                         break
 
-                print(f"[SCAN] base={snap_base} ({label}): found {count} snapshots")
+                # --- Pass 2: Variable stride (handles mixed resolutions) ---
+                probe = snap_base
+                count = 0
+                gaps = 0
+                var_results = []
 
-                if label == "new":
-                    new_snaps = results
+                while count < 300:
+                    try:
+                        raw = rblk(self.drive, probe)
+                        if len(raw) < HEADER_SIZE:
+                            break
+                        h = parse_hdr(raw[:HEADER_SIZE])
+                        if self._validate_header(h):
+                            # Compute actual block count from header data_size
+                            actual_nb = (HEADER_SIZE + h['data_size'] + BLOCK_SIZE - 1) // BLOCK_SIZE
+                            if actual_nb < 1:
+                                actual_nb = SNAP_BLOCKS  # fallback
+                            var_results.append(Snapshot(count, probe, h))
+                            count += 1
+                            gaps = 0
+                            probe += actual_nb  # variable stride!
+                        else:
+                            gaps += 1
+                            if gaps >= 3:
+                                break
+                            probe += SNAP_BLOCKS  # use fixed stride for gaps
+                    except OSError as e:
+                        if getattr(e, 'errno', None) != 22:
+                            print(f"[SCAN {label}] OSError at block {probe}: {e}")
+                        break
+                    except Exception as e:
+                        print(f"[SCAN {label}] Exception at block {probe}: {e}")
+                        break
+
+                print(f"[SCAN] base={snap_base} ({label}): fixed={len(fixed_results)}, variable={len(var_results)}")
+
+                # Pick the best result for this base
+                if len(var_results) > len(fixed_results):
+                    if len(var_results) > len(best_results):
+                        best_results = var_results
+                        best_label = f"{label} (variable stride, base={snap_base})"
                 else:
-                    old_snaps = results
+                    if len(fixed_results) > len(best_results):
+                        best_results = fixed_results
+                        best_label = f"{label} (fixed stride, base={snap_base})"
 
-            # Choose the list with more valid snapshots
-            if len(old_snaps) > len(new_snaps):
-                self.snapshots = old_snaps
-                msg = f"Found {len(self.snapshots)} snapshots (old firmware, base=1000)"
-            elif len(new_snaps) > 0:
-                self.snapshots = new_snaps
-                msg = f"Found {len(self.snapshots)} snapshots (new firmware, base=3072)"
+            self.snapshots = best_results
+            if self.snapshots:
+                msg = f"Found {len(self.snapshots)} snapshots ({best_label})"
             else:
-                self.snapshots = []
                 msg = "No snapshots found"
 
             self.after(0, self._populate_list)
@@ -369,30 +421,29 @@ class SDVisualizer(ctk.CTk):
 
         # Calculate total blocks for this image
         nb = (HEADER_SIZE + data_size + BLOCK_SIZE - 1) // BLOCK_SIZE
-        if nb <= 0 or nb > 16384:
+        # Full-res 2592x1944 = 19684 blocks; low-res 1296x972 = 4913 blocks
+        if nb <= 0 or nb > 20000:
             print(f"[LOAD] Invalid block count: {nb}")
             return None
 
-        # Read first block: header at offset 0, image data at offset HEADER_SIZE
-        hd = rblk(self.drive, snap.block)
-        if len(hd) < BLOCK_SIZE:
-            print(f"[LOAD] Short read on header block {snap.block}: {len(hd)} bytes")
+        import time
+        t0 = time.time()
+
+        # BULK READ: Read ALL blocks in ONE I/O call instead of 19684 separate reads.
+        # This is ~100x faster for full-resolution images.
+        print(f"[LOAD] Reading {nb} blocks ({nb*BLOCK_SIZE/1048576:.1f} MB) from block {snap.block}...")
+        all_data = rbulk(self.drive, snap.block, nb)
+        
+        if not all_data or len(all_data) < nb * BLOCK_SIZE:
+            print(f"[LOAD] Short bulk read: got {len(all_data)}, expected {nb*BLOCK_SIZE}")
             return None
-        img_bytes = bytearray(hd[HEADER_SIZE:BLOCK_SIZE])
 
-        # Read remaining blocks
-        for i in range(1, nb):
-            remaining = data_size - len(img_bytes)
-            if remaining <= 0:
-                break
-            chunk = rblk(self.drive, snap.block + i)
-            if not chunk:
-                print(f"[LOAD] Empty read at block {snap.block + i}")
-                break
-            img_bytes.extend(chunk[:remaining])
+        # Extract image data: skip header (first 64 bytes), take data_size bytes
+        img_data = bytes(all_data[HEADER_SIZE:HEADER_SIZE + data_size])
+        
+        load_time = time.time() - t0
+        print(f"[LOAD] Read complete in {load_time:.1f}s ({nb*BLOCK_SIZE/1048576/load_time:.1f} MB/s)")
 
-        # Trim to exact data_size
-        img_data = bytes(img_bytes[:data_size])
         if len(img_data) < expected_size:
             print(f"[LOAD] Incomplete image payload: got {len(img_data)}, expected {expected_size}")
             return None

@@ -20,7 +20,7 @@ extern uint8_t capture_buf[];
 #if CAPTURE_MODE == 1
 extern uint8_t save_buf[];
 #endif
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
 extern uint8_t batch_buf[];
 #endif
 
@@ -89,7 +89,8 @@ BaseType_t Capture_RequestSnapOnly(void)
 }
 
 /* ==================== SD AUTO-RECOVERY ==================== */
-static int SD_Reinit(void)
+/* NOTE: Not static — called from main.c (btn_thread) as well as storage_task. */
+int SD_Reinit(void)
 {
 #if PERF_DEBUG_LEVEL >= 1
     printf("[SD] === SD RECOVERY STARTED ===\n");
@@ -134,16 +135,24 @@ static int SD_Reinit(void)
 }
 
 /* ==================== SD STORE ==================== */
+/** Wait for SD card to be ready for next write.
+    MUST use HAL_SD_GetCardState() (sends CMD13 to the card) to query the
+    ACTUAL card state. HAL_SD_GetState() only returns the HAL driver's
+    software flag, which is already READY after HAL_SD_WriteBlocks returns
+    (blocking call), even though the card's internal NAND flash is still
+    erasing/programming. Writing while the card is PROGRAMMING causes
+    STA=0x5000 (Data CRC timeout) errors. */
 static int SD_WaitForReady(void)
 {
     uint32_t wait_ms = 0;
-    while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 2000) {
+    while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 5000) {
         vTaskDelay(pdMS_TO_TICKS(1));
         wait_ms++;
     }
-    if (wait_ms >= 2000) {
+    if (wait_ms >= 5000) {
 #if PERF_DEBUG_LEVEL >= 1
-        printf("[SD] timeout before next batch\n");
+        printf("[SD] timeout before next batch (card still PROGRAMMING after %lu ms)\n",
+               (unsigned long)wait_ms);
 #endif
         return -1;
     }
@@ -248,6 +257,17 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         }
 
         SCB_CleanDCache_by_Addr((uint32_t *)sd_batch_buf, blocks_in_batch * SD_BLOCK_SIZE);
+
+        /* HYBRID WAIT (adaptive + minimum gap):
+           1. Poll HAL_SD_GetCardState until the card reports TRANSFER ready
+              (may take 0-5000ms depending on card speed and internal flash state)
+           2. THEN wait 20ms for the card's internal NAND flash erase/program
+              cycles to complete. The CMD13 "ready" status is optimistic — the
+              card's host controller reports ready before the NAND flash is
+              actually done. Without this gap, STA=0x5000 (Data CRC timeout)
+              occurs on many SDXC cards when the next write arrives too early.
+           This combination: adaptive wait handles slow cards, fixed gap handles
+           the CMD13-vs-NAND timing mismatch that causes CRC errors. */
         t0 = HAL_GetTick();
         if (SD_WaitForReady() != 0) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -256,9 +276,12 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
             return -1;
         }
         wait_ms = HAL_GetTick() - t0;
+
+        /* Minimum inter-batch recovery gap (20ms) */
         t0 = HAL_GetTick();
         vTaskDelay(pdMS_TO_TICKS(15));
         uint32_t gap_ms = HAL_GetTick() - t0;
+
         t0 = HAL_GetTick();
         st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
         write_ms = HAL_GetTick() - t0;
@@ -328,6 +351,24 @@ void sensor_task(void *arg)
     printf("[SENSOR] Running\n");
     uint32_t capture_count = 0, cooldown = 0;
 
+    /* WAIT 5 SECONDS AFTER BOOT before checking for detections.
+       The VL53L5CX ToF sensor needs time after StartRanging + LearnBaseline
+       to stabilize its internal signal ranges and DSS configuration. During
+       this warmup period, the sensor can return spurious high-confidence
+       readings that trigger false detections, causing an immediate capture
+       on boot even without anything in front of the sensor. */
+    {
+        uint32_t t_boot = HAL_GetTick();
+        printf("[SENSOR] Waiting 5s for ToF stabilization...\n");
+        while (HAL_GetTick() - t_boot < 5000) {
+            if (VL53L5CX_Update()) {
+                (void)VL53L5CX_GetResult(); /* Discard readings during warmup */
+            }
+            vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        printf("[SENSOR] ToF ready, monitoring for detections...\n");
+    }
+
     while (1) {
         if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
         if (!VL53L5CX_Update()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
@@ -390,7 +431,11 @@ void camera_task(void *arg)
     extern volatile int system_ready;
     while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 
-#if CAPTURE_MODE == 1
+    /* NOTE:
+       - CAPTURE_MODE==1: camera already initialized in main_thread (pipe running).
+         camera_task only services ISP in idle loop and handles snap commands.
+       - CAPTURE_MODE==2: camera_task starts the continuous pipe here. */
+#if CAPTURE_MODE == 2
     CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
 #endif
 
@@ -398,7 +443,7 @@ void camera_task(void *arg)
 
     while (1) {
         CameraCmd_t cmd = {0};
-#if CAPTURE_MODE == 1
+#if CAPTURE_MODE == 1 || CAPTURE_MODE == 2
         CAM_IspUpdate();
 #endif
         if (xQueueReceive(camera_cmd_queue, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) continue;
@@ -433,12 +478,10 @@ void camera_task(void *arg)
 #endif
                 xSemaphoreGive(camera_ready_sem);
             }
-#elif CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
+#elif CAPTURE_MODE == 2 || CAPTURE_MODE == 4
             extern uint8_t batch_buf[];
 #if CAPTURE_MODE == 2
             rc = CAM_ContinuousBatchSnap(batch_buf, frame_size);
-#elif CAPTURE_MODE == 3
-            rc = CAM_StandbyBatchSnap(batch_buf, frame_size);
 #else
             /* CAPTURE_MODE == 4: Callback-Batch (continuous, NO stop/restart) */
             rc = CAM_CallbackBatchSnap(batch_buf, frame_size);
@@ -512,6 +555,18 @@ void storage_task(void *arg)
         if (cmd.type == STORAGE_CMD_SAVE) {
             PERF_MARK(g_perf_timer, STORAGE);
             int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
+            if (rc != 0) {
+                /* A single transient card hiccup (timeout / CRC) previously meant this
+                   image was silently lost. Reinit the peripheral and retry the SAME
+                   image ONCE before giving up, since g_sd_img_base_block was restored
+                   to the block this image was supposed to start at. */
+#if PERF_DEBUG_LEVEL >= 1
+                printf("[SD] FAIL — attempting recovery + retry...\n");
+#endif
+                if (SD_Reinit() == 0) {
+                    rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
+                }
+            }
             g_last_storage_rc = rc;
             PERF_MARK(g_perf_timer, DONE);
             if (rc == 0) {
@@ -521,14 +576,9 @@ void storage_task(void *arg)
 #endif
             } else {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[SD] FAIL %lu ms — attempting recovery...\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
+                printf("[SD] FAIL %lu ms — image LOST after retry\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
 #endif
-                int rec = SD_Reinit();
-                if (rec == 0) {
-#if PERF_DEBUG_LEVEL >= 1
-                    printf("[SD] Recovery OK — next capture will retry.\n");
-#endif
-                }
+                SD_Reinit();
             }
             xSemaphoreGive(storage_done_sem);
         }
@@ -555,7 +605,7 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
     WS2812_TurnOff();
 #endif
 
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
     /* Wait for ALL BATCH_FRAMES to be stored before returning */
     int frames_to_wait = g_last_batch_frames > 0 ? g_last_batch_frames : BATCH_FRAMES;
     for (int i = 0; i < frames_to_wait; i++) {

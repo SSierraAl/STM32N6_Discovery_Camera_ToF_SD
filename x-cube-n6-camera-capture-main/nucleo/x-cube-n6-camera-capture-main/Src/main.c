@@ -63,6 +63,7 @@
 
 /* ---- Time of Flight (VL53L5CX) - Modular Detection API ---- */
 #include "vl53l5cx_detection.h"
+#include "i2c_arbiter.h"
 
 /* ---- Application Modules ---- */
 #include "app_config.h"
@@ -160,6 +161,10 @@ extern void  vPortSetupTimerInterrupt(void);
 extern int   __uncached_bss_start__;
 extern int   __uncached_bss_end__;
 
+/* SD_Reinit is defined in app_thread.c (now non-static) — called by btn_thread
+   on SD write failure to recover the card before the next capture. */
+extern int SD_Reinit(void);
+
 
 /* ================================================================
    SECTION 5: RUNTIME STATE AND BUFFERS
@@ -186,9 +191,10 @@ uint8_t capture_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
 uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
 
 /** Save buffer — allocated in PSRAM.
-    In CONTINUOUS mode (CAPTURE_MODE=1), the camera writes continuously
-    to capture_buf. On ToF trigger, we stop the pipe, copy the frame
-    to save_buf, restart the pipe, then write save_buf to SD card.
+    In CONTINUOUS mode (CAPTURE_MODE=1), the camera double-buffers between
+    capture_buf/capture_buf2 continuously (no stop/restart). On ToF trigger,
+    CAM_ContinuousSnap() waits for the next completed frame and copies it
+    (once) into save_buf, which is what gets written to SD.
     In CALLBACK-BATCH mode (CAPTURE_MODE=4), save_buf is used as the
     second ping-pong buffer for hardware double-buffering (DCMIPP
     alternates DMA between capture_buf and save_buf automatically).
@@ -198,9 +204,18 @@ uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
 uint8_t save_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
+/** Second raw ping-pong buffer for CONTINUOUS mode's hardware double
+    buffering (CAPTURE_MODE=1 only). DCMIPP alternates DMA between
+    capture_buf and capture_buf2 forever while the pipe is running; on
+    trigger, CAM_ContinuousSnap() figures out which one just completed and
+    copies ONLY that one frame into save_buf.
+    NOTE: Not static — referenced via extern by app_cam.c. */
+#if CAPTURE_MODE == 1
+uint8_t capture_buf2[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
+#endif
+
 /** Batch buffer for batch capture mode — allocated in PSRAM.
-     Used in BATCH mode (CAPTURE_MODE=2), STANDBY-BATCH mode (CAPTURE_MODE=3),
-     and CALLBACK-BATCH mode (CAPTURE_MODE=4).
+    Used in BATCH mode (CAPTURE_MODE=2) and CALLBACK-BATCH mode (CAPTURE_MODE=4).
      On ToF trigger, we grab BATCH_FRAMES into batch_buf
      (each slot = SNAP_FRAME_SIZE), then send them to storage_task
      sequentially for SD writing.
@@ -208,7 +223,7 @@ uint8_t save_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
      Size = BATCH_FRAMES × SNAP_FRAME_SIZE
      For 1296x972@YUV422 (2.5MB/frame), BATCH_FRAMES=3 → 7.5MB total.
      NOTE: Not static — referenced via extern by app_thread.c (camera_task). */
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 3 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
 uint8_t batch_buf[BATCH_BUF_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
@@ -663,6 +678,9 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
     /* Write however many blocks we filled (at least 1 for the header) */
     uint32_t blocks_to_write = batch_blk;
 
+    /* Clean D-Cache so SD controller DMA sees the actual data in sd_batch_buf */
+    SCB_CleanDCache_by_Addr((uint32_t *)sd_batch_buf, blocks_to_write * SD_BLOCK_SIZE);
+
     HAL_StatusTypeDef st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, base, blocks_to_write, HAL_MAX_DELAY);
     if (st != HAL_OK) {
         printf("[SD Store] header batch FAIL (blocks %lu..%lu)\n",
@@ -712,6 +730,16 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
                        (unsigned long)wait_ms);
             }
         }
+
+        /* Clean D-Cache so SD controller DMA sees fresh data */
+        SCB_CleanDCache_by_Addr((uint32_t *)sd_batch_buf, blocks_in_batch * SD_BLOCK_SIZE);
+
+        /* Minimum inter-batch recovery gap for SD card internal NAND flash
+           programming. The card's CMD13 status may say "ready" but the physical
+           flash still needs time to complete erase/program cycles. Without this
+           15ms gap, STA=0x5000 (Data Command Response Timeout) occurs on many
+           SDXC cards when sending the next write command too quickly. */
+        vTaskDelay(pdMS_TO_TICKS(15));
 
         st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
         if (st != HAL_OK) {
@@ -818,7 +846,14 @@ static void btn_thread_fct(void *arg)
                        (unsigned long)(t_sd_end - t_sd_start),
                        (unsigned long)(t_sd_end - t_capture_start));
             } else {
-                printf("[BTN] >>> SD write FAILED!\n");
+                printf("[BTN] >>> SD write FAILED — reinitializing card...\n");
+                /* Reinit SD card so NEXT capture can still write (same pattern as
+                   storage_task retry-after-reinit). snap_base_block was NOT advanced,
+                   so the next snapshot will overwrite the same base block. */
+                SD_Reinit();
+                /* Reset snap_base_block back to the original base so the next
+                   capture writes to the correct sequential position. */
+                snap_base_block = saved_base + ((snap_count) * total_blocks);
             }
 
             /* Deactivate illumination and restore status LEDs */
@@ -853,6 +888,14 @@ static int main_freertos(void)
 {
     TaskHandle_t hdl;
 
+    /* Create the I2C1 arbiter mutex BEFORE any task starts. The camera
+       (BSP_I2C1_*) and the VL53L5CX ToF sensor (raw hi2c1 in platform.c)
+       are two independent HAL handles driving the same physical I2C1 bus;
+       without this mutex, concurrent use (e.g. CAPTURE_MODE=1's continuous
+       ISP servicing running alongside the ToF ranging loop) can corrupt
+       the bus protocol. See i2c_arbiter.h. */
+    I2C_Arbiter_Init();
+
     /* ---- Main init thread (lowest priority, deletes itself) ---- */
     hdl = xTaskCreateStatic(main_thread_fct, "main",
                             configMINIMAL_STACK_SIZE, NULL,
@@ -874,12 +917,19 @@ static int main_freertos(void)
                             camera_thread_stack, &camera_thread_cb);
     assert(hdl != NULL);
 
-    /* ---- Sensor task (ToF monitoring, highest priority for detection) ---- */
+    /* ---- Sensor task (ToF monitoring, highest priority for detection) ----
+       Not needed in ON-DEMAND mode (CAPTURE_MODE=0): capture is triggered
+       purely by the USER button via btn_thread, ToF stays fully off. */
+#if CAPTURE_MODE != 0
     hdl = xTaskCreateStatic(sensor_task, "sensor",
                             SENSOR_TASK_STACK_SIZE, NULL,
                             tskIDLE_PRIORITY + 4,
                             sensor_thread_stack, &sensor_thread_cb);
     assert(hdl != NULL);
+#else
+    (void)sensor_thread_stack;
+    (void)sensor_thread_cb;
+#endif
 
     /* ---- Button task (manual capture, ON-DEMAND mode only) ---- */
 #if CAPTURE_MODE == 0
@@ -1103,28 +1153,32 @@ static void main_thread_fct(void *arg)
         while (1);
     }
 
-    /* ---- Camera Standby Init (CAPTURE_MODE=3) / Callback Init (CAPTURE_MODE=4) ----
-       CRITICAL: Must be done BEFORE system_ready=1 to avoid I2C1 conflict.
-       The IMX335 camera and VL53L5CX ToF sensor share I2C1. If camera_task
-       tries to init camera after system_ready=1, it races with sensor_task
-       which is already using I2C1 for ToF → CMW_CAMERA_Init fails (ret=-7).
+    /* ---- Camera Init Before Tasks Start ----
+        CRITICAL: Must be done BEFORE system_ready=1 to avoid I2C1 conflict.
+        The IMX335 camera and VL53L5CX ToF sensor share I2C1. If camera_task
+        tries to init camera after system_ready=1, it races with sensor_task
+        which is already using I2C1 for ToF → CMW_CAMERA_Init fails (ret=-7).
 
-       Solution: Init camera HERE in main_thread (single-threaded, no ToF yet),
-       then put camera in standby mode. When ToF triggers later, camera just
-       wakes from standby (no I2C needed until wakeup). */
-#if CAPTURE_MODE == 3
-    printf("[INIT] Camera standby init (before tasks start to avoid I2C conflict)...\n");
-    if (CAM_StandbyInit(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS) != 0) {
-        printf("[WARN] Camera standby init FAILED! Captures may fail.\n");
-    } else {
-        printf("[INIT] Camera in STANDBY mode, ready for fast wakeup.\n");
-    }
-#elif CAPTURE_MODE == 4
+        Solution: Init camera HERE in main_thread (single-threaded, no ToF yet).
+        Mode 4: full init + warmup + standby. When ToF triggers, camera wakes.
+        Mode 1: full init + warmup + leaves pipe RUNNING. Camera_task does NOT
+        re-init — it just services ISP in the idle loop. */
+#if CAPTURE_MODE == 4
     printf("[INIT] Camera callback-batch init (before tasks start to avoid I2C conflict)...\n");
     if (CAM_CallbackInit(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS) != 0) {
         printf("[WARN] Camera callback init FAILED! Captures may fail.\n");
     } else {
         printf("[INIT] Camera in STANDBY mode, ready for callback-batch wakeup.\n");
+    }
+#elif CAPTURE_MODE == 1
+    printf("[INIT] Camera continuous init (before tasks start to avoid I2C conflict)...\n");
+    /* Mode 1: init camera + warmup, leave pipe running continuously.
+       capture_buf and capture_buf2 are the double-buffer targets.
+       camera_task will NOT call CAM_ContinuousStart again. */
+    if (CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS) != 0) {
+        printf("[WARN] Camera continuous init FAILED! Captures may fail.\n");
+    } else {
+        printf("[INIT] Camera CONTINUOUS mode active, pipe running.\n");
     }
 #endif
 
@@ -1139,8 +1193,6 @@ static void main_thread_fct(void *arg)
 
 #if CAPTURE_MODE == 2
     printf("[INFO] Capture Mode: BATCH (%d frames/detection)\n", BATCH_FRAMES);
-#elif CAPTURE_MODE == 3
-    printf("[INFO] Capture Mode: STANDBY-BATCH (%d frames/detection)\n", BATCH_FRAMES);
 #elif CAPTURE_MODE == 4
     printf("[INFO] Capture Mode: CALLBACK-BATCH (%d frames/detection, NO stop/restart)\n", CALLBACK_FRAMES);
 #elif CAPTURE_MODE == 1

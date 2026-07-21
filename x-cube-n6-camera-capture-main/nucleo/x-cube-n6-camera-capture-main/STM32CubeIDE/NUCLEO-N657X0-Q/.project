@@ -112,6 +112,11 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/freertos_tasks_c_additions.h</locationURI>
 		</link>
 		<link>
+			<name>Inc/i2c_arbiter.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Inc/i2c_arbiter.h</locationURI>
+		</link>
+		<link>
 			<name>Inc/imx335_isp_param_conf.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/imx335_isp_param_conf.h</locationURI>
@@ -340,6 +345,11 @@
 			<name>Src/fx_stm32_sd_driver_glue.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Src/fx_stm32_sd_driver_glue.c</locationURI>
+		</link>
+		<link>
+			<name>Src/i2c_arbiter.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Src/i2c_arbiter.c</locationURI>
 		</link>
 		<link>
 			<name>Src/main.c</name>
