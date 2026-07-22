@@ -432,11 +432,6 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/fx_stm32_sd_driver.h</locationURI>
 		</link>
 		<link>
-			<name>Src/Inc/fx_stm32_sram_driver.h</name>
-			<type>1</type>
-			<location>C:/Users/ssierra/Downloads/STM32_Workspace/Camera_Capture/x-cube-n6-camera-capture-main/Inc/fx_stm32_sram_driver.h</location>
-		</link>
-		<link>
 			<name>Src/Inc/stm32n6xx_hal_sd.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/stm32n6xx_hal_sd.h</locationURI>
