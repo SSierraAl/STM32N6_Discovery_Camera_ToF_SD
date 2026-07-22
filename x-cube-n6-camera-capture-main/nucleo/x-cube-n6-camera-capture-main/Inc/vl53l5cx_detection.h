@@ -29,8 +29,32 @@
 #include "vl53l5cx_api.h"
 
 /* ================================================================
-   Configuration Constants
-   ================================================================ */
+    Dual Sensor Configuration
+    ================================================================ */
+
+/** Enable dual ToF sensor mode.
+    0 = Single sensor (external only, always on)
+    1 = Dual sensor (external primary always on, camera secondary wake-on-detect) */
+#define VL53L5CX_DUAL_SENSOR              1
+
+/** I2C addresses for dual sensor mode.
+    Primary (external):  always at 0x29, before tube exit
+    Secondary (camera):  at 0x62, near camera, sleep mode by default */
+#define VL53L5CX_PRIMARY_ADDRESS          0x29
+#define VL53L5CX_SECONDARY_ADDRESS        0x31
+
+/** Secondary sensor confirmation timeout (ms).
+    After primary detection, we wait up to this long for the secondary
+    sensor to confirm before triggering capture.
+    Increase this value to give the secondary sensor more time to detect. */
+#define VL53L5CX_SECONDARY_CONFIRM_MS     5000
+
+/** Secondary sensor baseline samples (can be fewer for faster init). */
+#define VL53L5CX_SENSOR2_BASELINE_SAMPLES 15
+
+/* ================================================================
+    Configuration Constants
+    ================================================================ */
 
 /* Resolution selector:
    - 4 = VL53L5CX_RESOLUTION_4X4  (16 zones, faster, lower granularity)
@@ -49,7 +73,7 @@
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_BASELINE_SAMPLES 30
 #else
-#define VL53L5CX_DET_BASELINE_SAMPLES 10
+#define VL53L5CX_DET_BASELINE_SAMPLES 30
 #endif
 
 /* Resolution-specific detection thresholds */
@@ -112,8 +136,8 @@
 
 /* --- MODE 2: Adaptive Refresh (time-based) --- */
 #define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
-#define VL53L5CX_DET_REFRESH_WINDOW_SECS        10   /* Real-time window in seconds */
-#define VL53L5CX_DET_MAX_DETECTIONS             5    /* Max detections in window before refresh */
+#define VL53L5CX_DET_REFRESH_WINDOW_SECS        15   /* Real-time window in seconds */
+#define VL53L5CX_DET_MAX_DETECTIONS             3    /* Max detections in window before refresh */
 
 /* ================================================================
    Debug Output Configuration
@@ -123,7 +147,7 @@
    Format: ZFRAME,temp,sig0,dist0,base_sig0,base_dist0,motion0,...
    Per zone: 5 fields (signal, distance, baseline_signal, baseline_distance, motion)
    Enables: Signal vs Baseline plot, Distance plot, Motion plot, Drop% heatmap */
-#define VL53L5CX_DET_DEBUG_ZFRAME     0
+#define VL53L5CX_DET_DEBUG_ZFRAME     1
 #define VL53L5CX_DET_DEBUG_ZFRAME_INT 1    /* Emit ZFRAME every N frames in Update() */
 
 /* DEBUG MODE 2: ALLPARAM (for datalogger.py + analysis.py)
@@ -131,7 +155,7 @@
    Per zone: 12 fields (all parameters)
    Enables: Full parameter logging, detailed analysis, all heatmaps */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
-#define VL53L5CX_DET_DEBUG_ALLPARAM_INT 50   /* Emit ALLPARAM every N frames */
+#define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* Emit ALLPARAM every N frames */
 
 /* NOTE: Both ZFRAME and ALLPARAM can be enabled simultaneously.
    - ZFRAME: emitted every frame (compact, for real-time monitoring)
@@ -163,7 +187,14 @@ typedef struct {
 
 /* --- Initialization --- */
 int  VL53L5CX_Init(I2C_HandleTypeDef *hi2c);
+
+/** Unified power-up: selects single or dual sensor sequence automatically.
+    When VL53L5CX_DUAL_SENSOR==1: powers both ToF devices, re-addresses external to 0x62.
+    When VL53L5CX_DUAL_SENSOR==0: powers single external ToF at 0x29.
+    Call this from main(). */
 void VL53L5CX_PowerUp(void);
+
+/** Power down the ToF sensor. */
 void VL53L5CX_PowerDown(void);
 
 /* --- Configuration --- */
@@ -198,5 +229,88 @@ int  VL53L5CX_ScanI2CBus(void);
 void VL53L5CX_Validate(void);
 void VL53L5CX_ReadingTest(void);
 void VL53L5CX_MotionTest(void);
+
+/* ================================================================
+    Secondary Sensor State Machine
+    ================================================================ */
+
+typedef enum {
+    SENSOR2_STATE_SLEEP,      // Powered down (LPn LOW)
+    SENSOR2_STATE_WAKING,     // Power up in progress
+    SENSOR2_STATE_INITING,    // vl53l5cx_init() in progress
+    SENSOR2_STATE_READY,      // Initialized, ranging active
+    SENSOR2_STATE_MONITORING, // Waiting for confirmation
+    SENSOR2_STATE_CONFIRMED,  // Detection confirmed, capture triggered
+    SENSOR2_STATE_RETURNING   // Returning to sleep
+} Sensor2State_t;
+
+/* ================================================================
+    Secondary Sensor API (Dual Mode)
+    ================================================================
+    All functions below are only active when VL53L5CX_DUAL_SENSOR == 1.
+    The secondary sensor is the camera-mounted VL53L5CX at I2C address 0x62,
+    controlled via LPn pin PQ5.
+    ================================================================ */
+
+/** One-time hardware power-up: set LPn HIGH via PQ5.
+    Called once at boot. After this, sensor is powered and ready for Init(). */
+void VL53L5CX_Sensor2_PowerUp(void);
+
+/** Wake from ST sleep mode (VL53L5CX_POWER_MODE_WAKEUP).
+    Firmware and configuration retained — no re-init needed.
+    Call VL53L5CX_Sensor2_StartRanging() after this. */
+void VL53L5CX_Sensor2_Wake(void);
+
+/** Enter ST sleep mode (VL53L5CX_POWER_MODE_SLEEP).
+    Retains firmware + configuration. Baseline preserved.
+    Fast wake on next VL53L5CX_Sensor2_Wake() call. */
+void VL53L5CX_Sensor2_Sleep(void);
+
+/** Full hardware power-down: set LPn LOW via PQ5.
+    Use only for shutdown. Firmware/config LOST — full re-init required. */
+void VL53L5CX_Sensor2_PowerDown(void);
+
+/** One-time initialization after PowerUp().
+    Runs vl53l5cx_is_alive() + vl53l5cx_init().
+    @return 0 on success, -1 on failure */
+int  VL53L5CX_Sensor2_Init(void);
+
+/** Configure secondary sensor (resolution, integration time, frequency). */
+void VL53L5CX_Sensor2_Configure(void);
+
+/** Start continuous ranging on secondary sensor. */
+void VL53L5CX_Sensor2_StartRanging(void);
+
+/** Stop ranging on secondary sensor. */
+void VL53L5CX_Sensor2_StopRanging(void);
+
+/** Learn baseline for secondary sensor (shorter than primary). */
+void VL53L5CX_Sensor2_LearnBaseline(void);
+
+/** Refresh baseline from settle frames after wake.
+    Updates s_baseline_signal2[] with current conditions to avoid
+    false confirmations from temperature/ambient drift. */
+void VL53L5CX_Sensor2_RefreshBaseline(void);
+
+/** Update secondary sensor data and run detection.
+    @return 1 if data ready, 0 if not */
+int  VL53L5CX_Sensor2_Update(void);
+
+/** Check if secondary sensor detected an insect.
+    @return 1 if detected, 0 if not */
+int  VL53L5CX_Sensor2_IsInsectDetected(void);
+
+/** Get current secondary sensor state. */
+Sensor2State_t VL53L5CX_Sensor2_GetState(void);
+
+/** Get secondary sensor baseline ready flag.
+    @return 1 if baseline is ready, 0 if not */
+int  VL53L5CX_Sensor2_IsBaselineReady(void);
+
+/** Print ZFRAME for secondary sensor (S2 prefix). */
+void VL53L5CX_Sensor2_PrintZFrame(void);
+
+/** Print ALLPARAM for secondary sensor (S2 prefix). */
+void VL53L5CX_Sensor2_PrintAllZoneParams(void);
 
 #endif /* VL53L5CX_DETECTION_H */

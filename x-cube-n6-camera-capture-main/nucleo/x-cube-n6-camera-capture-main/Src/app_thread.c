@@ -336,14 +336,42 @@ void sensor_task(void *arg)
     }
 
 #if VL53L5CX_DET_RESOLUTION == 8
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 400, 30);
+    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 800, 15);
 #else
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 400, 30);
+    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 30, 15);
+
+#if VL53L5CX_DUAL_SENSOR
+    /* Initialize secondary sensor BEFORE configuring */
+    if (VL53L5CX_Sensor2_Init() != 0) {
+        printf("[WARN] Secondary ToF init failed, continuing with primary only\n");
+    } else {
+        VL53L5CX_Sensor2_Configure();
+    }
 #endif
+#endif
+
     VL53L5CX_StartRanging();
+
+#if VL53L5CX_DUAL_SENSOR
+    /* Start secondary sensor ranging (must happen BEFORE LearnBaseline) */
+    if (VL53L5CX_Sensor2_GetState() != SENSOR2_STATE_SLEEP) {
+        VL53L5CX_Sensor2_StartRanging();
+    }
+#endif
+
     VL53L5CX_LearnBaseline();
+
+#if VL53L5CX_DUAL_SENSOR
+    /* Learn secondary sensor baseline (must happen AFTER StartRanging) */
+    if (VL53L5CX_Sensor2_GetState() != SENSOR2_STATE_SLEEP) {
+        VL53L5CX_Sensor2_LearnBaseline();
+    }
+#endif
+
+    /* Only fail if PRIMARY sensor baseline is not ready (secondary is optional) */
     if (!VL53L5CX_IsBaselineReady()) {
         g_sensor_state = SENSOR_STATE_STOPPED;
+        printf("[ERROR] Primary ToF baseline not ready!\n");
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
@@ -351,31 +379,24 @@ void sensor_task(void *arg)
     printf("[SENSOR] Running\n");
     uint32_t capture_count = 0, cooldown = 0;
 
-    /* WAIT 5 SECONDS AFTER BOOT before checking for detections.
-       The VL53L5CX ToF sensor needs time after StartRanging + LearnBaseline
-       to stabilize its internal signal ranges and DSS configuration. During
-       this warmup period, the sensor can return spurious high-confidence
-       readings that trigger false detections, causing an immediate capture
-       on boot even without anything in front of the sensor. */
-    {
-        uint32_t t_boot = HAL_GetTick();
-        printf("[SENSOR] Waiting 5s for ToF stabilization...\n");
-        while (HAL_GetTick() - t_boot < 5000) {
-            if (VL53L5CX_Update()) {
-                (void)VL53L5CX_GetResult(); /* Discard readings during warmup */
-            }
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        printf("[SENSOR] ToF ready, monitoring for detections...\n");
-    }
-
     while (1) {
         if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
+
+        /* Update primary sensor */
         if (!VL53L5CX_Update()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+
+        /* Update secondary sensor if active */
+#if VL53L5CX_DUAL_SENSOR
+        if (VL53L5CX_Sensor2_GetState() == SENSOR2_STATE_MONITORING) {
+            (void)VL53L5CX_Sensor2_RunDetection();
+        }
+#endif
+
         g_debug_frame_count++;
         if (g_debug_frame_count >= 1) g_debug_frame_count = 0;
         if (cooldown > 0) cooldown--;
 
+        /* Check primary sensor detection */
         if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
             if (g_capture_busy) continue;
             g_capture_busy = 1;
@@ -383,10 +404,10 @@ void sensor_task(void *arg)
             (void)VL53L5CX_GetResult();
 
 #if PERF_DEBUG_LEVEL >= 1
-            printf(">>> INSECT DETECTED!\n");
+            printf(">>> INSECT DETECTED (Primary)!\n");
 #endif
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
-
+            //VL53L5CX_Sleep();
 #if WS2812_MODE == 1
             WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
 #elif WS2812_MODE == 0
@@ -402,6 +423,8 @@ void sensor_task(void *arg)
             int rc = Capture_RequestSnapshot(60000);
             PERF_STOP(t);
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+            //VL53L5CX_Wake();
+            VL53L5CX_StartRanging();
             g_sensor_state = SENSOR_STATE_RUNNING;
             g_capture_busy = 0;
             cooldown = 30;
