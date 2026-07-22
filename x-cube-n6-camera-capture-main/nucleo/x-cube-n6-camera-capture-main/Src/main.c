@@ -801,7 +801,7 @@ static void btn_thread_fct(void *arg)
                 continue;
 
             /* Activate illumination and status LEDs */
-            WS2812_TurnOn();
+            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
             BSP_LED_Off(LED_GREEN);
             BSP_LED_On(LED_RED);
 
@@ -845,7 +845,7 @@ static void btn_thread_fct(void *arg)
                 printf("[BTN] >>> SD card not ready (reinit failed)!\n");
                 BSP_LED_Off(LED_RED);
                 BSP_LED_On(LED_GREEN);
-                WS2812_TurnOff();
+                WS2812_FlashStop();
                 while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
                     vTaskDelay(pdMS_TO_TICKS(50));
                 continue;
@@ -885,7 +885,7 @@ static void btn_thread_fct(void *arg)
             /* Deactivate illumination and restore status LEDs */
             BSP_LED_Off(LED_RED);
             BSP_LED_On(LED_GREEN);
-            WS2812_TurnOff();
+            WS2812_FlashStop();
 
             /* Wait for button release */
             while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)

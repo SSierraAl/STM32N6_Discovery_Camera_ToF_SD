@@ -390,11 +390,11 @@ void sensor_task(void *arg)
 #if WS2812_MODE == 1
             WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
 #elif WS2812_MODE == 0
-            WS2812_TurnOn();
+            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
 #else
-            WS2812_TurnOn();
+            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
             vTaskDelay(pdMS_TO_TICKS(WS2812_INDICATOR_MS));
-            WS2812_TurnOff();
+            WS2812_FlashStop();
 #endif
 
             PerfTimer_t t;
@@ -602,7 +602,7 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
 #if WS2812_MODE == 1
     WS2812_FlashStop();
 #elif WS2812_MODE == 0
-    WS2812_TurnOff();
+    WS2812_FlashStop();
 #endif
 
 #if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
