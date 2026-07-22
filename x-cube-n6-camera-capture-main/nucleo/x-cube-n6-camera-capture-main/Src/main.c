@@ -719,11 +719,11 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
            process and update the card state machine. */
         {
             uint32_t wait_ms = 0;
-            while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 2000) {
+            while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 5000) {
                 vTaskDelay(pdMS_TO_TICKS(1));
                 wait_ms++;
             }
-            if (wait_ms >= 2000) {
+            if (wait_ms >= 5000) {
                 printf("[SD Store] Card timeout before block %lu (state=%lu after %lu ms)\n",
                        (unsigned long)current_block,
                        (unsigned long)HAL_SD_GetCardState(&hsd1),
@@ -837,8 +837,23 @@ static void btn_thread_fct(void *arg)
 
             uint32_t t_sd_start = HAL_GetTick();
 
+            /* CRITICAL FIX: Reinit SD card BEFORE each write. This recovers a
+               reconnected card. Without this, if the SD was removed during a
+               previous capture, the hsd1 state remains broken and ALL subsequent
+               writes fail even after the card is reconnected. */
+            if (SD_Reinit() != 0) {
+                printf("[BTN] >>> SD card not ready (reinit failed)!\n");
+                BSP_LED_Off(LED_RED);
+                BSP_LED_On(LED_GREEN);
+                WS2812_TurnOff();
+                while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                continue;
+            }
+
             if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
                 snap_count++;
+                SD_IMG_BASE_BLOCK = target_block + total_blocks;
                 uint32_t t_sd_end = HAL_GetTick();
                 printf("[BTN] >>> Snapshot #%lu SAVED (block %lu)\n",
                        (unsigned long)snap_num, (unsigned long)target_block);
@@ -847,14 +862,24 @@ static void btn_thread_fct(void *arg)
                        (unsigned long)(t_sd_end - t_sd_start),
                        (unsigned long)(t_sd_end - t_capture_start));
             } else {
-                printf("[BTN] >>> SD write FAILED — reinitializing card...\n");
-                /* Reinit SD card so NEXT capture can still write (same pattern as
-                   storage_task retry-after-reinit). snap_base_block was NOT advanced,
-                   so the next snapshot will overwrite the same base block. */
-                SD_Reinit();
-                /* Reset snap_base_block back to the original base so the next
-                   capture writes to the correct sequential position. */
-                snap_base_block = saved_base + ((snap_count) * total_blocks);
+                printf("[BTN] >>> SD write FAILED — attempting recovery + retry...\n");
+                if (SD_Reinit() == 0) {
+                    if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
+                        snap_count++;
+                        SD_IMG_BASE_BLOCK = target_block + total_blocks;
+                        uint32_t t_sd_end = HAL_GetTick();
+                        printf("[BTN] >>> Snapshot #%lu SAVED on retry (block %lu)\n",
+                               (unsigned long)snap_num, (unsigned long)target_block);
+                        printf("[PERF] Capture=%lums + SD=%lums = Total=%lums\n",
+                               (unsigned long)capture_elapsed,
+                               (unsigned long)(t_sd_end - t_sd_start),
+                               (unsigned long)(t_sd_end - t_capture_start));
+                    } else {
+                        printf("[BTN] >>> Snapshot #%lu LOST after retry\n", (unsigned long)snap_num);
+                    }
+                } else {
+                    printf("[BTN] >>> Snapshot #%lu LOST (reinit failed)\n", (unsigned long)snap_num);
+                }
             }
 
             /* Deactivate illumination and restore status LEDs */
