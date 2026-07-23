@@ -66,7 +66,6 @@ int VL53L5CX_Init(I2C_HandleTypeDef *hi2c)
 
     s_hi2c = hi2c;
     s_dev.platform.address = 0x29;
-    VL53L5CX_ScanI2CBus();
     /* Retry sensor detection (up to 10 attempts, 300ms each) */
     printf("[ToF] Waiting for sensor to respond...\n");
     for (uint8_t retry = 0; retry < 10; retry++) {
@@ -104,74 +103,85 @@ int VL53L5CX_Init(I2C_HandleTypeDef *hi2c)
     Call this from main() instead of VL53L5CX_PowerUpDevices() or VL53L5CX_PowerUp(). */
 void VL53L5CX_PowerUp(void)
 {
-
-
+	int i2cdevices = 0;
+	i2cdevices = VL53L5CX_ScanI2CBus();
 #if VL53L5CX_DUAL_SENSOR
 
-    GPIO_InitTypeDef GPIO_InitStruct = {0};
+	if(i2cdevices==3){
+		GPIO_InitTypeDef GPIO_InitStruct = {0};
 
-    __HAL_RCC_GPIOD_CLK_ENABLE();
-    __HAL_RCC_GPIOE_CLK_ENABLE();
-    __HAL_RCC_GPIOQ_CLK_ENABLE();
+		//__HAL_RCC_GPIOD_CLK_ENABLE();
+		//__HAL_RCC_GPIOE_CLK_ENABLE();
+		__HAL_RCC_GPIOQ_CLK_ENABLE();
 
+		GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
+		GPIO_InitStruct.Pull = GPIO_NOPULL;
+		GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+
+		/* Dual sensor: need PD0(PWR_EN), PE7(I2C_RST), PD6(LPn_ext), PQ5(LPn_cam) */
+		GPIO_InitStruct.Pin = GPIO_PIN_0;  /* PWR_EN */
+		HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+		GPIO_InitStruct.Pin = GPIO_PIN_7;  /* I2C_RST */
+		HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+		GPIO_InitStruct.Pin = GPIO_PIN_6;  /* LPn external */
+		HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+		GPIO_InitStruct.Pin = GPIO_PIN_5;  /* LPn camera */
+		HAL_GPIO_Init(GPIOQ, &GPIO_InitStruct);
+
+		printf("\n=== ToF Dual Sensor Power Up ===\n");
+
+		/* Power enable */
+		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
+		HAL_Delay(10);
+
+		/* I2C reset sequence */
+		HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
+		HAL_Delay(10);
+		HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_SET);
+		HAL_Delay(10);
+		HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
+		HAL_Delay(10);
+
+		/* Power external ToF first (camera still off) */
+		HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_5, GPIO_PIN_RESET);
+		HAL_Delay(100);
+		HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
+		HAL_Delay(10);
+
+		/* Change external ToF address from 0x29 to 0x62 so camera ToF can use 0x29 */
+		s_dev2.platform.address = 0x29;
+		uint8_t addr_st = vl53l5cx_set_i2c_address(&s_dev2, 0x62);
+		if (addr_st != 0) {
+			printf("[WARN] Address change failed (status=%d), external may conflict!\n", addr_st);
+		} else {
+			printf("[OK] External ToF address changed to 0x62\n");
+		}
+
+		/* Now power camera ToF */
+		HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_5, GPIO_PIN_SET);
+		HAL_Delay(100);
+
+		printf("[OK] Dual sensor power-up complete\n\n");
+
+	}
+#else
+	GPIO_InitTypeDef GPIO_InitStruct = {0};
     GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-
-    /* Dual sensor: need PD0(PWR_EN), PE7(I2C_RST), PD6(LPn_ext), PQ5(LPn_cam) */
     GPIO_InitStruct.Pin = GPIO_PIN_0;  /* PWR_EN */
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_7;  /* I2C_RST */
-    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
-
     GPIO_InitStruct.Pin = GPIO_PIN_6;  /* LPn external */
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
-
-    GPIO_InitStruct.Pin = GPIO_PIN_5;  /* LPn camera */
-    HAL_GPIO_Init(GPIOQ, &GPIO_InitStruct);
-
-    printf("\n=== ToF Dual Sensor Power Up ===\n");
-
-    /* Power enable */
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
-    HAL_Delay(10);
-
-    /* I2C reset sequence */
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
-    HAL_Delay(10);
+    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET);
+	HAL_Delay(10);
     HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_SET);
     HAL_Delay(10);
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
-    HAL_Delay(10);
-
-    /* Power external ToF first (camera still off) */
-    HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_5, GPIO_PIN_RESET);
-    HAL_Delay(100);
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
-    HAL_Delay(10);
-
-    /* Change external ToF address from 0x29 to 0x62 so camera ToF can use 0x29 */
-    s_dev2.platform.address = 0x29;
-    uint8_t addr_st = vl53l5cx_set_i2c_address(&s_dev2, 0x62);
-    if (addr_st != 0) {
-        printf("[WARN] Address change failed (status=%d), external may conflict!\n", addr_st);
-    } else {
-        printf("[OK] External ToF address changed to 0x62\n");
-    }
-
-    /* Now power camera ToF */
-    HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_5, GPIO_PIN_SET);
-    HAL_Delay(100);
-
-    printf("[OK] Dual sensor power-up complete\n\n");
-
-
-
-#else
-
-
-
+	HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_RESET);
+	HAL_Delay(10);
     printf("[OK] Sensor power-up complete\n\n");
 #endif
 }
@@ -673,10 +683,13 @@ void VL53L5CX_PrintBaselineFrame(void)
 
 int VL53L5CX_ScanI2CBus(void)
 {
-    if (!s_hi2c) return 0;
+    extern I2C_HandleTypeDef hi2c1;
+    I2C_HandleTypeDef *hi2c = s_hi2c ? s_hi2c : &hi2c1;
+
+    if (!hi2c) return 0;
     uint8_t found = 0;
     for (uint8_t addr = 0; addr < 128; addr++) {
-        if (HAL_I2C_IsDeviceReady(s_hi2c, addr << 1, 1, 10) == HAL_OK) {
+        if (HAL_I2C_IsDeviceReady(hi2c, addr << 1, 1, 10) == HAL_OK) {
             printf("  I2C device at 0x%02X\n", addr);
             found++;
         }
