@@ -66,7 +66,7 @@ int VL53L5CX_Init(I2C_HandleTypeDef *hi2c)
 
     s_hi2c = hi2c;
     s_dev.platform.address = 0x29;
-
+    VL53L5CX_ScanI2CBus();
     /* Retry sensor detection (up to 10 attempts, 300ms each) */
     printf("[ToF] Waiting for sensor to respond...\n");
     for (uint8_t retry = 0; retry < 10; retry++) {
@@ -104,6 +104,10 @@ int VL53L5CX_Init(I2C_HandleTypeDef *hi2c)
     Call this from main() instead of VL53L5CX_PowerUpDevices() or VL53L5CX_PowerUp(). */
 void VL53L5CX_PowerUp(void)
 {
+
+
+#if VL53L5CX_DUAL_SENSOR
+
     GPIO_InitTypeDef GPIO_InitStruct = {0};
 
     __HAL_RCC_GPIOD_CLK_ENABLE();
@@ -114,7 +118,6 @@ void VL53L5CX_PowerUp(void)
     GPIO_InitStruct.Pull = GPIO_NOPULL;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
 
-#if VL53L5CX_DUAL_SENSOR
     /* Dual sensor: need PD0(PWR_EN), PE7(I2C_RST), PD6(LPn_ext), PQ5(LPn_cam) */
     GPIO_InitStruct.Pin = GPIO_PIN_0;  /* PWR_EN */
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
@@ -144,13 +147,13 @@ void VL53L5CX_PowerUp(void)
 
     /* Power external ToF first (camera still off) */
     HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_5, GPIO_PIN_RESET);
-    HAL_Delay(10);
+    HAL_Delay(100);
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_6, GPIO_PIN_SET);
     HAL_Delay(10);
 
     /* Change external ToF address from 0x29 to 0x62 so camera ToF can use 0x29 */
-    s_dev.platform.address = 0x29;
-    uint8_t addr_st = vl53l5cx_set_i2c_address(&s_dev, 0x62);
+    s_dev2.platform.address = 0x29;
+    uint8_t addr_st = vl53l5cx_set_i2c_address(&s_dev2, 0x62);
     if (addr_st != 0) {
         printf("[WARN] Address change failed (status=%d), external may conflict!\n", addr_st);
     } else {
@@ -159,35 +162,15 @@ void VL53L5CX_PowerUp(void)
 
     /* Now power camera ToF */
     HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_5, GPIO_PIN_SET);
-    HAL_Delay(10);
+    HAL_Delay(100);
 
     printf("[OK] Dual sensor power-up complete\n\n");
 
+
+
 #else
-    /* Single sensor: need PD0(PWR_EN), PE7(I2C_RST), PQ5(LPn) */
-    GPIO_InitStruct.Pin = GPIO_PIN_0;  /* PWR_EN */
-    HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_7;  /* I2C_RST */
-    HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-    GPIO_InitStruct.Pin = GPIO_PIN_5;  /* LPn */
-    HAL_GPIO_Init(GPIOQ, &GPIO_InitStruct);
-
-    printf("\n=== ToF Single Sensor Power Up ===\n");
-
-    HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_SET);
-    HAL_Delay(10);
-
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
-    HAL_Delay(10);
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_SET);
-    HAL_Delay(10);
-    HAL_GPIO_WritePin(GPIOE, GPIO_PIN_7, GPIO_PIN_RESET);
-    HAL_Delay(10);
-
-    HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_5, GPIO_PIN_SET);
-    HAL_Delay(100);
 
     printf("[OK] Sensor power-up complete\n\n");
 #endif
@@ -654,7 +637,7 @@ void VL53L5CX_PrintZFrame(void)
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         uint8_t status = s_results.target_status[idx];
 
-        if (status == 0 || status == 5 || status == 9) {
+        if (status == 6 || status == 5 || status == 9) {
             cur_sig  = s_results.signal_per_spad[idx];
             cur_dist = s_results.distance_mm[idx];
         }
@@ -706,20 +689,6 @@ int VL53L5CX_ScanI2CBus(void)
    ================================================================ */
 
 #if VL53L5CX_DUAL_SENSOR
-
-void VL53L5CX_Sensor2_PowerUp(void)
-{
-    __HAL_RCC_GPIOQ_CLK_ENABLE();
-
-    s_sensor2_state = SENSOR2_STATE_WAKING;
-    printf("[S2] Powering up (PQ5 HIGH)...\n");
-
-    HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_5, GPIO_PIN_SET);
-    HAL_Delay(50);
-
-    s_sensor2_state = SENSOR2_STATE_INITING;
-    printf("[S2] Power-up done\n");
-}
 
 int VL53L5CX_Sensor2_Init(void)
 {
@@ -967,7 +936,7 @@ void VL53L5CX_Sensor2_PrintZFrame(void)
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         uint8_t status = s_results2.target_status[idx];
 
-        if (status == 0 || status == 5 || status == 9) {
+        if (status == 6 || status == 5 || status == 9) {
             cur_sig  = s_results2.signal_per_spad[idx];
             cur_dist = s_results2.distance_mm[idx];
         }
