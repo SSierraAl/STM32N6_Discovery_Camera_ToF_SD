@@ -1,35 +1,9 @@
 #!/usr/bin/env python3
 """
-VL53L5CX 4x4 Zone Monitor - Real-time signal visualization with ALL parameters
-===============================================================================
-Parses extended ZFRAME, ALLPARAM, and MOTION debug output from STM32 firmware.
-
-EXTENDED ZFRAME format (from vl53l5cx_detection.c):
-  ZFRAME,temp,sig0,base0,dist0,bdist0,amb0,sigma0,refl0,status0,spads0,targs0,drop0,valid0,...,motion0,...,motion15
-
-  Per zone (12 fields each):
-    - sigN    = current signal_per_spad (kcps/spad)
-    - baseN   = baseline signal_per_spad
-    - distN   = current distance_mm
-    - bdistN  = baseline distance_mm
-    - ambN    = ambient_per_spad (kcps/spad)
-    - sigmaN  = range_sigma_mm (mm)
-    - reflN   = reflectance (%)
-    - statusN = target_status (0/5/9 = valid)
-    - spadsN  = nb_spads_enabled
-    - targsN  = nb_target_detected
-    - dropN   = signal drop percentage (%)
-    - validN  = zone valid flag (0 or 1)
-
-  Global:
-    - temp    = silicon temperature (°C)
-    - motion0..motion15 = motion indicator per zone
-
-ALLPARAM format (detailed, emitted every 10 frames):
-  ALLPARAM,temp,sig0,base0,dist0,bdist0,amb0,sigma0,refl0,status0,spads0,targs0,drop0,valid0,...
-
-MOTION format:
-  MOTION,global1,global2,status,nb_detected,nb_agg,motion0,...,motion15
+VL53L5CX Zone Monitor - Real-time ToF Sensor Visualization
+============================================================
+Parses ZFRAME and EXT,ZFRAME debug output from STM32 firmware.
+Dual sensor mode: S1 (Primary) + EXT (Guardian)
 
 Usage:
   python vl53l5cx_zone_monitor.py
@@ -39,860 +13,311 @@ Requires:
 """
 
 import sys
-import os
-import csv
 import serial
 import numpy as np
 import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
-from datetime import datetime
 from collections import deque
 
 # ================================================================
 # CONFIGURATION
 # ================================================================
-SERIAL_PORT = 'COM8'   # <-- Change to your port
-BAUD_RATE   = 115200    # Must match STM32 UART baud rate
-MAX_POINTS  = 80        # History length on plots (reduced for speed)
+SERIAL_PORT      = 'COM7'
+BAUD_RATE        = 115200
+MAX_POINTS       = 100
+GRID_SIZE        = 4       # 4x4 grid
+NUM_ZONES        = GRID_SIZE * GRID_SIZE  # 16
+PLOT_ZONES       = 8       # zones to show on line charts
+COMPACT_FIELDS   = 5       # sig, dist, base_sig, base_dist, motion
+DUAL_SENSOR      = True
 
-# Resolution: set manually to match firmware (VL53L5CX_DET_RESOLUTION in header)
-#   4 = 4x4 (16 zones), 8 = 8x8 (64 zones)
-RESOLUTION  = 4         # MUST match firmware setting!
+# ================================================================
+# COLORS
+# ================================================================
+BG      = '#1a1a2e'
+PLOT_BG = '#16213e'
+TXT     = '#e0e0e0'
+CYAN    = '#00d4ff'
+GREEN   = '#00ff88'
+RED     = '#ff4466'
+YELLOW  = '#ffcc00'
+ORANGE  = '#ff8800'
+PINK    = '#ff66aa'
 
-# Data saving configuration (disabled for performance - CSV I/O is slow)
-SAVE_DATA = False        # Enable/disable data saving to CSV
-DATA_FOLDER = 'zone_data'  # Folder to store data files
-
-# PERFORMANCE: Only plot these zones on line charts (heatmaps still show all)
-# For 8x8: plot first 8 zones (one row) to avoid 512 curve updates/frame
-# For 4x4: plot all 16 zones
-PLOT_ZONES_LINE = 16      # Number of zones to show on line charts
-
-# Compact ZFRAME format: temp + 4 fields per zone (sig, base, dist, motion)
-COMPACT_ZONE_FIELDS = 4  # sig, base, dist, motion
-
-# Derived from RESOLUTION (do not change manually)
-if RESOLUTION == 8:
-    NUM_ZONES = 64
-    GRID_SIZE = 8
-else:
-    NUM_ZONES = 16
-    GRID_SIZE = 4
-
-# Compact zone field indices
-F_SIG    = 0  # signal_per_spad
-F_BASE   = 1  # baseline signal_per_spad
-F_DIST   = 2  # distance_mm
-F_MOTION = 3  # motion indicator
-
-# Color map for zones (viridis palette, extended for 8x8 = 64 zones)
-ZONE_COLORS_16 = [
-    (68, 1, 84), (72, 35, 116), (64, 67, 135), (52, 94, 141),
-    (41, 120, 142), (32, 144, 140), (34, 167, 132), (68, 190, 112),
-    (121, 209, 81), (189, 222, 38), (253, 231, 37), (253, 231, 37),
-    (253, 231, 37), (253, 231, 37), (253, 231, 37), (253, 231, 37),
+ZONE_COLORS = [
+    CYAN, '#00b8d4', '#0097a7', '#00838f',
+    '#26a69a', '#66bb6a', '#9ccc65', YELLOW,
 ]
 
-# Generate 64 colors for 8x8 mode (interpolate viridis)
-import colorsys
-def generate_viridis_colors(n):
-    colors = []
-    for i in range(n):
-        t = i / max(n - 1, 1)
-        # Approximate viridis: blue → purple → teal → green → yellow
-        if t < 0.25:
-            r, g, b = 68 + t*400, 1 + t*120, 84 + t*200
-        elif t < 0.5:
-            r, g, b = 168 - t*200, 31 + t*500, 234 - t*300
-        elif t < 0.75:
-            r, g, b = 68 + t*300, 181 + t*200, 134 - t*100
-        else:
-            r, g, b = 253, 231 - t*100, 37
-        colors.append((int(r), int(g), int(b)))
-    return colors
-
-ZONE_COLORS = ZONE_COLORS_16 if NUM_ZONES <= 16 else generate_viridis_colors(64)
+pg.setConfigOption('background', BG)
+pg.setConfigOption('foreground', TXT)
 
 # ================================================================
-# DATA SAVING SETUP
-# ================================================================
-def setup_data_saving():
-    """Create data folder and return filename for today's session."""
-    if not SAVE_DATA:
-        return None
-    
-    if not os.path.exists(DATA_FOLDER):
-        os.makedirs(DATA_FOLDER)
-    
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = os.path.join(DATA_FOLDER, f"zone_data_{timestamp}.csv")
-    
-    # Write CSV header
-    header = ['timestamp', 'frame']
-    for z in range(NUM_ZONES):
-        header.extend([
-            f'sig{z}', f'base{z}', f'dist{z}', f'bdist{z}',
-            f'amb{z}', f'sigma{z}', f'refl{z}', f'status{z}',
-            f'spads{z}', f'targs{z}', f'drop{z}', f'valid{z}',
-            f'motion{z}'
-        ])
-    header.extend(['temp', 'total_detections'])
-    
-    with open(filename, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(header)
-    
-    print(f"Data will be saved to: {filename}")
-    return filename
-
-
-# ================================================================
-# SERIAL CONNECTION
+# SERIAL
 # ================================================================
 try:
     ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1.0)
-    print(f"Connected to {SERIAL_PORT} @ {BAUD_RATE} baud")
+    print(f"[OK] {SERIAL_PORT} @ {BAUD_RATE}")
 except Exception as e:
-    print(f"Serial error: {e}")
-    sys.exit(1)
+    print(f"[ERR] {e}"); sys.exit(1)
 
-# Line accumulator for long ZFRAME lines (8x8 = ~4500 chars at 115200 baud)
 serial_buffer = ""
 
-# Initialize data saving
-data_file = setup_data_saving()
+# ================================================================
+# SENSOR CLASS
+# ================================================================
+class Sensor:
+    def __init__(self, name, color, tab_widget):
+        self.name = name
+        self.col  = color
+        self.frames = 0
+        self.temp = 0
+
+        # rolling data
+        self.sig    = {z: deque(maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
+        self.dist   = {z: deque(maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
+        self.drop   = {z: deque(maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
+        self.motion = {z: deque(maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
+
+        # tab
+        tab = QtWidgets.QWidget()
+        gl  = QtWidgets.QGridLayout(tab)
+        gl.setContentsMargins(6, 6, 6, 6)
+        gl.setSpacing(6)
+
+        # left: line plots
+        left = QtWidgets.QVBoxLayout()
+
+        self.p1 = self._plot("Signal per SPAD", 0, 1000)
+        self.p2 = self._plot("Distance (mm)",    0, 200)
+        self.p3 = self._plot("Drop %",           0, 30)
+        self.p3.addItem(pg.InfiniteLine(pos=6, angle=0,
+            pen=pg.mkPen(RED, width=1, style=QtCore.Qt.DashLine)))
+        self.p4 = self._plot("Motion",           0, 100)
+        self.p4.addItem(pg.InfiniteLine(pos=40, angle=0,
+            pen=pg.mkPen(ORANGE, width=1, style=QtCore.Qt.DashLine)))
+
+        left.addWidget(self.p1)
+        left.addWidget(self.p2)
+        left.addWidget(self.p3)
+        left.addWidget(self.p4)
+
+        # right: heatmap + info labels
+        right = QtWidgets.QVBoxLayout()
+
+        # drop heatmap
+        self.hm = pg.PlotWidget()
+        self.hm.setBackground(PLOT_BG)
+        self.hm.hideAxis('left'); self.hm.hideAxis('bottom')
+        self.hm.getViewBox().setAspectLocked(True)
+        self.img = pg.ImageItem()
+        self.hm.addItem(self.img)
+        # simple grayscale-like lookup: low=black, high=red
+        lut = np.zeros((256, 4), dtype=np.uint8)
+        for i in range(256):
+            t = i / 255.0
+            if t < 0.5:
+                lut[i] = [0, int(255 * (t * 2)), 0, 255]  # green
+            else:
+                lut[i] = [255, int(255 * (1 - (t - 0.5) * 2)), 0, 255]  # yellow->red
+        self.img.setLookupTable(lut)
+        self.img.setLevels([0, 25])
+        self.hm.setTitle(f"{GRID_SIZE}x{GRID_SIZE} Drop%")
+        right.addWidget(self.hm)
+
+        # info labels (plain QLabel, no pyqtgraph)
+        self.lbl_status = QtWidgets.QLabel(f"{name}: WAITING")
+        self.lbl_status.setStyleSheet(f"color:{TXT};background:{PLOT_BG};font-family:Consolas;font-size:11pt;padding:4px;border-radius:3px")
+        right.addWidget(self.lbl_status)
+
+        self.lbl_temp = QtWidgets.QLabel(f"{name}: --C")
+        self.lbl_temp.setStyleSheet(f"color:{YELLOW};background:{PLOT_BG};font-family:Consolas;font-size:10pt;padding:4px;border-radius:3px")
+        right.addWidget(self.lbl_temp)
+
+        gl.addLayout(left, 0, 0)
+        gl.addLayout(right, 0, 1)
+        tab_widget.addTab(tab, name)
+
+        # curves
+        self.c_sig = [self.p1.plot(pen=pg.mkPen(ZONE_COLORS[z%len(ZONE_COLORS)], width=1.2)) for z in range(PLOT_ZONES)]
+        self.c_dist = [self.p2.plot(pen=pg.mkPen(ZONE_COLORS[z%len(ZONE_COLORS)], width=1.2)) for z in range(PLOT_ZONES)]
+        self.c_drop = [self.p3.plot(pen=pg.mkPen(ZONE_COLORS[z%len(ZONE_COLORS)], width=1.2)) for z in range(PLOT_ZONES)]
+        self.c_mot  = [self.p4.plot(pen=pg.mkPen(ZONE_COLORS[z%len(ZONE_COLORS)], width=1.2)) for z in range(PLOT_ZONES)]
+
+    def _plot(self, title, ymin, ymax):
+        p = pg.PlotWidget(title=f" {title}")
+        p.setBackground(PLOT_BG)
+        p.setLabel('bottom', 'Samples', color=TXT)
+        p.showGrid(True, True, alpha=0.15)
+        p.setYRange(ymin, ymax)
+        return p
+
+    def update(self, zones, motion):
+        self.frames += 1
+        for z in range(NUM_ZONES):
+            self.sig[z].append(zones[z]['sig'])
+            self.dist[z].append(zones[z]['dist'])
+            self.drop[z].append(zones[z]['drop'])
+            self.motion[z].append(motion[z] if z < len(motion) else 0)
+
+        for z in range(PLOT_ZONES):
+            self.c_sig[z].setData(list(self.sig[z]))
+            self.c_dist[z].setData(list(self.dist[z]))
+            self.c_drop[z].setData(list(self.drop[z]))
+            self.c_mot[z].setData(list(self.motion[z]))
+
+        # heatmap
+        hm = np.zeros((GRID_SIZE, GRID_SIZE))
+        for z in range(NUM_ZONES):
+            hm[z // GRID_SIZE, z % GRID_SIZE] = zones[z]['drop']
+        self.img.setImage(hm, autoLevels=False)
+
+        # status
+        mz = max(range(NUM_ZONES), key=lambda z: zones[z]['drop'])
+        md = zones[mz]['drop']
+        if md > 6:
+            self.lbl_status.setText(f"[!!] {self.name} #{self.frames} DROP {md}% Z{mz}")
+            self.lbl_status.setStyleSheet(self.lbl_status.styleSheet().replace(TXT, RED))
+        else:
+            self.lbl_status.setText(f"[OK] {self.name} #{self.frames} maxDrop {md}%")
+            self.lbl_status.setStyleSheet(self.lbl_status.styleSheet().replace(TXT, GREEN))
+
+        # temp
+        self.temp = zones[0].get('_temp', self.temp)
+        tc = RED if self.temp > 60 else (ORANGE if self.temp > 45 else GREEN)
+        self.lbl_temp.setText(f"{self.name}: {self.temp}C")
+        self.lbl_temp.setStyleSheet(f"color:{tc};background:{PLOT_BG};font-family:Consolas;font-size:10pt;padding:4px;border-radius:3px")
+
+        # autoscale
+        mx = max(zones[z]['sig'] for z in range(NUM_ZONES))
+        if mx > 0: self.p1.setYRange(0, mx * 1.3)
+        mx2 = max(zones[z]['dist'] for z in range(NUM_ZONES))
+        if mx2 > 0: self.p2.setYRange(0, mx2 * 1.3)
+        mx3 = max(motion) if motion else 0
+        if mx3 > 0: self.p4.setYRange(0, max(mx3 * 1.5, 100))
+
+    def reset(self):
+        for z in range(NUM_ZONES):
+            for d in [self.sig[z], self.dist[z], self.drop[z], self.motion[z]]:
+                d.clear()
+        self.frames = 0
 
 # ================================================================
-# PYQTGRAPH SETUP
+# GUI
 # ================================================================
 app = QtWidgets.QApplication(sys.argv)
+app.setStyle('Fusion')
+pal = app.palette()
+pal.setColor(pg.QtGui.QPalette.Window, pg.mkColor(BG))
+pal.setColor(pg.QtGui.QPalette.WindowText, pg.mkColor(TXT))
+pal.setColor(pg.QtGui.QPalette.Button, pg.mkColor(PLOT_BG))
+app.setPalette(pal)
 
-# Create main window with tabbed interface
-win = QtWidgets.QWidget()
-win.setWindowTitle(f"VL53L5CX {GRID_SIZE}x{GRID_SIZE} Zone Monitor - All Parameters")
+win = QtWidgets.QMainWindow()
+win.setWindowTitle("VL53L5CX Zone Monitor")
 win.resize(1600, 1000)
+cw = QtWidgets.QWidget()
+win.setCentralWidget(cw)
+ml = QtWidgets.QVBoxLayout(cw)
 
-main_layout = QtWidgets.QVBoxLayout()
 tabs = QtWidgets.QTabWidget()
+ml.addWidget(tabs)
 
-# ================================================================
-# TAB 1: Signal & Distance (Original Views)
-# ================================================================
-tab1 = pg.GraphicsLayoutWidget(title="Signal & Distance")
-tab1.resize(1400, 600)
+gbar = QtWidgets.QLabel("WAITING FOR DATA...")
+gbar.setAlignment(QtCore.Qt.AlignCenter)
+gbar.setStyleSheet(f"color:{CYAN};font-family:Consolas;font-size:13pt;font-weight:bold;background:{PLOT_BG};padding:6px;border-radius:4px")
+ml.addWidget(gbar)
 
-# --- Plot 1: Signal per SPAD ---
-plot_signal = tab1.addPlot(title="Signal per SPAD (Current vs Baseline)")
-plot_signal.setYRange(0, 1000)
-plot_signal.setLabel('left', 'Signal', units='kcps/spad')
-plot_signal.setLabel('bottom', 'Samples')
-plot_signal.showGrid(x=True, y=True, alpha=0.3)
-plot_signal.addLegend(offset=(10, 10))
-
-# --- Plot 2: Distance ---
-plot_distance = tab1.addPlot(title="Distance (Current vs Baseline)")
-plot_distance.setYRange(0, 200)
-plot_distance.setLabel('left', 'Distance', units='mm')
-plot_distance.setLabel('bottom', 'Samples')
-plot_distance.showGrid(x=True, y=True, alpha=0.3)
-plot_distance.addLegend(offset=(10, 10))
-
-tabs.addTab(tab1, "Signal & Distance")
-
-# ================================================================
-# TAB 2: Detection Metrics
-# ================================================================
-tab2 = pg.GraphicsLayoutWidget(title="Detection Metrics")
-tab2.resize(1400, 600)
-
-# --- Plot 3: Signal Drop Percentage ---
-plot_drop = tab2.addPlot(title="Signal Drop % (Detection Metric)")
-plot_drop.setYRange(-5, 30)
-plot_drop.setLabel('left', 'Drop', units='%')
-plot_drop.setLabel('bottom', 'Samples')
-plot_drop.showGrid(x=True, y=True, alpha=0.3)
-plot_drop.addLegend(offset=(10, 10))
-
-threshold_line = pg.InfiniteLine(
-    pos=6,
-    angle=0,
-    pen=pg.mkPen(color='r', width=1.5, style=QtCore.Qt.DashLine),
-    label='Threshold (6%)',
-    labelOpts={'color': 'r', 'position': 0.95}
-)
-plot_drop.addItem(threshold_line, ignoreBounds=True)
-
-# --- Plot 4: Ambient Noise ---
-plot_ambient = tab2.addPlot(title="Ambient Noise per SPAD")
-plot_ambient.setYRange(0, 500)
-plot_ambient.setLabel('left', 'Ambient', units='kcps/spad')
-plot_ambient.setLabel('bottom', 'Samples')
-plot_ambient.showGrid(x=True, y=True, alpha=0.3)
-plot_ambient.addLegend(offset=(10, 10))
-
-# --- Plot 5: Range Sigma ---
-plot_sigma = tab2.addPlot(title="Range Sigma (Measurement Uncertainty)")
-plot_sigma.setYRange(0, 100)
-plot_sigma.setLabel('left', 'Sigma', units='mm')
-plot_sigma.setLabel('bottom', 'Samples')
-plot_sigma.showGrid(x=True, y=True, alpha=0.3)
-plot_sigma.addLegend(offset=(10, 10))
-
-tabs.addTab(tab2, "Detection Metrics")
-
-# ================================================================
-# TAB 3: Advanced Parameters
-# ================================================================
-tab3 = pg.GraphicsLayoutWidget(title="Advanced Parameters")
-tab3.resize(1400, 600)
-
-# --- Plot 6: Reflectance ---
-plot_reflect = tab3.addPlot(title="Reflectance (%)")
-plot_reflect.setYRange(0, 100)
-plot_reflect.setLabel('left', 'Reflectance', units='%')
-plot_reflect.setLabel('bottom', 'Samples')
-plot_reflect.showGrid(x=True, y=True, alpha=0.3)
-plot_reflect.addLegend(offset=(10, 10))
-
-# --- Plot 7: SPADs Enabled ---
-plot_spads = tab3.addPlot(title="SPADs Enabled")
-plot_spads.setYRange(0, 5000)
-plot_spads.setLabel('left', 'SPADs', units='count')
-plot_spads.setLabel('bottom', 'Samples')
-plot_spads.showGrid(x=True, y=True, alpha=0.3)
-plot_spads.addLegend(offset=(10, 10))
-
-# --- Plot 8: Motion Indicator ---
-plot_motion = tab3.addPlot(title="Motion Indicator per Zone")
-plot_motion.setYRange(0, 1000)
-plot_motion.setLabel('left', 'Motion', units='power')
-plot_motion.setLabel('bottom', 'Samples')
-plot_motion.showGrid(x=True, y=True, alpha=0.3)
-plot_motion.addLegend(offset=(10, 10))
-
-motion_threshold_line = pg.InfiniteLine(
-    pos=40,
-    angle=0,
-    pen=pg.mkPen(color='orange', width=1.5, style=QtCore.Qt.DashLine),
-    label='Motion Threshold (40)',
-    labelOpts={'color': 'orange', 'position': 0.95}
-)
-plot_motion.addItem(motion_threshold_line, ignoreBounds=True)
-
-tabs.addTab(tab3, "Advanced")
-
-# ================================================================
-# TAB 4: Heatmaps & Status
-# ================================================================
-tab4 = pg.GraphicsLayoutWidget(title="Heatmaps & Status")
-tab4.resize(1400, 600)
-
-# --- Heatmap 1: Signal Drop ---
-heatmap_drop_plot = tab4.addPlot(title=f"{GRID_SIZE}x{GRID_SIZE} Zone Heatmap (Signal Drop %)")
-heatmap_drop_plot.hideAxis('left')
-heatmap_drop_plot.hideAxis('bottom')
-heatmap_drop_view = heatmap_drop_plot.getViewBox()
-heatmap_drop_view.setAspectLocked(True)
-heatmap_drop_img = pg.ImageItem()
-heatmap_drop_view.addItem(heatmap_drop_img)
-
-# --- Heatmap 2: Distance ---
-heatmap_dist_plot = tab4.addPlot(title=f"{GRID_SIZE}x{GRID_SIZE} Zone Heatmap (Distance mm)")
-heatmap_dist_plot.hideAxis('left')
-heatmap_dist_plot.hideAxis('bottom')
-heatmap_dist_view = heatmap_dist_plot.getViewBox()
-heatmap_dist_view.setAspectLocked(True)
-heatmap_dist_img = pg.ImageItem()
-heatmap_dist_view.addItem(heatmap_dist_img)
-
-# --- Heatmap 3: Motion ---
-heatmap_motion_plot = tab4.addPlot(title=f"{GRID_SIZE}x{GRID_SIZE} Zone Heatmap (Motion)")
-heatmap_motion_plot.hideAxis('left')
-heatmap_motion_plot.hideAxis('bottom')
-heatmap_motion_view = heatmap_motion_plot.getViewBox()
-heatmap_motion_view.setAspectLocked(True)
-heatmap_motion_img = pg.ImageItem()
-heatmap_motion_view.addItem(heatmap_motion_img)
-
-# --- Heatmap 4: Reflectance ---
-tab4.nextRow()
-heatmap_reflect_plot = tab4.addPlot(title=f"{GRID_SIZE}x{GRID_SIZE} Zone Heatmap (Reflectance %)")
-heatmap_reflect_plot.hideAxis('left')
-heatmap_reflect_plot.hideAxis('bottom')
-heatmap_reflect_view = heatmap_reflect_plot.getViewBox()
-heatmap_reflect_view.setAspectLocked(True)
-heatmap_reflect_img = pg.ImageItem()
-heatmap_reflect_view.addItem(heatmap_reflect_img)
-
-# Set colormaps
-try:
-    colormap = pg.colormap.get('viridis')
-except Exception:
-    colormap = pg.ColorMap([0.0, 1.0], [[0, 0, 0], [255, 255, 255]])
-
-heatmap_drop_img.setColorMap(colormap)
-heatmap_drop_img.setLevels([0, 30])
-heatmap_dist_img.setColorMap(colormap)
-heatmap_dist_img.setLevels([0, 200])
-heatmap_motion_img.setColorMap(colormap)
-heatmap_motion_img.setLevels([0, 500])
-heatmap_reflect_img.setColorMap(colormap)
-heatmap_reflect_img.setLevels([0, 100])
-
-# Add zone labels to drop heatmap
-for row in range(GRID_SIZE):
-    for col in range(GRID_SIZE):
-        z = row * GRID_SIZE + col
-        font_size = 9 if GRID_SIZE <= 4 else 7
-        text = pg.TextItem(f"Z{z}", color=(200, 200, 200), anchor=(0.5, 0.5))
-        text.setPos(col + 0.5, row + 0.5)
-        text.setFont(pg.QtGui.QFont('Arial', font_size, pg.QtGui.QFont.Bold))
-        heatmap_drop_view.addItem(text)
-
-# --- Temperature Display ---
-temp_plot = tab4.addPlot()
-temp_plot.setMaximumHeight(60)
-temp_plot.hideAxis('left')
-temp_plot.hideAxis('bottom')
-temp_text = pg.TextItem("Temp: --°C", color='#FFFF00', anchor=(0.5, 0.5))
-temp_text.setFont(pg.QtGui.QFont('Arial', 14, pg.QtGui.QFont.Bold))
-temp_plot.addItem(temp_text, ignoreBounds=True)
-temp_text.setPos(0.5, 0.5)
-
-# --- Status Panel ---
-status_plot = tab4.addPlot()
-status_plot.setMaximumHeight(60)
-status_plot.hideAxis('left')
-status_plot.hideAxis('bottom')
-status_text = pg.TextItem("WAITING FOR DATA...", color='#888888', anchor=(0.5, 0.5))
-status_text.setFont(pg.QtGui.QFont('Arial', 14, pg.QtGui.QFont.Bold))
-status_plot.addItem(status_text, ignoreBounds=True)
-status_text.setPos(0.5, 0.5)
-
-tabs.addTab(tab4, "Heatmaps")
-
-# --- Add tabs to main layout ---
-main_layout.addWidget(tabs)
-win.setLayout(main_layout)
+s1 = Sensor("S1 (Primary)", CYAN, tabs)
+s2 = Sensor("EXT (Guardian)", PINK, tabs) if DUAL_SENSOR else None
 win.show()
 
-# ================================================================
-# DATA STORAGE - All parameters per zone
-# ================================================================
-# Signal data
-zone_signal_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-zone_baseline_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-
-# Distance data
-zone_distance_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-zone_bdistance_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-
-# Detection metrics
-zone_drop_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-zone_ambient_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-zone_sigma_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-
-# Advanced params
-zone_reflect_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-zone_spads_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-zone_status_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-zone_targets_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-zone_valid_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-
-# Motion data
-zone_motion_data = {z: deque([0] * MAX_POINTS, maxlen=MAX_POINTS) for z in range(NUM_ZONES)}
-
-# Global data
-temp_history = deque([0] * MAX_POINTS, maxlen=MAX_POINTS)
-motion_global1_history = deque([0] * MAX_POINTS, maxlen=MAX_POINTS)
-motion_global2_history = deque([0] * MAX_POINTS, maxlen=MAX_POINTS)
+total_det = 0
 
 # ================================================================
-# PLOT CURVES
+# PARSING
 # ================================================================
-signal_curves = {}
-signal_baseline_curves = {}
-distance_curves = {}
-distance_baseline_curves = {}
-drop_curves = {}
-ambient_curves = {}
-sigma_curves = {}
-reflect_curves = {}
-spads_curves = {}
-motion_curves = {}
-
-# Only create curves for PLOT_ZONES_LINE zones (not all 64) to avoid lag
-for z in range(PLOT_ZONES_LINE):
-    color = ZONE_COLORS[z % len(ZONE_COLORS)]
-    pen_main = pg.mkPen(color=color, width=2, style=QtCore.Qt.SolidLine)
-    pen_base = pg.mkPen(color=color, width=1, style=QtCore.Qt.DotLine)
-    label = f'Z{z}'
-
-    # Tab 1: Signal & Distance
-    signal_curves[z] = plot_signal.plot(name=label, pen=pen_main)
-    signal_baseline_curves[z] = plot_signal.plot(pen=pen_base)
-    distance_curves[z] = plot_distance.plot(name=label, pen=pen_main)
-    distance_baseline_curves[z] = plot_distance.plot(pen=pen_base)
-
-    # Tab 2: Detection Metrics
-    drop_curves[z] = plot_drop.plot(name=label, pen=pen_main)
-    ambient_curves[z] = plot_ambient.plot(name=label, pen=pen_main)
-    sigma_curves[z] = plot_sigma.plot(name=label, pen=pen_main)
-
-    # Tab 3: Advanced
-    reflect_curves[z] = plot_reflect.plot(name=label, pen=pen_main)
-    spads_curves[z] = plot_spads.plot(name=label, pen=pen_main)
-    motion_curves[z] = plot_motion.plot(name=label, pen=pen_main)
-
-frame_count = 0
-total_detections = 0
-current_temp = 0
-
-# Store detection events as vertical markers
-detection_markers = deque(maxlen=30)
-
-# ================================================================
-# CSV DATA WRITER
-# ================================================================
-def save_frame_to_csv(zones, motion, temp, detections):
-    """Append a single frame of data to the CSV file."""
-    if not SAVE_DATA or data_file is None:
-        return
-    
-    try:
-        timestamp = datetime.now().isoformat()
-        row = [timestamp, frame_count]
-        
-        for z in range(NUM_ZONES):
-            row.extend([
-                zones[z]['sig'], zones[z]['base'],
-                zones[z]['dist'], zones[z]['bdist'],
-                zones[z]['amb'], zones[z]['sigma'],
-                zones[z]['refl'], zones[z]['status'],
-                zones[z]['spads'], zones[z]['targs'],
-                zones[z]['drop'], zones[z]['valid'],
-                motion[z] if z < len(motion) else 0
-            ])
-        
-        row.extend([temp, detections])
-        
-        with open(data_file, 'a', newline='') as f:
-            writer = csv.writer(f)
-            writer.writerow(row)
-    except Exception as e:
-        print(f"Error saving to CSV: {e}")
-
-# ================================================================
-# PARSING FUNCTIONS
-# ================================================================
-
-def parse_compact_zframe_line(line):
-    """
-    Parse compact ZFRAME format:
-    ZFRAME,temp,sig0,base0,dist0,motion0,sig1,base1,dist1,motion1,...
-
-    Layout after split:
-      parts[0]   = "ZFRAME" (label)
-      parts[1]   = temp
-      parts[2:]  = zone data (4 fields per zone: sig, base, dist, motion)
-
-    Auto-detects resolution from field count:
-      (total_fields - 2) / 4 = number of zones
-    """
+def parse(line):
     parts = line.split(',')
-
-    # Expected: 1 (label) + 1 (temp) + NUM_ZONES * 4
-    expected_parts = 2 + NUM_ZONES * COMPACT_ZONE_FIELDS
-
-    # Auto-detect resolution from actual field count
-    actual_zones = (len(parts) - 2) // COMPACT_ZONE_FIELDS
-    if actual_zones not in (16, 64):
+    if (len(parts) - 2) // COMPACT_FIELDS != NUM_ZONES:
         return None
-    if actual_zones != NUM_ZONES:
-        print(f"\n[WARN] Resolution mismatch: firmware={actual_zones} zones, script={NUM_ZONES}. Adjust RESOLUTION config.")
-        return None
-
-    if len(parts) != expected_parts:
-        return None
-
     try:
         temp = int(parts[1])
     except ValueError:
         return None
-
-    zones = []
-    for z in range(actual_zones):
-        base_idx = 2 + z * COMPACT_ZONE_FIELDS
-        try:
-            sig  = int(parts[base_idx + F_SIG])
-            base = int(parts[base_idx + F_BASE])
-            dist = int(parts[base_idx + F_DIST])
-            mot  = int(parts[base_idx + F_MOTION])
-
-            # Compute drop% from signal vs baseline
-            drop_pct = 0
-            if base > 0:
-                drop_pct = abs(base - sig) * 100 // base
-
-            zones.append({
-                'sig': sig, 'base': base,
-                'dist': dist, 'bdist': 0,
-                'amb': 0, 'sigma': 0, 'refl': 0,
-                'status': 0, 'spads': 0, 'targs': 0,
-                'drop': drop_pct, 'valid': 1 if sig > 0 else 0
-            })
-        except (ValueError, IndexError):
-            return None
-
-    # Extract motion from zone data
-    motion = []
-    for z in range(actual_zones):
-        base_idx = 2 + z * COMPACT_ZONE_FIELDS
-        try:
-            motion.append(int(parts[base_idx + F_MOTION]))
-        except (ValueError, IndexError):
-            motion.append(0)
-
-    return {'temp': temp, 'zones': zones, 'motion': motion}
-
-
-def parse_legacy_zframe_line(line):
-    """
-    Parse legacy ZFRAME format (backward compatible, no temp):
-    ZFRAME,sig0,base0,dist0,bdist0,...,sig15,base15,dist15,bdist15
-
-    parts[0] = "ZFRAME", parts[1..] = zone data (4 fields × N zones)
-    No temp field, no motion field.
-    """
-    parts = line.split(',')
-    # Expected: 1 (label) + NUM_ZONES * 4
-    expected = 1 + NUM_ZONES * 4
-    if len(parts) != expected:
-        return None
-
-    zones = []
+    zones = []; motion = []
     for z in range(NUM_ZONES):
-        base_idx = 1 + z * 4
+        i = 2 + z * COMPACT_FIELDS
         try:
-            sig   = int(parts[base_idx])
-            base  = int(parts[base_idx + 1])
-            dist  = int(parts[base_idx + 2])
-            bdist = int(parts[base_idx + 3])
-
-            drop_pct = 0
-            if base > 0:
-                drop_pct = abs(base - sig) * 100 // base
-
-            zones.append({
-                'sig': sig, 'base': base,
-                'dist': dist, 'bdist': bdist,
-                'amb': 0, 'sigma': 0, 'refl': 0,
-                'status': 0, 'spads': 0, 'targs': 0,
-                'drop': drop_pct, 'valid': 1 if sig > 0 else 0
-            })
+            sig = int(parts[i]); dist = int(parts[i+1])
+            bs = int(parts[i+2]); bd = int(parts[i+3])
+            mot = int(parts[i+4])
+            dr = abs(bs - sig) * 100 // bs if bs > 0 else 0
+            zones.append({'sig': sig, 'base': bs, 'dist': dist, 'bdist': bd, 'drop': dr, '_temp': temp})
+            motion.append(mot)
         except (ValueError, IndexError):
             return None
-
-    return {'temp': 0, 'zones': zones, 'motion': [0] * NUM_ZONES}
-
-
-def parse_motion_line(line):
-    """
-    Parse MOTION format:
-    MOTION,global1,global2,status,nb_detected,nb_agg,motion0,...,motion15
-    """
-    parts = line.split(',')
-    if len(parts) < 6 + NUM_ZONES:
-        return None
-
-    try:
-        return {
-            'global1': int(parts[1]),
-            'global2': int(parts[2]),
-            'status': int(parts[3]),
-            'nb_detected': int(parts[4]),
-            'nb_agg': int(parts[5]),
-            'motion': [int(parts[6 + m]) for m in range(NUM_ZONES)]
-        }
-    except ValueError:
-        return None
-
+    return zones, motion
 
 # ================================================================
-# UPDATE FUNCTION
+# SERIAL LOOP
 # ================================================================
-def update_data():
-    global frame_count, total_detections, current_temp, serial_buffer
-
+def tick():
+    global serial_buffer, total_det
     try:
-        # Read all available bytes into buffer (handles long 8x8 ZFRAME lines)
         while ser.in_waiting > 0:
-            raw = ser.read(ser.in_waiting)
-            serial_buffer += raw.decode('utf-8', errors='ignore')
-
-        # Process complete lines from buffer
+            serial_buffer += ser.read(ser.in_waiting).decode('utf-8', errors='ignore')
         while '\n' in serial_buffer:
             line, serial_buffer = serial_buffer.split('\n', 1)
-            chunk = line.strip().rstrip('\r')
-            if not chunk:
+            line = line.strip().rstrip('\r')
+            if not line: continue
+
+            if line.startswith("EXT,ZFRAME"):
+                if s2:
+                    d = parse("ZFRAME" + line[4:])
+                    if d: s2.update(*d)
                 continue
-
-            # Handle DET lines (firmware-triggered detection events)
-            if chunk.startswith("DET,"):
-                total_detections += 1
-                det_parts = chunk.split(',')
-                det_num = det_parts[1] if len(det_parts) > 1 else "?"
-                zone_info = ", ".join(det_parts[2:]) if len(det_parts) > 2 else "unknown"
-                print(f"\n*** DETECTION #{total_detections} (FW #{det_num}) *** Zones: {zone_info}")
-
-                marker_pos = len(zone_drop_data[0]) - 1
-                for z in range(NUM_ZONES):
-                    m = pg.InfiniteLine(
-                        pos=marker_pos, angle=90,
-                        pen=pg.mkPen(color='w', width=1, style=QtCore.Qt.DotLine)
-                    )
-                    plot_drop.addItem(m, ignoreBounds=True)
-                    detection_markers.append(m)
-
-                status_text.setText(
-                    f"*** DETECTION #{total_detections} *** | Zones: {zone_info}"
-                )
-                status_text.setColor('#FF0000')
+            if line.startswith("ZFRAME"):
+                d = parse(line)
+                if d: s1.update(*d)
                 continue
-
-            # Handle MOTION lines
-            if chunk.startswith("MOTION,"):
-                motion_data = parse_motion_line(chunk)
-                if motion_data:
-                    motion_global1_history.append(motion_data['global1'])
-                    motion_global2_history.append(motion_data['global2'])
+            if line.startswith("[EXT]") and "Detection confirmed" in line:
+                total_det += 1
+                gbar.setText(f"[EXT->S1] Guardian woke primary! ({total_det})")
+                gbar.setStyleSheet(gbar.styleSheet().replace(CYAN, PINK))
                 continue
-
-            # Handle ZFRAME lines (per-zone data)
-            if chunk.startswith("ZFRAME"):
-                # Try compact format first, fall back to legacy
-                data = parse_compact_zframe_line(chunk)
-                if data is None:
-                    data = parse_legacy_zframe_line(chunk)
-                if data is None:
-                    continue
-
-                frame_count += 1
-                process_zone_data(data)
+            if line.startswith(">>> INSECT DETECTED"):
+                total_det += 1
+                gbar.setText(f"{line} ({total_det})")
+                gbar.setStyleSheet(gbar.styleSheet().replace(CYAN, RED))
                 continue
-
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"[ERR] {e}")
 
+# ================================================================
+# KEY: R = reset
+# ================================================================
+class KF(QtCore.QObject):
+    def eventFilter(self, obj, ev):
+        if ev.type() == ev.Type.KeyPress and ev.key() == QtCore.Qt.Key_R:
+            s1.reset()
+            if s2: s2.reset()
+            nonlocal_total()
+        return super().eventFilter(obj, ev)
 
-def process_zone_data(data):
-    """Process parsed zone data and update all plots."""
-    global current_temp
+def nonlocal_total():
+    global total_det
+    total_det = 0
 
-    zones = data['zones']
-    motion = data.get('motion', [0] * NUM_ZONES)
-    current_temp = data.get('temp', 0)
-
-    # Update temperature display
-    temp_text.setText(f"Temp: {current_temp}°C")
-    if current_temp > 60:
-        temp_text.setColor('#FF0000')
-    elif current_temp > 45:
-        temp_text.setColor('#FFA500')
-    else:
-        temp_text.setColor('#00FF00')
-
-    # Store data for ALL zones (needed for heatmaps)
-    for z in range(NUM_ZONES):
-        zone_signal_data[z].append(zones[z]['sig'])
-        zone_baseline_data[z].append(zones[z]['base'])
-        zone_distance_data[z].append(zones[z]['dist'])
-        zone_bdistance_data[z].append(zones[z]['bdist'])
-        zone_drop_data[z].append(zones[z]['drop'])
-        zone_ambient_data[z].append(zones[z]['amb'])
-        zone_sigma_data[z].append(zones[z]['sigma'])
-        zone_reflect_data[z].append(zones[z]['refl'])
-        zone_spads_data[z].append(zones[z]['spads'])
-        zone_status_data[z].append(zones[z]['status'])
-        zone_targets_data[z].append(zones[z]['targs'])
-        zone_valid_data[z].append(zones[z]['valid'])
-        zone_motion_data[z].append(motion[z] if z < len(motion) else 0)
-
-    # Update curves ONLY for PLOT_ZONES_LINE zones (not all 64 - too slow)
-    for z in range(PLOT_ZONES_LINE):
-        # Tab 1: Signal & Distance
-        signal_curves[z].setData(list(zone_signal_data[z]))
-        signal_baseline_curves[z].setData(list(zone_baseline_data[z]))
-        distance_curves[z].setData(list(zone_distance_data[z]))
-        distance_baseline_curves[z].setData(list(zone_bdistance_data[z]))
-
-        # Tab 2: Detection Metrics
-        drop_curves[z].setData(list(zone_drop_data[z]))
-        ambient_curves[z].setData(list(zone_ambient_data[z]))
-        sigma_curves[z].setData(list(zone_sigma_data[z]))
-
-        # Tab 3: Advanced
-        reflect_curves[z].setData(list(zone_reflect_data[z]))
-        spads_curves[z].setData(list(zone_spads_data[z]))
-        motion_curves[z].setData(list(zone_motion_data[z]))
-
-    # Update heatmaps (use GRID_SIZE: 4 for 4x4, 8 for 8x8)
-    heatmap_drop = np.zeros((GRID_SIZE, GRID_SIZE))
-    heatmap_dist = np.zeros((GRID_SIZE, GRID_SIZE))
-    heatmap_motion = np.zeros((GRID_SIZE, GRID_SIZE))
-    heatmap_reflect = np.zeros((GRID_SIZE, GRID_SIZE))
-
-    for z in range(NUM_ZONES):
-        row = z // GRID_SIZE
-        col = z % GRID_SIZE
-        heatmap_drop[row, col] = zones[z]['drop']
-        heatmap_dist[row, col] = zones[z]['dist']
-        heatmap_motion[row, col] = motion[z] if z < len(motion) else 0
-        heatmap_reflect[row, col] = zones[z]['refl']
-
-    # Rotate for correct orientation
-    heatmap_drop = np.rot90(heatmap_drop, k=-1)
-    heatmap_dist = np.rot90(heatmap_dist, k=-1)
-    heatmap_motion = np.rot90(heatmap_motion, k=-1)
-    heatmap_reflect = np.rot90(heatmap_reflect, k=-1)
-
-    heatmap_drop_img.setImage(heatmap_drop, autoLevels=False)
-    heatmap_dist_img.setImage(heatmap_dist, autoLevels=False)
-    heatmap_motion_img.setImage(heatmap_motion, autoLevels=False)
-    heatmap_reflect_img.setImage(heatmap_reflect, autoLevels=False)
-
-    # Save data to CSV
-    save_frame_to_csv(zones, motion, current_temp, total_detections)
-
-    # Update status text
-    max_drop_zone = max(range(NUM_ZONES), key=lambda z: zones[z]['drop'])
-    max_drop = zones[max_drop_zone]['drop']
-
-    if max_drop > 6:
-        status_text.setText(
-            f"FRAME #{frame_count} | DROP: {max_drop}% in Z{max_drop_zone} | "
-            f"SIG: {zones[max_drop_zone]['sig']}/{zones[max_drop_zone]['base']} | "
-            f"DIST: {zones[max_drop_zone]['dist']}/{zones[max_drop_zone]['bdist']}mm | "
-            f"AMBIENT: {zones[max_drop_zone]['amb']} | SIGMA: {zones[max_drop_zone]['sigma']}mm | "
-            f"REFLECT: {zones[max_drop_zone]['refl']}% | "
-            f"Detects: {total_detections}"
-        )
-        status_text.setColor('#FF3300')
-    else:
-        status_text.setText(
-            f"FRAME #{frame_count} | OK | "
-            f"MAX DROP: {max_drop}% in Z{max_drop_zone} | "
-            f"Detects: {total_detections}"
-        )
-        status_text.setColor('#00FF00')
-
-    # Auto-scale plots
-    max_sig = max(zones[z]['sig'] for z in range(NUM_ZONES))
-    max_base = max(zones[z]['base'] for z in range(NUM_ZONES))
-    sig_max = max(max_sig, max_base, 1)
-    if sig_max > 0:
-        plot_signal.setYRange(0, sig_max * 1.2)
-
-    max_dist = max(zones[z]['dist'] for z in range(NUM_ZONES))
-    max_bdist = max(zones[z]['bdist'] for z in range(NUM_ZONES))
-    dist_max = max(max_dist, max_bdist, 1)
-    if dist_max > 0:
-        plot_distance.setYRange(0, dist_max * 1.2)
-
-    max_amb = max(zones[z]['amb'] for z in range(NUM_ZONES))
-    if max_amb > 0:
-        plot_ambient.setYRange(0, max_amb * 1.2)
-
-    max_sigma_val = max(zones[z]['sigma'] for z in range(NUM_ZONES))
-    if max_sigma_val > 0:
-        plot_sigma.setYRange(0, max_sigma_val * 1.5)
-
-    max_drop_val = max(zones[z]['drop'] for z in range(NUM_ZONES))
-    drop_max = max(max_drop_val, 10)
-    if drop_max > 0:
-        plot_drop.setYRange(-5, drop_max * 1.5)
-
-    max_spads = max(zones[z]['spads'] for z in range(NUM_ZONES))
-    if max_spads > 0:
-        plot_spads.setYRange(0, max_spads * 1.2)
-
-    max_motion_val = max(motion) if motion else 0
-    if max_motion_val > 0:
-        plot_motion.setYRange(0, max(max_motion_val * 1.5, 100))
-        heatmap_motion_img.setLevels([0, max(max_motion_val * 1.5, 500)])
-
-
-def on_key(event):
-    if event.key() == QtCore.Qt.Key_R:
-        for z in range(NUM_ZONES):
-            for dq in [zone_signal_data[z], zone_baseline_data[z],
-                       zone_distance_data[z], zone_bdistance_data[z],
-                       zone_drop_data[z], zone_ambient_data[z],
-                       zone_sigma_data[z], zone_reflect_data[z],
-                       zone_spads_data[z], zone_motion_data[z]]:
-                dq.clear()
-                dq.extend([0] * MAX_POINTS)
-        global frame_count
-        frame_count = 0
-        print("Data reset!")
-
-# Install event filter for key press on the main window
-class KeyFilter(QtCore.QObject):
-    def eventFilter(self, obj, event):
-        if event.type() == event.Type.KeyPress:
-            on_key(event)
-        return super().eventFilter(obj, event)
-
-key_filter = KeyFilter()
-win.installEventFilter(key_filter)
-# Make window focusable so it receives key events
+win.installEventFilter(KF())
 win.setFocusPolicy(QtCore.Qt.StrongFocus)
 
-def close_app():
-    timer.stop()
-    if SAVE_DATA and data_file:
-        print(f"\nData saved to: {data_file}")
-        print(f"Total frames recorded: {frame_count}")
-    if ser.is_open:
-        ser.close()
-        print(f"Port closed. Frames: {frame_count}, Detections: {total_detections}")
-
-app.aboutToQuit.connect(close_app)
-
+# ================================================================
+# RUN
+# ================================================================
 timer = QtCore.QTimer()
-timer.timeout.connect(update_data)
-timer.start(50)  # 50ms = 20Hz update (was 10ms, reduced for performance)
-
-print("=" * 70)
-print(f"VL53L5CX {GRID_SIZE}x{GRID_SIZE} Zone Monitor - ALL PARAMETERS ENABLED")
-print("=" * 70)
-print(f"Port: {SERIAL_PORT} | Baud: {BAUD_RATE}")
-print(f"Resolution: {GRID_SIZE}x{GRID_SIZE} ({NUM_ZONES} zones) — must match firmware!")
-print("")
-print("Available Parameters per Zone:")
-print("  - Signal per SPAD (current + baseline)")
-print("  - Distance mm (current + baseline)")
-print("  - Ambient Noise per SPAD")
-print("  - Range Sigma mm")
-print("  - Reflectance %")
-print("  - Target Status")
-print("  - SPADs Enabled")
-print("  - Targets Detected")
-print("  - Signal Drop %")
-print("  - Zone Valid Flag")
-print("  - Motion Indicator")
-print("")
-print("Global Parameters:")
-print("  - Silicon Temperature")
-print("  - Motion Global Indicators")
-print("")
-print("Tabs: Signal & Distance | Detection Metrics | Advanced | Heatmaps")
-print("Press 'R' to reset data")
-if SAVE_DATA:
-    print(f"\nDATA SAVING: ENABLED -> {data_file}")
-else:
-    print("\nDATA SAVING: DISABLED")
-print("=" * 70)
-
-if __name__ == '__main__':
-    sys.exit(app.exec_())
+timer.timeout.connect(tick)
+timer.start(40)
+app.aboutToQuit.connect(lambda: ser.close() if ser.is_open else None)
+print(f"Port:{SERIAL_PORT} Grid:{GRID_SIZE}x{GRID_SIZE} Dual:{'yes' if DUAL_SENSOR else 'no'} [R=reset]")
+sys.exit(app.exec_())
