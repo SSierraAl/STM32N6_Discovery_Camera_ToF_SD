@@ -41,6 +41,11 @@ _gf = None
 _gfd = None
 _gpath = None
 
+# Serializes every open/close/read of the shared drive handles. Without this,
+# a second click (Scan / Refresh / Disconnect / image load) can swap the
+# handle out from under a running thread and crash it.
+_glock = threading.Lock()
+
 # ========================= STYLESHEET =========================
 # Modern, light-themed PyDracula-inspired UI
 MODERN_QSS = """
@@ -259,44 +264,25 @@ def dialog(parent, kind, title, text):
 
 # ========================= I/O HELPERS =========================
 def _open_source(path):
+    """Open `path` for reading and cache the handle. Only called with
+    _glock held. The path is cached ONLY after a successful open, so a
+    failed open (busy card, renumbering, missing admin rights) is retried
+    on the next call instead of poisoning the cache forever — the root
+    cause of the old "'NoneType' object has no attribute 'seek'". """
     global _gf, _gfd, _gpath
-    if _gpath == path: return
-    close_drive()
-    _gpath = path
+    if _gpath == path and (_gf is not None or _gfd is not None):
+        return
+    _close_locked()
+    _gpath = None
     if path.startswith('\\\\.\\PhysicalDrive'):
         flags = os.O_RDONLY | getattr(os, 'O_BINARY', 0)
         _gfd = os.open(path, flags)
     else:
         _gf = open(path, 'rb')
+    _gpath = path
 
-def rblk(path, blk):
-    global _gf, _gfd
-    _open_source(path)
-    offset = int(blk) * BLOCK_SIZE
-    if _gfd is not None:
-        if hasattr(os, 'pread'):
-            return os.pread(_gfd, BLOCK_SIZE, offset)
-        else:
-            os.lseek(_gfd, offset, os.SEEK_SET)
-            return os.read(_gfd, BLOCK_SIZE)
-    _gf.seek(offset, os.SEEK_SET)
-    return _gf.read(BLOCK_SIZE)
-
-def rbulk(path, start_blk, num_blks):
-    global _gf, _gfd
-    _open_source(path)
-    offset = int(start_blk) * BLOCK_SIZE
-    total_bytes = int(num_blks) * BLOCK_SIZE
-    if _gfd is not None:
-        if hasattr(os, 'pread'):
-            return os.pread(_gfd, total_bytes, offset)
-        else:
-            os.lseek(_gfd, offset, os.SEEK_SET)
-            return os.read(_gfd, total_bytes)
-    _gf.seek(offset, os.SEEK_SET)
-    return _gf.read(total_bytes)
-
-def close_drive():
+def _close_locked():
+    """Close cached handles. Only called with _glock held."""
     global _gf, _gfd, _gpath
     if _gf:
         _gf.close()
@@ -305,6 +291,52 @@ def close_drive():
         os.close(_gfd)
         _gfd = None
     _gpath = None
+
+def close_drive():
+    with _glock:
+        _close_locked()
+
+def _read_locked(path, offset, num_bytes):
+    """Open if needed and read. Only called with _glock held.
+    Returns (bytes, last_error)."""
+    _open_source(path)
+    try:
+        if isinstance(_gfd, int):
+            if hasattr(os, 'pread'):
+                return os.pread(_gfd, num_bytes, offset), None
+            os.lseek(_gfd, offset, os.SEEK_SET)
+            return os.read(_gfd, num_bytes), None
+        _gf.seek(offset, os.SEEK_SET)
+        return _gf.read(num_bytes), None
+    except Exception as e:
+        return None, e
+
+def _read_with_retry(path, offset, num_bytes, attempts=3, settle=0.4):
+    """Thread-safe read of `num_bytes` at absolute `offset`. All reads of the
+    shared handle are serialized under _glock; on failure the handle is
+    re-opened and retried (cards can take a moment to settle after a
+    format). Returns (bytes, first_error)."""
+    last_err = None
+    for i in range(attempts):
+        with _glock:
+            data, err = _read_locked(path, offset, num_bytes)
+        if data is not None:
+            return data, None
+        last_err = err
+        if i < attempts - 1:
+            with _glock:
+                _close_locked()
+            time.sleep(settle)
+    return None, last_err
+
+def rblk(path, blk):
+    data, _err = _read_with_retry(path, int(blk) * BLOCK_SIZE, BLOCK_SIZE)
+    return data
+
+def rbulk(path, start_blk, num_blks):
+    data, _err = _read_with_retry(path, int(start_blk) * BLOCK_SIZE,
+                                  int(num_blks) * BLOCK_SIZE)
+    return data
 
 def parse_hdr(b):
     if len(b) < HEADER_SIZE: return None
@@ -381,7 +413,7 @@ def zero_fill(path, start_blk, num_blks):
 # Gray-world + percentile protection.
 # Much more stable than pure fixed multipliers.
 
-def apply_robust_white_balance(rgb_img, strength=0.5):
+def apply_robust_white_balance(rgb_img, strength=0.5, stat_step=2):
     """
     Robust white balance for STM32 camera images.
     
@@ -396,23 +428,26 @@ def apply_robust_white_balance(rgb_img, strength=0.5):
         return rgb_img
 
     img = rgb_img.astype(np.float32)
-    h, w = img.shape[:2]
 
-    # Luminance
-    lum = img.mean(axis=2)
+    # Gain statistics are computed on a strided subsample (4x fewer pixels).
+    # The correction is global, so full resolution is only needed for the
+    # final multiply — this removes the most expensive part of the decode.
+    s = max(1, int(stat_step))
+    sub = img[::s, ::s, :]
+    lum = sub.mean(axis=2)
 
     # --- 1. White-patch: use the brightest 4 % of pixels -----------------
     threshold = np.percentile(lum, 96)
     bright_mask = lum >= threshold
 
     if bright_mask.sum() > 80:          # enough bright pixels
-        means = img[bright_mask].mean(axis=0)
+        means = sub[bright_mask].mean(axis=0)
     else:
         # --- 2. Fallback: classic mid-tone gray-world --------------------
         mid_mask = (lum > 40) & (lum < 210)
         if mid_mask.sum() < 100:
             return rgb_img              # image too extreme → leave it
-        means = img[mid_mask].mean(axis=0)
+        means = sub[mid_mask].mean(axis=0)
 
     means = np.maximum(means, 1.0)
     gray = means.mean()
@@ -442,8 +477,8 @@ def decode_image_data(img_data, width, height, pixel_format):
         arr = np.frombuffer(img_data, dtype=np.uint8, count=expected_bytes)
         arr = arr.reshape((height, width, 2))
 
-        bgr = cv2.cvtColor(arr, cv2.COLOR_YUV2BGR_YUY2)
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        # One conversion pass (YUV422 -> RGB) instead of YUV->BGR->RGB
+        rgb = cv2.cvtColor(arr, cv2.COLOR_YUV2RGB_YUY2)
 
         # Smart white-balance instead of fixed multipliers
         rgb = apply_robust_white_balance(rgb, strength=0.5)
@@ -467,10 +502,27 @@ class Snapshot:
 class ScanThread(QThread):
     progress = Signal(str)
     finished = Signal(list)
+    error = Signal(str)
 
     def __init__(self, drive):
         super().__init__()
         self.drive = drive
+        self._cancel = False
+
+    def cancel(self):
+        """Asks the scan to stop at the next checkpoint (used by the
+        'Cancel Scan' button). Safe to call from the GUI thread."""
+        self._cancel = True
+
+    def _cancelled(self):
+        if self._cancel:
+            return True
+        try:
+            if not self.isRunning():
+                self._cancel = True
+        except Exception:
+            pass
+        return self._cancel
 
     # Consecutive invalid headers tolerated before the stride scan gives up.
     # Generous on purpose: after a format done mid-run the first slots are
@@ -489,33 +541,48 @@ class ScanThread(QThread):
         data_size = h.get('data_size', 0)
         if w == 0 or hh == 0 or w > 4096 or hh > 4096: return False
         
-        expected = w * hh * 2
+        # Bytes per pixel depends on the format (YUV422/RGB565 = 2, GRAY8 = 1).
+        bpp = {0: 2, 1: 2, 2: 1}.get(h.get('pixel_format', 0), 2)
+        expected = w * hh * bpp
         if expected > 0:
             tolerance = max(BLOCK_SIZE * 4, expected * 0.01)
             if abs(data_size - expected) > tolerance: return False
         return True
 
     def run(self):
-        best_results = []
-        for snap_base, label in [(SNAP_BASE_NEW, "new"), (SNAP_BASE_OLD, "old")]:
-            self.progress.emit(f"Scanning base {snap_base} ({label})...")
-            
-            probe = snap_base
-            count = gaps = 0
-            var_results = []
+        try:
+            best_results = []
+            first_err = None
+            for snap_base, label in [(SNAP_BASE_NEW, "new"), (SNAP_BASE_OLD, "old")]:
+                if self._cancelled():
+                    return
+                self.progress.emit(f"Scanning base {snap_base} ({label})...")
 
-            # Variable stride scanning based on exact data_size
-            while count < 300:
-                try:
-                    raw = rblk(self.drive, probe)
-                    if len(raw) < HEADER_SIZE: break
+                probe = snap_base
+                count = gaps = 0
+                var_results = []
+
+                # Variable stride scanning based on exact data_size
+                while count < 300:
+                    if self._cancelled():
+                        return
+                    raw, err = _read_with_retry(self.drive,
+                                                probe * BLOCK_SIZE, BLOCK_SIZE)
+                    if raw is None:
+                        # Persistent read failure (card busy / no admin
+                        # rights): remember it, stop trying this base.
+                        if first_err is None:
+                            first_err = err
+                        break
+                    if len(raw) < HEADER_SIZE:
+                        break  # reached end of the readable card
                     h = parse_hdr(raw[:HEADER_SIZE])
-                    
+
                     if self.validate_header(h):
                         # Calculate exact blocks needed for this specific image
                         actual_nb = (HEADER_SIZE + h['data_size'] + BLOCK_SIZE - 1) // BLOCK_SIZE
                         if actual_nb < 1: actual_nb = SNAP_BLOCKS_FALLBACK
-                        
+
                         var_results.append(Snapshot(count, probe, h))
                         count += 1
                         gaps = 0
@@ -524,24 +591,35 @@ class ScanThread(QThread):
                         gaps += 1
                         if gaps >= self.MAX_HEADER_GAPS: break
                         probe += SNAP_BLOCKS_FALLBACK
-                except Exception:
-                    break
 
-            if len(var_results) > len(best_results):
-                best_results = var_results
+                if len(var_results) > len(best_results):
+                    best_results = var_results
 
-        if best_results:
-            self.finished.emit(best_results)
-            return
+            if self._cancelled():
+                return
 
-        # Phase 2: the stride scan found nothing. This happens e.g. when the
-        # card was formatted while the board kept running: the firmware kept
-        # its snap_count, so the first slots from block 3072 are empty and
-        # the real images start much further back. Fall back to a sequential
-        # magic search.
-        self.progress.emit("Stride scan found nothing - deep scanning first "
-                           f"{self.DEEP_SCAN_MB} MB for header magic...")
-        self.finished.emit(self._scan_magic())
+            if best_results:
+                self.finished.emit(best_results)
+                return
+
+            # Phase 2: the stride scan found nothing. This happens e.g. when the
+            # card was formatted while the board kept running: the firmware kept
+            # its snap_count, so the first slots from block 3072 are empty and
+            # the real images start much further back. Fall back to a sequential
+            # magic search.
+            self.progress.emit("Stride scan found nothing - deep scanning first "
+                               f"{self.DEEP_SCAN_MB} MB for header magic...")
+            results, err = self._scan_magic()
+            if results:
+                self.finished.emit(results)
+            elif first_err is not None:
+                self.error.emit(str(first_err))
+            elif err is not None:
+                self.error.emit(str(err))
+            else:
+                self.finished.emit([])
+        except Exception as e:
+            self.error.emit(str(e))
 
     def _scan_magic(self):
         """Sequentially read the card from SNAP_BASE_NEW in DEEP_CHUNK_MB
@@ -552,13 +630,20 @@ class ScanThread(QThread):
         magic = struct.pack('<I', HEADER_TAG)  # b'EGDI'
         chunk_blocks = self.DEEP_CHUNK_MB * 1024 * 1024 // BLOCK_SIZE
         limit = SNAP_BASE_NEW + self.DEEP_SCAN_MB * 1024 * 1024 // BLOCK_SIZE
+        err = None
 
         blk = SNAP_BASE_NEW
         while blk < limit and len(results) < 300:
+            if self._cancelled():
+                return results, err
             self.progress.emit(f"Deep scan: {blk * BLOCK_SIZE // (1024*1024)} / "
                                f"{limit * BLOCK_SIZE // (1024*1024)} MB ...")
-            data = rbulk(self.drive, blk, chunk_blocks)
-            if not data:
+            data, rerr = _read_with_retry(self.drive, blk * BLOCK_SIZE,
+                                          chunk_blocks * BLOCK_SIZE)
+            if data is None:
+                # Persistent read failure — stop and report it.
+                if err is None:
+                    err = rerr
                 break
             real_blocks = len(data) // BLOCK_SIZE
             if real_blocks < chunk_blocks:
@@ -579,17 +664,21 @@ class ScanThread(QThread):
                 search_from = off + 1
             blk += real_blocks
 
-        return results
+        return results, err
 
 class LoadImageThread(QThread):
-    finished = Signal(QImage)
-    error = Signal(str)
+    # (qimage, snapshot, seq) — the GUI drops stale results (the user
+    # clicked another row while this one was loading). Deliberately NOT
+    # named `finished`/`error`: shadowing the built-in QThread signals is
+    # fragile.
+    image_ready = Signal(QImage, object, int)
+    load_failed = Signal(object, int, str)   # (snapshot, seq, message)
 
-    def __init__(self, drive, snapshot):
+    def __init__(self, drive, snapshot, seq):
         super().__init__()
         self.drive = drive
         self.snapshot = snapshot
-
+        self.seq = seq
 
     def run(self):
         h = self.snapshot.header
@@ -606,7 +695,8 @@ class LoadImageThread(QThread):
         try:
             all_data = rbulk(self.drive, self.snapshot.block, nb)
             if not all_data or len(all_data) < nb * BLOCK_SIZE:
-                self.error.emit("Incomplete read from SD card.")
+                self.load_failed.emit(self.snapshot, self.seq,
+                                      "Incomplete read from SD card.")
                 return
 
             img_data = bytes(all_data[HEADER_SIZE:HEADER_SIZE + data_size])
@@ -615,14 +705,14 @@ class LoadImageThread(QThread):
             qimg = decode_image_data(img_data, w, hh, h.get('pixel_format', 0))
 
             if qimg is not None:
-                self.finished.emit(qimg)
+                self.image_ready.emit(qimg, self.snapshot, self.seq)
             else:
-                self.error.emit(
+                self.load_failed.emit(
+                    self.snapshot, self.seq,
                     f"Cannot decode image (format={h.get('pixel_format')}, "
-                    f"size={w}x{hh}, data_len={len(img_data)})"
-                )
+                    f"size={w}x{hh}, data_len={len(img_data)})")
         except Exception as e:
-            self.error.emit(str(e))
+            self.load_failed.emit(self.snapshot, self.seq, str(e))
 
 class ExtractThread(QThread):
     """Bulk-read the selected images and save them as PNG files."""
@@ -635,12 +725,19 @@ class ExtractThread(QThread):
         self.drive = drive
         self.snapshots = snapshots
         self.out_dir = out_dir
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
 
     def run(self):
         total = len(self.snapshots)
         saved = 0
         try:
             for i, snap in enumerate(self.snapshots, 1):
+                if self._cancel:
+                    self.failed.emit(f"Cancelled after saving {saved} image(s).")
+                    return
                 self.progress.emit(f"Extracting {i}/{total}: #{snap.idx+1:03d} ...")
                 h = snap.header
                 w, hh = h['width'], h['height']
@@ -682,12 +779,19 @@ class DeleteThread(QThread):
         super().__init__()
         self.drive = drive
         self.snapshots = snapshots
+        self._cancel = False
+
+    def cancel(self):
+        self._cancel = True
 
     def run(self):
         snaps = sorted(self.snapshots, key=lambda s: s.block, reverse=True)
         total = len(snaps)
         try:
             for i, snap in enumerate(snaps, 1):
+                if self._cancel:
+                    self.failed.emit("Cancelled — the remaining images were not erased.")
+                    return
                 h = snap.header
                 data_size = h['data_size']
                 expected_size = h['width'] * h['height'] * 2
@@ -957,6 +1061,17 @@ class FormatThread(QThread):
         except Exception as e:
             self.error.emit(f"Unexpected error during format:\n{e}", get_drives())
 
+class DriveListThread(QThread):
+    """Enumerate the disks (PowerShell Get-Disk) off the GUI thread so the
+    window opens instantly instead of waiting 2-5 s for the drive list."""
+    finished = Signal(list)
+
+    def run(self):
+        try:
+            self.finished.emit(get_disk_info())
+        except Exception:
+            self.finished.emit([])
+
 # ========================= GUI =========================
 class InteractiveGraphicsView(QGraphicsView):
     def __init__(self, parent=None):
@@ -974,10 +1089,9 @@ class InteractiveGraphicsView(QGraphicsView):
         self.current_scale = 1.0
 
     def set_image(self, qimage):
-        self.scene.clear()
-        self.image_item = QGraphicsPixmapItem(QPixmap.fromImage(qimage))
-        self.image_item.setTransformationMode(Qt.TransformationMode.SmoothTransformation)
-        self.scene.addItem(self.image_item)
+        # Reuse the persistent item (no scene.clear()) — cheaper and
+        # flicker-free when switching between images.
+        self.image_item.setPixmap(QPixmap.fromImage(qimage))
         self.scene.setSceneRect(self.image_item.boundingRect())
         self.fit_to_window()
 
@@ -1013,9 +1127,20 @@ class SDVisualizer(QMainWindow):
         self.drive = None
         self.snapshots = []
         self.current_snap = None
+        self._drive_list_thread = None
+        # Monotonic request counter: every image load gets a seq, results
+        # carrying an older seq are dropped (user already moved on).
+        self._load_seq = 0
+        # Strong refs to worker QThreads until they finish. A second fast
+        # click used to reassign self.load_thread and let the previous
+        # thread be garbage-collected WHILE STILL RUNNING -> "QThread:
+        # Destroyed while thread is still running" (the crash).
+        self._bg_threads = set()
 
         self._build_ui()
-        self.refresh_drives()
+        # Enumerate drives in the background so the window appears instantly
+        # (the Get-Disk PowerShell call can take a couple of seconds).
+        self.request_drive_list()
 
     def _build_ui(self):
         main_widget = QWidget()
@@ -1039,13 +1164,19 @@ class SDVisualizer(QMainWindow):
         toolbar_layout.addWidget(self.drive_combo)
 
         self.btn_refresh = QPushButton("↻ Refresh")
-        self.btn_refresh.clicked.connect(self.refresh_drives)
+        self.btn_refresh.clicked.connect(self.request_drive_list)
         toolbar_layout.addWidget(self.btn_refresh)
 
         self.btn_scan = QPushButton("Scan Snapshots")
         self.btn_scan.setObjectName("PrimaryButton")
         self.btn_scan.clicked.connect(self.scan_snapshots)
         toolbar_layout.addWidget(self.btn_scan)
+
+        self.btn_cancel_scan = QPushButton("✖ Cancel Scan")
+        self.btn_cancel_scan.setObjectName("DangerButton")
+        self.btn_cancel_scan.clicked.connect(self.cancel_scan)
+        self.btn_cancel_scan.hide()
+        toolbar_layout.addWidget(self.btn_cancel_scan)
 
         toolbar_layout.addSpacing(20)
 
@@ -1060,15 +1191,15 @@ class SDVisualizer(QMainWindow):
         toolbar_layout.addWidget(self.btn_delete)
 
         self.btn_disconnect = QPushButton("Disconnect")
-        self.btn_disconnect.clicked.connect(close_drive)
+        self.btn_disconnect.clicked.connect(self.disconnect_drive)
         toolbar_layout.addWidget(self.btn_disconnect)
 
         toolbar_layout.addStretch()
 
-        self.btn_format = QPushButton("⚠️ Format SD")
-        self.btn_format.setObjectName("DangerButton")
-        self.btn_format.clicked.connect(self.format_card)
-        toolbar_layout.addWidget(self.btn_format)
+        #self.btn_format = QPushButton("⚠️ Format SD")
+        #self.btn_format.setObjectName("DangerButton")
+        #self.btn_format.clicked.connect(self.format_card)
+        #toolbar_layout.addWidget(self.btn_format)
 
         self.btn_cancel_fmt = QPushButton("✖ Cancel Format")
         self.btn_cancel_fmt.setObjectName("DangerButton")
@@ -1157,16 +1288,18 @@ class SDVisualizer(QMainWindow):
         self.statusBar().showMessage("Ready — run as Administrator for physical-disk access.")
 
     # --- Logic Methods ---
-    def refresh_drives(self, drives=None):
-        """Re-enumerate disks. Drives are listed via Get-Disk (no device
-        opens), so a busy or just-reformatted card cannot 'disappear'.
-        The previously selected drive is re-selected by its raw path."""
+    def refresh_drives(self, disk_infos=None):
+        """Pure UI update from a disk list (see DriveListThread). Drives are
+        listed via Get-Disk (no device opens), so a busy or just-reformatted
+        card cannot 'disappear'. The previously selected drive is re-selected
+        by its raw path."""
         previous = self.drive
+        self._load_seq += 1  # invalidate any in-flight image loads
         close_drive()
         self.drive_combo.blockSignals(True)
         self.drive_combo.clear()
         sel_idx = 0
-        for d in get_disk_info():
+        for d in (disk_infos if disk_infos is not None else []):
             if d['num'] == 0:
                 continue
             path = f"\\\\.\\PhysicalDrive{d['num']}"
@@ -1192,53 +1325,158 @@ class SDVisualizer(QMainWindow):
     def set_drive(self, index):
         if index is not None and index >= 0:
             self.drive = self.drive_combo.itemData(index)
+            self._load_seq += 1  # invalidate any in-flight image loads
+            close_drive()  # invalidate the cached handle for the previous drive
         else:
             self.drive = None
+            self._load_seq += 1
+
+    # --- Drive listing (background) + UI busy-state helpers ---
+    def request_drive_list(self):
+        """Asynchronously (re)enumerate disks in the background so the window
+        opens immediately; the combo box fills in when the list arrives."""
+        self._set_ui_busy(True, wait_drives=True)
+        self.statusBar().showMessage("Detecting drives...")
+        self._drive_list_thread = DriveListThread()
+        self._drive_list_thread.finished.connect(self._on_drives_listed)
+        self._track_bg(self._drive_list_thread, self._drive_list_thread.finished)
+        self._drive_list_thread.start()
+
+    def _track_bg(self, th, *done_sigs):
+        """Hold a strong reference to a worker QThread until one of its
+        completion signals fires, so it is never garbage-collected while it
+        is still running (the root cause of the crash on rapid clicking)."""
+        self._bg_threads.add(th)
+        for sig in done_sigs:
+            sig.connect(lambda *a, t=th: self._bg_threads.discard(t))
+
+    @Slot(list)
+    def _on_drives_listed(self, infos):
+        self._set_ui_busy(False)
+        self.refresh_drives(infos)
+        self.statusBar().showMessage(
+            f"{self.drive_combo.count()} removable disk(s) detected — "
+            "run as Administrator for physical-disk access.")
+
+    def _op_running(self):
+        for name in ("scan_thread", "extract_thread", "delete_thread",
+                     "format_thread", "_drive_list_thread"):
+            t = getattr(self, name, None)
+            if t is not None and t.isRunning():
+                return True
+        return False
+
+    def _set_ui_busy(self, busy, wait_drives=False):
+        """Enable/disable the drive-dependent buttons. While wait_drives=True
+        the combo box and Refresh are also locked (the drive list is being
+        (re)built, so a stale selection must not trigger set_drive)."""
+        for b in (self.btn_scan, self.btn_extract, self.btn_delete,
+                  self.btn_disconnect):
+            b.setEnabled(not busy)
+        self.drive_combo.setEnabled(not busy and not wait_drives)
+        self.btn_refresh.setEnabled(not busy and not wait_drives)
+        scanning = (getattr(self, "scan_thread", None) is not None
+                    and self.scan_thread.isRunning())
+        self.btn_cancel_scan.setVisible(scanning)
+
+    def disconnect_drive(self):
+        close_drive()
+        self.statusBar().showMessage("Drive handle closed — it reopens on next use.")
 
     def scan_snapshots(self):
-        if not self.drive: return
+        if not self.drive:
+            return
+        if self._op_running():
+            self.statusBar().showMessage("Please wait for the current operation to finish...")
+            return
         self.statusBar().showMessage("Scanning SD Card using variable stride...")
+        self._load_seq += 1
+        self.current_snap = None
         self.listbox.clear()
         self.snapshots.clear()
+        self._set_ui_busy(True)
+        self.btn_scan.setEnabled(False)
+        self.btn_cancel_scan.setVisible(True)
 
         self.scan_thread = ScanThread(self.drive)
         self.scan_thread.progress.connect(lambda msg: self.statusBar().showMessage(msg))
         self.scan_thread.finished.connect(self._on_scan_finished)
+        self.scan_thread.error.connect(self._on_scan_error)
         self.scan_thread.start()
+
+    def cancel_scan(self):
+        th = getattr(self, "scan_thread", None)
+        if th is not None and th.isRunning():
+            th.cancel()
+            self.statusBar().showMessage("Cancelling scan...")
 
     @Slot(list)
     def _on_scan_finished(self, results):
+        self._set_ui_busy(False)
         self.snapshots = results
+        self.current_snap = None
         for s in self.snapshots:
             fmt = FMT_NAME.get(s.header['pixel_format'], "?")
             ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(s.header.get('timestamp', 0)))
             self.listbox.addItem(f"#{s.idx+1:03d} | {s.header['width']}x{s.header['height']} | {fmt} | {ts}")
-        
+
         self.statusBar().showMessage(f"Scan complete. Found {len(self.snapshots)} snapshots.")
+
+    @Slot(str)
+    def _on_scan_error(self, msg):
+        self._set_ui_busy(False)
+        hint = ""
+        low = msg.lower()
+        if "denied" in low or "permission" in low or "winerror 5" in low:
+            hint = ("\n\nThe card could not be opened for raw reading.\n"
+                    "Make sure you are running this program AS ADMINISTRATOR "
+                    "and that no other program (Explorer, antivirus) has it locked.")
+        dialog(self, "critical", "Scan failed",
+               f"Could not read the SD card:\n{msg}{hint}")
 
     def on_select(self, row):
         if row < 0 or row >= len(self.snapshots): return
+        # While a scan / extract / delete / format is running, the card is
+        # busy and its block map may be changing — ignore list clicks so we
+        # never read a shared handle out from under another thread.
+        if any(getattr(self, n, None) is not None and getattr(self, n, None).isRunning()
+               for n in ("scan_thread", "extract_thread", "delete_thread", "format_thread")):
+            return
         self.current_snap = self.snapshots[row]
-        
+
         if self.current_snap.qimage:
             self.viewer.set_image(self.current_snap.qimage)
             self.statusBar().showMessage("Loaded from cache.")
             return
 
-        self.statusBar().showMessage(f"Loading {self.current_snap.header['width']}x{self.current_snap.header['height']} image...")
-        self.load_thread = LoadImageThread(self.drive, self.current_snap)
-        self.load_thread.finished.connect(self._on_load_finished)
-        self.load_thread.error.connect(lambda e: self.statusBar().showMessage(f"Error: {e}"))
-        self.load_thread.start()
+        self._load_seq += 1
+        snap = self.current_snap
+        self.statusBar().showMessage(f"Loading {snap.header['width']}x{snap.header['height']} image...")
+        th = LoadImageThread(self.drive, snap, self._load_seq)
+        th.image_ready.connect(self._on_image_ready)
+        th.load_failed.connect(self._on_load_failed)
+        self._track_bg(th, th.image_ready, th.load_failed, th.finished)
+        th.start()
 
-    @Slot(QImage)
-    def _on_load_finished(self, qimg):
-        self.current_snap.qimage = qimg
+    @Slot(QImage, object, int)
+    def _on_image_ready(self, qimg, snap, seq):
+        # Stale-result guard: apply only if this is the latest request AND
+        # that same image is still the selected one. The decoded pixels are
+        # still cached on `snap`, so a later re-click is instant.
+        if seq != self._load_seq or self.current_snap is not snap:
+            return
+        snap.qimage = qimg
         self.viewer.set_image(qimg)
-        
+
         # Reset scale radio buttons to "Fit"
         self.scale_group.button(0).setChecked(True)
         self.statusBar().showMessage("Image loaded.")
+
+    @Slot(object, int, str)
+    def _on_load_failed(self, snap, seq, msg):
+        if seq != self._load_seq or self.current_snap is not snap:
+            return
+        self.statusBar().showMessage(f"Error: {msg}")
 
     def save_image(self, scale_mode="original"):
         if not self.current_snap or not self.current_snap.qimage:
@@ -1298,6 +1536,9 @@ class SDVisualizer(QMainWindow):
         if not rows:
             dialog(self, "warning", "Warning", "Select one or more images first.")
             return
+        if self._op_running():
+            self.statusBar().showMessage("Please wait for the current operation to finish...")
+            return
         snaps = [self.snapshots[self.listbox.row(i)] for i in rows]
         out_dir = QFileDialog.getExistingDirectory(
             self, "Select Output Directory", options=QFileDialog.Option.DontUseNativeDialog)
@@ -1309,12 +1550,15 @@ class SDVisualizer(QMainWindow):
         self.extract_thread.finished_ok.connect(self._on_extract_ok)
         self.extract_thread.failed.connect(self._on_extract_failed)
         self.extract_thread.start()
+        self._set_ui_busy(True)
 
     def _on_extract_ok(self, msg):
+        self._set_ui_busy(False)
         self.statusBar().showMessage("Extraction complete.")
         dialog(self, "info", "Success", msg)
 
     def _on_extract_failed(self, msg):
+        self._set_ui_busy(False)
         self.statusBar().showMessage("Extraction failed.")
         dialog(self, "critical", "Error", msg)
 
@@ -1322,6 +1566,9 @@ class SDVisualizer(QMainWindow):
         rows = self.listbox.selectedItems()
         if not rows:
             dialog(self, "warning", "Warning", "Select one or more images first.")
+            return
+        if self._op_running():
+            self.statusBar().showMessage("Please wait for the current operation to finish...")
             return
         snaps = [self.snapshots[self.listbox.row(i)] for i in rows]
         total_mb = sum(
@@ -1338,18 +1585,24 @@ class SDVisualizer(QMainWindow):
         self.delete_thread.finished_ok.connect(self._on_delete_ok)
         self.delete_thread.failed.connect(self._on_delete_failed)
         self.delete_thread.start()
+        self._set_ui_busy(True)
 
     def _on_delete_ok(self, count):
+        self._set_ui_busy(False)
         self.statusBar().showMessage(f"{count} image(s) erased. Re-scanning...")
         self.scan_snapshots()
 
     def _on_delete_failed(self, msg):
+        self._set_ui_busy(False)
         self.statusBar().showMessage("Delete failed.")
         dialog(self, "critical", "Error", msg)
 
     def format_card(self):
         if not self.drive:
             dialog(self, "warning", "Error", "Select a drive first.")
+            return
+        if self._op_running():
+            self.statusBar().showMessage("Please wait for the current operation to finish...")
             return
         drive_num = self.drive.replace('\\\\.\\PhysicalDrive', '')
 
@@ -1386,8 +1639,9 @@ class SDVisualizer(QMainWindow):
 
     def _set_formatting_ui(self, active):
         for b in (self.btn_refresh, self.btn_scan, self.btn_extract,
-                  self.btn_delete, self.btn_disconnect, self.btn_format):
+                  self.btn_delete, self.btn_disconnect):
             b.setEnabled(not active)
+        self.drive_combo.setEnabled(not active)
         self.btn_cancel_fmt.setVisible(active)
 
     def _on_format_ok(self, msg, drives):
@@ -1395,17 +1649,32 @@ class SDVisualizer(QMainWindow):
         self.listbox.clear()
         self.snapshots.clear()
         self.current_snap = None
-        self.refresh_drives(drives)
+        self.request_drive_list()
         self.statusBar().showMessage("Format complete.")
         dialog(self, "info", "Success", msg)
 
     def _on_format_failed(self, msg, drives):
         self._set_formatting_ui(False)
-        self.refresh_drives(drives)
+        self.request_drive_list()
         self.statusBar().showMessage("Format failed.")
         dialog(self, "critical", "Error", msg)
 
     def closeEvent(self, event):
+        # Politely stop any running threads before releasing the handle.
+        for name in ("scan_thread", "extract_thread", "delete_thread",
+                     "format_thread"):
+            t = getattr(self, name, None)
+            if t is not None and t.isRunning():
+                t.cancel()
+        # Wait for in-flight image loads / drive listings so no QThread is
+        # destroyed while running.
+        for t in list(self._bg_threads):
+            t.wait(2000)
+        for name in ("scan_thread", "extract_thread", "delete_thread",
+                     "format_thread"):
+            t = getattr(self, name, None)
+            if t is not None:
+                t.wait(3000)
         close_drive()
         event.accept()
 
