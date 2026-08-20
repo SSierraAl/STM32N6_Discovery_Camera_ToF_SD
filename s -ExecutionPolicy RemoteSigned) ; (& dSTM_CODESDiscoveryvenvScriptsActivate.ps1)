@@ -1,0 +1,27 @@
+warning: in the working copy of 'x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/stm32n6xx_it.c', LF will be replaced by CRLF the next time Git touches it
+[1mdiff --git a/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/stm32n6xx_it.c b/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/stm32n6xx_it.c[m
+[1mindex 4e5e5f3..af8fbf2 100644[m
+[1m--- a/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/stm32n6xx_it.c[m
+[1m+++ b/x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/stm32n6xx_it.c[m
+[36m@@ -21,7 +21,7 @@[m
+ #include "stm32n6xx_it.h"[m
+ [m
+ #include "cmw_camera.h"[m
+[31m-#include "uvcl.h"[m
+[32m+[m[32m//#include "uvcl.h"[m
+ [m
+ [m
+ [m
+[36m@@ -128,12 +128,6 @@[m [mvoid DCMIPP_IRQHandler(void)[m
+   HAL_DCMIPP_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());[m
+ }[m
+ [m
+[31m-void USB1_OTG_HS_IRQHandler(void)[m
+[31m-{[m
+[31m-  UVCL_IRQHandler();[m
+[31m-}[m
+[31m-[m
+[31m-[m
+ [m
+ [m
+ [m

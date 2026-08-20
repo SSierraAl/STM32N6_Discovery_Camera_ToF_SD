@@ -24,7 +24,7 @@
    ================================================================ */
 
 #ifndef CAPTURE_MODE
-#define CAPTURE_MODE            4
+#define CAPTURE_MODE            0
 #endif
 
 /** Capture mode for ToF-triggered photography.
@@ -205,7 +205,7 @@
 
     SD card needs time between batches for internal flash programming.
     Use smaller batches + longer waits = more reliable. */
-#define SD_BATCH_WRITE_BLOCKS 64
+#define SD_BATCH_WRITE_BLOCKS 128 //64 is  more safe 
 
 /** Minimum inter-batch recovery gap (milliseconds).
     After the SD card reports TRANSFER-ready (via CMD13 poll), we wait this
@@ -220,7 +220,7 @@
     - 20ms: more reliable for slower/failing cards
     -  0ms: fastest but may cause CRC errors on some cards
     - 30ms+: only if you still see CRC failures at 20ms */
-#define SD_BATCH_RECOVERY_GAP_MS  15
+#define SD_BATCH_RECOVERY_GAP_MS  5 //15 is more safe together with 64
 
 /** Maximum snapshots that can be stored before SD card overflow.
     For a 32 GB SDHC card (64,000,000 blocks):
@@ -381,13 +381,13 @@
     brighter here has negligible power/thermal impact. Brightness is applied as
     RGB value scaling (not time-based PWM), so it stays perfectly in sync with
     even very short camera exposures - safe to raise further if still too dark. */
-#define WS2812_ILLUMINATION_BRIGHTNESS  20
+#define WS2812_ILLUMINATION_BRIGHTNESS  50
 
-/** Illumination color (0xRRGGBB format).
+/** Illumination color new update 0xGGRRBB!!!
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
     Green (0x00FF00): Insects less sensitive, more natural behavior
     Red (0xFF0000): Least disruptive to insects but camera needs more gain */
-#define WS2812_ILLUMINATION_COLOR       0xA0FF28
+#define WS2812_ILLUMINATION_COLOR       0xC8B080//0xD0E654//0xA0FF28
 
 /** Visual indicator flash (optional).
     After illumination stops, flash LEDs briefly to confirm detection.

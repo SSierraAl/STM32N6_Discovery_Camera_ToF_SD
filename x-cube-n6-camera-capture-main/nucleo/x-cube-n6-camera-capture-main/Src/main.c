@@ -1018,8 +1018,6 @@ static void main_thread_fct(void *arg)
     CONSOLE_Config();
     Fuse_Programming();
 
-    /* ---- I2C1 for VL53L5CX ToF (MUST be before tasks start) ---- */
-    VL53L5CX_I2C_Init();
 
     /* ---- Illumination System (WS2812) ---- */
     printf("[INIT] Light system\n");
@@ -1229,6 +1227,11 @@ static void main_thread_fct(void *arg)
 
     printf("[INFO] Press USER button (PC13) to capture + save.\n");
     printf("===========================================\n\n");
+
+
+
+    /* ---- I2C1 for VL53L5CX ToF (MUST be before tasks start) ---- */
+    VL53L5CX_I2C_Init();
 
     system_ready = 1;
     vTaskDelete(NULL);
