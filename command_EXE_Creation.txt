@@ -1,0 +1,5 @@
+pyinstaller --noconfirm --onefile --windowed --name "STM32_SD_Snapshot_Visualizer" --hidden-import=PySide6.QtCore --hidden-import=PySide6.QtGui --hidden-import=PySide6.QtWidgets --hidden-import=cv2 --hidden-import=numpy --collect-all PySide6 --collect-all cv2 SD_Image_Viewer.py
+
+
+
+For powershell!
