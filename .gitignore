@@ -4,3 +4,5 @@
 
 *.pdf
 x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32CubeIDE/NUCLEO-N657X0-Q/Debug/
+dist/STM32_SD_Snapshot_Visualizer.exe
+x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32CubeIDE/NUCLEO-N657X0-Q/.settings/language.settings.xml
