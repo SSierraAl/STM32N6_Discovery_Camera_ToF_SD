@@ -336,14 +336,40 @@ void sensor_task(void *arg)
     }
 
 #if VL53L5CX_DET_RESOLUTION == 8
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 400, 30);
+    VL53L5CX_Configure(VL53L5CX_RESOLUTION_8X8, 800, 15);
 #else
-    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 400, 30);
+    VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 30, 15);
 #endif
     VL53L5CX_StartRanging();
+
+#if VL53L5CX_DUAL_SENSOR
+    /* Initialize external (guardian) sensor */
+    if (VL53L5CX_External_Init() != 0) {
+        printf("[WARN] External ToF init failed, continuing with primary only\n");
+    } else {
+        VL53L5CX_External_Configure();
+        VL53L5CX_External_StartRanging();
+    }
+#endif
+
+    /* Learn primary sensor baseline (sensor is active from StartRanging above) */
+
     VL53L5CX_LearnBaseline();
+
+#if VL53L5CX_DUAL_SENSOR
+    /* Learn external sensor baseline */
+    if (VL53L5CX_External_GetState() != EXTERNAL_STATE_IDLE) {
+        VL53L5CX_External_LearnBaseline();
+    }
+
+    /* NOW put primary sensor to sleep (both baselines are learned) */
+    VL53L5CX_Primary_Sleep();
+#endif
+    /* Only fail if PRIMARY sensor baseline is not ready (external is optional) */
+
     if (!VL53L5CX_IsBaselineReady()) {
         g_sensor_state = SENSOR_STATE_STOPPED;
+        printf("[ERROR] Primary ToF baseline not ready!\n");
         while (1) vTaskDelay(pdMS_TO_TICKS(1000));
     }
 
@@ -351,77 +377,147 @@ void sensor_task(void *arg)
     printf("[SENSOR] Running\n");
     uint32_t capture_count = 0, cooldown = 0;
 
-    /* WAIT 5 SECONDS AFTER BOOT before checking for detections.
-       The VL53L5CX ToF sensor needs time after StartRanging + LearnBaseline
-       to stabilize its internal signal ranges and DSS configuration. During
-       this warmup period, the sensor can return spurious high-confidence
-       readings that trigger false detections, causing an immediate capture
-       on boot even without anything in front of the sensor. */
-    {
-        uint32_t t_boot = HAL_GetTick();
-        printf("[SENSOR] Waiting 5s for ToF stabilization...\n");
-        while (HAL_GetTick() - t_boot < 5000) {
-            if (VL53L5CX_Update()) {
-                (void)VL53L5CX_GetResult(); /* Discard readings during warmup */
-            }
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-        printf("[SENSOR] ToF ready, monitoring for detections...\n");
-    }
+
 
     while (1) {
-        if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
-        if (!VL53L5CX_Update()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-        g_debug_frame_count++;
-        if (g_debug_frame_count >= 1) g_debug_frame_count = 0;
-        if (cooldown > 0) cooldown--;
+            if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
 
-        if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
-            if (g_capture_busy) continue;
-            g_capture_busy = 1;
-            g_sensor_state = SENSOR_STATE_PAUSED;
-            (void)VL53L5CX_GetResult();
+    #if VL53L5CX_DUAL_SENSOR
+            /* ---- DUAL SENSOR MODE ----
+               External sensor is always ON, monitoring for motion/signal drop.
+               Primary sensor (camera ToF) is in sleep mode by default.
+               When external detects something, it wakes the primary. */
 
-#if PERF_DEBUG_LEVEL >= 1
-            printf(">>> INSECT DETECTED!\n");
-#endif
-            BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
-
-#if WS2812_MODE == 1
-            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
-#elif WS2812_MODE == 0
-            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
-#else
-            WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
-            vTaskDelay(pdMS_TO_TICKS(WS2812_INDICATOR_MS));
-            WS2812_FlashStop();
-#endif
-
-            PerfTimer_t t;
-            PERF_START(t);
-            int rc = Capture_RequestSnapshot(60000);
-            PERF_STOP(t);
-            BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
-            g_sensor_state = SENSOR_STATE_RUNNING;
-            g_capture_busy = 0;
-            cooldown = 30;
-
-            if (rc == 0) {
-                capture_count++;
-#if PERF_PRINT_SUMMARY
-                Perf_PrintSummary(&g_perf_timer, capture_count);
-                Perf_UpdateStats(&g_perf_timer);
-#else
-                printf("Snapshot #%lu SAVED (%lu ms)\n", (unsigned long)capture_count, (unsigned long)Perf_TotalElapsed(&t));
-#endif
-            } else {
-#if PERF_DEBUG_LEVEL >= 1
-                printf("[SENSOR] Capture FAILED rc=%d\n", rc);
-#endif
+            /* Update external (guardian) sensor continuously */
+            if (VL53L5CX_External_GetState() == EXTERNAL_STATE_MONITORING) {
+                (void)VL53L5CX_External_Update();
             }
-        }
-        vTaskDelay(pdMS_TO_TICKS(5));
-    }
+
+            /* Check primary sensor wake timeout */
+            VL53L5CX_Primary_CheckWakeTimeout();
+
+            /* When primary is active, also update it for detection */
+            if (VL53L5CX_Primary_IsActive()) {
+                if (!VL53L5CX_Update()) {
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+
+                /* Check primary sensor detection while it's awake */
+                if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
+                    if (g_capture_busy) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
+                    g_capture_busy = 1;
+                    g_sensor_state = SENSOR_STATE_PAUSED;
+                    VL53L5CX_DetectionResult_t res = VL53L5CX_GetResult();
+
+    #if PERF_DEBUG_LEVEL >= 1
+                    const char* trig_str;
+                    if (res.trigger_source == 1) trig_str = "SIGNAL";
+                    else if (res.trigger_source == 2) trig_str = "MOTION";
+                    else if (res.trigger_source == 3) trig_str = "SIGNAL+MOTION";
+                    else trig_str = "UNKNOWN";
+                    printf(">>> INSECT DETECTED (Primary, woken by external) [%s]!\n", trig_str);
+    #endif
+                    BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
+    #if WS2812_MODE == 1
+                    WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
+    #elif WS2812_MODE == 0
+                    WS2812_TurnOn();
+    #else
+                    WS2812_TurnOn();
+                    vTaskDelay(pdMS_TO_TICKS(WS2812_INDICATOR_MS));
+                    WS2812_TurnOff();
+    #endif
+
+                    PerfTimer_t t;
+                    PERF_START(t);
+                    int rc = Capture_RequestSnapshot(60000);
+                    PERF_STOP(t);
+                    BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+                    VL53L5CX_StartRanging();
+                    g_sensor_state = SENSOR_STATE_RUNNING;
+                    g_capture_busy = 0;
+                    cooldown = 30;
+
+                    if (rc == 0) {
+                        capture_count++;
+    #if PERF_PRINT_SUMMARY
+                        Perf_PrintSummary(&g_perf_timer, capture_count);
+                        Perf_UpdateStats(&g_perf_timer);
+    #else
+                        printf("Snapshot #%lu SAVED (%lu ms)\n", (unsigned long)capture_count, (unsigned long)Perf_TotalElapsed(&t));
+    #endif
+                    } else {
+    #if PERF_DEBUG_LEVEL >= 1
+                        printf("[SENSOR] Capture FAILED rc=%d\n", rc);
+    #endif
+                    }
+                }
+            }
+    #else
+            /* ---- SINGLE SENSOR MODE ----
+               Standard VL53L5CX_Update() loop as before. */
+
+            /* Update primary sensor */
+            if (!VL53L5CX_Update()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+
+            g_debug_frame_count++;
+            if (g_debug_frame_count >= 1) g_debug_frame_count = 0;
+            if (cooldown > 0) cooldown--;
+
+            /* Check primary sensor detection */
+            if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
+                if (g_capture_busy) continue;
+                g_capture_busy = 1;
+                g_sensor_state = SENSOR_STATE_PAUSED;
+                VL53L5CX_DetectionResult_t res = VL53L5CX_GetResult();
+
+    #if PERF_DEBUG_LEVEL >= 1
+                const char* trig_str;
+                if (res.trigger_source == 1) trig_str = "SIGNAL";
+                else if (res.trigger_source == 2) trig_str = "MOTION";
+                else if (res.trigger_source == 3) trig_str = "SIGNAL+MOTION";
+                else trig_str = "UNKNOWN";
+                printf(">>> INSECT DETECTED [%s]!\n", trig_str);
+    #endif
+                BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
+    #if WS2812_MODE == 1
+                WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
+    #elif WS2812_MODE == 0
+                WS2812_TurnOn();
+    #else
+                WS2812_TurnOn();
+                vTaskDelay(pdMS_TO_TICKS(WS2812_INDICATOR_MS));
+                WS2812_TurnOff();
+    #endif
+
+                PerfTimer_t t;
+                PERF_START(t);
+                int rc = Capture_RequestSnapshot(60000);
+                PERF_STOP(t);
+                BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+                VL53L5CX_StartRanging();
+                g_sensor_state = SENSOR_STATE_RUNNING;
+                g_capture_busy = 0;
+                cooldown = 30;
+
+                if (rc == 0) {
+                    capture_count++;
+    #if PERF_PRINT_SUMMARY
+                    Perf_PrintSummary(&g_perf_timer, capture_count);
+                    Perf_UpdateStats(&g_perf_timer);
+    #else
+                    printf("Snapshot #%lu SAVED (%lu ms)\n", (unsigned long)capture_count, (unsigned long)Perf_TotalElapsed(&t));
+    #endif
+                } else {
+    #if PERF_DEBUG_LEVEL >= 1
+                    printf("[SENSOR] Capture FAILED rc=%d\n", rc);
+    #endif
+                }
+            }
+    #endif /* VL53L5CX_DUAL_SENSOR */
+
+            vTaskDelay(pdMS_TO_TICKS(5));
+	}
 }
 
 /* ==================== CAMERA TASK ==================== */
