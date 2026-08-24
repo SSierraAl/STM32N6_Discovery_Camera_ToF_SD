@@ -24,7 +24,7 @@
    ================================================================ */
 
 #ifndef CAPTURE_MODE
-#define CAPTURE_MODE            0
+#define CAPTURE_MODE            4
 #endif
 
 /** Capture mode for ToF-triggered photography.
@@ -131,7 +131,7 @@
       and reduced gain below, for a much better signal-to-noise ratio while still
       easily freezing motion. Tune down toward 8 if you confirm actual motion blur
       (not noise) at 200 µs; tune up if still too dark. */
-#define CAM_EXPOSURE_VALUE   30
+#define CAM_EXPOSURE_VALUE   8
 
 /** Analog gain (only used in MANUAL mode).
       Range: 0-72000 (IMX335_GAIN_MIN to IMX335_GAIN_MAX).
@@ -205,7 +205,7 @@
 
     SD card needs time between batches for internal flash programming.
     Use smaller batches + longer waits = more reliable. */
-#define SD_BATCH_WRITE_BLOCKS 128 //64 is  more safe 
+#define SD_BATCH_WRITE_BLOCKS 64 //128 in but mode - 64 in batch mode is  more safe
 
 /** Minimum inter-batch recovery gap (milliseconds).
     After the SD card reports TRANSFER-ready (via CMD13 poll), we wait this
@@ -220,7 +220,7 @@
     - 20ms: more reliable for slower/failing cards
     -  0ms: fastest but may cause CRC errors on some cards
     - 30ms+: only if you still see CRC failures at 20ms */
-#define SD_BATCH_RECOVERY_GAP_MS  5 //15 is more safe together with 64
+#define SD_BATCH_RECOVERY_GAP_MS  30 //5 but version - 30 batch mode  is more safe together with 64
 
 /** Maximum snapshots that can be stored before SD card overflow.
     For a 32 GB SDHC card (64,000,000 blocks):
