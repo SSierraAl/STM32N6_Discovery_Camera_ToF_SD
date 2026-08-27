@@ -362,8 +362,11 @@ void sensor_task(void *arg)
         VL53L5CX_External_LearnBaseline();
     }
 
-    /* NOW put primary sensor to sleep (both baselines are learned) */
-    VL53L5CX_Primary_Sleep();
+    /* NOW put primary sensor to sleep (both baselines are learned).
+       Use the startup variant: plain Primary_Sleep() is a no-op here because
+       the state machine still holds its initial SLEEP value while the sensor
+       is physically ranging. */
+    VL53L5CX_Primary_SleepAtStartup();
 #endif
 
     /* Only fail if PRIMARY sensor baseline is not ready (external is optional) */
@@ -385,6 +388,12 @@ void sensor_task(void *arg)
            External sensor is always ON, monitoring for motion/signal drop.
            Primary sensor (camera ToF) is in sleep mode by default.
            When external detects something, it wakes the primary. */
+
+        /* Cooldown countdown, one step per loop iteration (same as single-sensor
+           mode). Without this, cooldown latches at 30 after the first capture
+           and blocks every subsequent trigger, even when raw data shows the
+           signal drop above threshold. */
+        if (cooldown > 0) cooldown--;
 
         /* Update external (guardian) sensor continuously */
         if (VL53L5CX_External_GetState() == EXTERNAL_STATE_MONITORING) {

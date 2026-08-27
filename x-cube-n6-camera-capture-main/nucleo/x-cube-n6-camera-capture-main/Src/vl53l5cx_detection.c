@@ -706,6 +706,17 @@ void VL53L5CX_Primary_Sleep(void)
     s_primary_wake_time = 0;
 }
 
+void VL53L5CX_Primary_SleepAtStartup(void)
+{
+    /* At startup the primary is physically ranging (it was started before
+       baseline learning) but s_primary_state still holds its initial SLEEP
+       value, which would make VL53L5CX_Primary_Sleep() return immediately.
+       Mark the state ACTIVE so the real stop-ranging + sleep sequence runs
+       and the camera ToF is actually in ST sleep by default, as designed. */
+    s_primary_state = PRIMARY_STATE_ACTIVE;
+    VL53L5CX_Primary_Sleep();
+}
+
 void VL53L5CX_Primary_Wake(void)
 {
     if (s_primary_state == PRIMARY_STATE_ACTIVE) return;

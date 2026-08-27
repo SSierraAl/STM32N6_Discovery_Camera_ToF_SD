@@ -39,7 +39,7 @@
         - Camera ToF (primary sensor) is in SLEEP mode by default
         - When external sensor detects motion/signal drop, it wakes the camera ToF
         - Camera ToF stays active for DUAL_WAKE_DURATION_MS, then returns to sleep */
-#define VL53L5CX_DUAL_SENSOR              1
+#define VL53L5CX_DUAL_SENSOR              0
 
 /** I2C addresses for dual sensor mode.
     Primary (camera ToF):    always at 0x29, near camera, sleep mode by default
@@ -81,7 +81,7 @@
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_BASELINE_SAMPLES 30
 #else
-#define VL53L5CX_DET_BASELINE_SAMPLES 30
+#define VL53L5CX_DET_BASELINE_SAMPLES 20
 #endif
 
 /* Resolution-specific detection thresholds */
@@ -91,7 +91,7 @@
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
 #else
 #define VL53L5CX_DET_THRESHOLD_PCT      6       /* 4x4: lower signal drop threshold */
-#define VL53L5CX_DET_MOTION_THRESH      40      /* 4x4: lower motion threshold */
+#define VL53L5CX_DET_MOTION_THRESH      60      /* 4x4: lower motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 1       /* 4x4: single zone triggers */
 #endif
 
@@ -101,7 +101,7 @@
 #define VL53L5CX_DET_MOTION_PERSIST_FRAMES  3
 #define VL53L5CX_DET_MOTION_EXTRA_NOISE     50
 #else
-#define VL53L5CX_DET_MOTION_MIN_ZONES       1
+#define VL53L5CX_DET_MOTION_MIN_ZONES       2
 #define VL53L5CX_DET_MOTION_PERSIST_FRAMES  2
 #define VL53L5CX_DET_MOTION_EXTRA_NOISE     0
 #endif
@@ -276,6 +276,13 @@ typedef enum {
     Stops ranging, enters VL53L5CX_POWER_MODE_SLEEP.
     Firmware and configuration are retained. */
 void VL53L5CX_Primary_Sleep(void);
+
+/** Startup variant of Primary_Sleep(): at init the primary is physically
+    ranging while the state machine still holds its initial SLEEP value, so
+    plain Primary_Sleep() would be a no-op. Marks the state ACTIVE first,
+    then runs the real sleep sequence. Call once at init instead of
+    Primary_Sleep(). */
+void VL53L5CX_Primary_SleepAtStartup(void);
 
 /** Wake primary sensor from ST sleep mode.
     Enters VL53L5CX_POWER_MODE_WAKEUP, restarts ranging.
