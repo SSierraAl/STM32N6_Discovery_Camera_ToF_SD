@@ -1232,7 +1232,7 @@ static void main_thread_fct(void *arg)
 
     /* ---- I2C1 for VL53L5CX ToF (MUST be before tasks start) ---- */
     VL53L5CX_I2C_Init();
-
+    VL53L5CX_PowerUp();
     system_ready = 1;
     vTaskDelete(NULL);
 }

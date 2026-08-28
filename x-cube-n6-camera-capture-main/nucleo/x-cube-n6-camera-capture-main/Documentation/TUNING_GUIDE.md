@@ -302,12 +302,20 @@ Leaves blocks 0-3071 free (1.5 MB). Do not change unless you need to reserve spa
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_MOTION_THRESH  100
 #else
-#define VL53L5CX_DET_MOTION_THRESH  40
+#define VL53L5CX_DET_MOTION_THRESH  60
 #endif
 ```
-The VL53L5CX has a built-in motion indicator (0-255). Values above this threshold contribute to detection.
+The ST motion indicator plugin computes a per-zone motion value (0-255); a zone is motion-triggered when the value is **at or above** this threshold. On the primary sensor the motion channel is evaluated independently of ranging status and baseline validity (gate-restricted on the external guardian), so it catches fast objects that the signal channel can miss.
 
-**Tuning**: Similar to `THRESHOLD_PCT`. Increase if too sensitive, decrease if not sensitive enough.
+Three plugin-level defines (resolution-dependent) shape the raw motion values:
+
+| Define | 4×4 | 8×8 | Meaning |
+|--------|-----|-----|---------|
+| `VL53L5CX_DET_MOTION_MIN_ZONES` | 1 | 2 | Zones needed for the plugin's global motion flag |
+| `VL53L5CX_DET_MOTION_PERSIST_FRAMES` | 1 | 3 | Temporal accumulations before motion is counted |
+| `VL53L5CX_DET_MOTION_EXTRA_NOISE` | 0 | 50 | Extra noise sigma in the plugin |
+
+**Tuning**: `MOTION_THRESH` is the main knob — increase if motion false-positives, decrease if missing fast insects. Raise `EXTRA_NOISE` for noisier installs (8×8 already does).
 
 ---
 
@@ -337,13 +345,50 @@ Zones with signal below 500 kcps are excluded from detection (noisy/blind zones)
 
 ### `VL53L5CX_DET_ADAPTIVE_REFRESH` — Baseline Update
 ```c
+#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   0
+#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500
 #define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
-#define VL53L5CX_DET_REFRESH_WINDOW_SECS        10
-#define VL53L5CX_DET_MAX_DETECTIONS             5
+#define VL53L5CX_DET_REFRESH_WINDOW_SECS        15
+#define VL53L5CX_DET_MAX_DETECTIONS             3
 ```
-After 5 detections within a 10-second window, the ToF sensor re-learns its baseline. This prevents "adaptation fatigue" where the sensor slowly adjusts to a permanently altered scene.
+Two mutually exclusive refresh modes exist (periodic: every N frames; adaptive: detection-based — adaptive is currently enabled). After 3 detections within a 15-second window, the ToF sensor re-learns its baseline. This prevents "adaptation fatigue" where the sensor slowly adjusts to a permanently altered scene.
 
 **Tuning**: Usually leave at defaults. If sensor becomes less sensitive over time → decrease `MAX_DETECTIONS` or `WINDOW_SECS`.
+
+---
+
+### `VL53L5CX_DET_BASELINE_SAMPLES` — Baseline Learning Samples
+```c
+#if VL53L5CX_DET_RESOLUTION == 8
+#define VL53L5CX_DET_BASELINE_SAMPLES  30
+#else
+#define VL53L5CX_DET_BASELINE_SAMPLES  20
+#endif
+```
+Number of frames averaged while learning the per-zone signal baseline at startup. More samples = steadier baseline but slower start. The external (guardian) sensor uses its own count: `VL53L5CX_SENSOR2_BASELINE_SAMPLES` (15).
+
+**Tuning**: Leave at defaults. Lower only if boot-time learning is too slow.
+
+---
+
+### `VL53L5CX_DUAL_SENSOR` — Dual Sensor (Guardian) Mode
+```c
+#define VL53L5CX_DUAL_SENSOR              1    /* 0 = single sensor, 1 = dual (guardian) */
+#define VL53L5CX_PRIMARY_ADDRESS          0x29 /* camera ToF (7-bit) */
+#define VL53L5CX_EXTERNAL_ADDRESS         0x62 /* external ToF (8-bit; 7-bit 0x31) */
+#define VL53L5CX_DUAL_WAKE_DURATION_MS    5000 /* primary active window after wake (ms) */
+#define VL53L5CX_DUAL_CONFIRM_FRAMES      2    /* consecutive external detections needed */
+#define VL53L5CX_SENSOR2_BASELINE_SAMPLES 15
+```
+When `DUAL_SENSOR = 1`, the external "guardian" sensor runs continuously and the camera ToF stays in ST sleep to save power. The guardian must see `CONFIRM_FRAMES` consecutive detections before waking the primary, which then runs for `WAKE_DURATION_MS` and returns to sleep.
+
+| Parameter | What it does | Tuning |
+|-----------|-------------|--------|
+| `VL53L5CX_DUAL_CONFIRM_FRAMES` | Consecutive external detections needed to wake the primary | Lower to 1 = faster wake, more false wakes |
+| `VL53L5CX_DUAL_WAKE_DURATION_MS` | How long the primary stays awake after a confirmed wake | Raise if capture needs more time; lower to save power |
+| `VL53L5CX_SENSOR2_BASELINE_SAMPLES` | Guardian baseline samples | Fewer = faster boot |
+
+**Tuning**: Primary never wakes → lower `CONFIRM_FRAMES` to 1 and check the `EXT,ZFRAME` serial output. Too many false wakes → raise to 3-4. The I2C addresses are fixed at power-up (the external is re-addressed from 0x29 → 0x62) — do not change them without updating the power-up sequence.
 
 ---
 
@@ -474,7 +519,7 @@ Step 4: Check environment for IR light sources or reflective surfaces
 ### Scenario 5: "Missing real detections (insect flies through, no trigger)"
 ```
 Step 1: Decrease VL53L5CX_DET_THRESHOLD_PCT (6 → 3)
-Step 2: Decrease VL53L5CX_DET_MOTION_THRESH (40 → 20)
+Step 2: Decrease VL53L5CX_DET_MOTION_THRESH (60 → 30)
 Step 3: Set VL53L5CX_DET_MIN_AFFECTED_ZONES to 1
 Step 4: Verify VL53L5CX_DET_MIN_SIGNAL not too high (500 is good)
 ```
