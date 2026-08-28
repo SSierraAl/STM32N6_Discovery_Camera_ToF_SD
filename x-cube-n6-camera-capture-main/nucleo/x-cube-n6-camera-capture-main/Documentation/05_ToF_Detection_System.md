@@ -17,15 +17,14 @@ The detection module compares live per-zone signal data against a learned baseli
 
 | File | Role |
 |------|------|
-| `Inc/vl53l5cx_detection.h` | Public API, all configuration `#defines`, data structures |
+| `Inc/vl53l5cx_detection.h` | Public API, data structures (all tunables in `Inc/app_config.h`, SECTION 9) |
 | `Src/vl53l5cx_detection.c` | Full implementation (init, power, baseline, detection, dual mode, debug) |
 | `Src/app_thread.c` | `sensor_task()` — owns the ToF polling loop and trigger orchestration |
 | `Src/main.c` | `VL53L5CX_I2C_Init()` + `VL53L5CX_PowerUp()` in the main thread, before `system_ready` |
 | `Src/platform.c` | VL53L5CX low-level I2C (every transfer wrapped by the arbiter mutex) |
 | `Src/i2c_arbiter.c/.h` | `g_i2c1_mutex` — serializes I2C1 traffic between camera and ToF |
-| `zone_monitor.py` | Real-time ToF visualization (project root) |
+| `vl53l5cx_zone_monitor.py` | S1/EXT real-time monitor with a tunable threshold overlay mirroring `app_config.h` §9 (workspace root) |
 | `datalogger.py` | CSV data logging for offline tuning |
-| `analysis.py` | Motion-parameter sweep analysis (kept in sync with the header) |
 
 *Thread ownership:* all ToF polling and trigger logic is strictly owned by `sensor_task`. The ToF and the camera share the physical I2C1 bus; the arbiter mutex (`g_i2c1_mutex`) serializes their traffic.
 
@@ -94,18 +93,20 @@ From the VL53L5CX datasheet:
 
 | Where | Accepted statuses | Why |
 |-------|-------------------|-----|
-| Primary live detection (`VL53L5CX_Update`) | **5, 6, 9** | 5 = valid (100%); 6 = first range, wrap-around not yet performed (~50%); 9 = valid with large pulse / merged target (~50%) |
-| Baseline learning (`VL53L5CX_LearnBaseline`) | **0, 5, 9** | 0 (data not updated) keeps the previous valid reading alive during brief sensor hiccups |
-| External guardian detection (`VL53L5CX_External_Update`) | **0, 5, 9** | The guardian only needs to see a change, not a perfect range |
-| Debug output (`ZFRAME` / `EXT,ZFRAME`) | **0, 5, 9** | Zones with any other status are printed as `0,0` |
+| Primary live detection (`VL53L5CX_Update`) | **5, 6, 9** | 5 = valid (100%); 6 = first range after (re)start — fresh data, wrap-around not yet checked (~50%, same class as 9); 9 = valid with large pulse / merged target (~50%) |
+| Baseline learning (primary + external `LearnBaseline`) | **5, 6, 9** | Only fresh measurements enter the baseline average (status 6 = the first frame after each restart) |
+| External guardian detection (`VL53L5CX_External_Update`) | **5, 6, 9** | The guardian only needs to see a change, not a perfect range |
+| Debug output (`ZFRAME` / `EXT,ZFRAME`) | **5, 6, 9** | Zones with any other status are printed as `0,0` |
 
-All other statuses are silently skipped for that zone.
+The set is defined once as `VL53L5CX_STATUS_OK()` in `Inc/vl53l5cx_detection.h` and used by every signal-channel path. Only **fresh-data** statuses are accepted: status 0 (`DATA_NOT_UPDATED`) is deliberately excluded — on such frames the values being read are the last ones measured (carried data), and acting on them would just re-evaluate the previous frame's verdict (a stale drop would re-trigger). Status 6's only known flaw — a possible wrap-around error when the true range exceeds the max range — is limited to the single first frame after ranging (re)start and usually fails the `VL53L5CX_DET_MIN_SIGNAL` gate anyway.
+
+All other statuses are silently skipped for the signal channel (baseline learning, detection, debug output). The primary sensor's motion channel is status-independent (it can trigger even on status 255 zones) — see §7 Detection Logic.
 
 ---
 
 ## 4. Configuration
 
-All tunables live in `Inc/vl53l5cx_detection.h`. Values below are the current defaults.
+All tunables live in the **ToF Detection (VL53L5CX)** section of `Inc/app_config.h` (`vl53l5cx_detection.h` includes it; only the derived `VL53L5CX_DET_NUM_ZONES` stays in the detection header). Values below are the current defaults.
 
 ### 4.1 Mode and grid selection
 
@@ -131,12 +132,12 @@ All tunables live in `Inc/vl53l5cx_detection.h`. Values below are the current de
 | `VL53L5CX_DET_THRESHOLD_PCT` | 6 | 15 | Signal drop % that triggers a zone alarm |
 | `VL53L5CX_DET_MOTION_THRESH` | 60 | 100 | Motion value that triggers a zone alarm |
 | `VL53L5CX_DET_MIN_AFFECTED_ZONES` | 1 | 2 | Zones needed for a global detection |
-| `VL53L5CX_DET_MOTION_MIN_ZONES` | 1 | 2 | ST motion plugin: zones for global motion |
-| `VL53L5CX_DET_MOTION_PERSIST_FRAMES` | 1 | 3 | ST motion plugin: temporal accumulation |
-| `VL53L5CX_DET_MOTION_EXTRA_NOISE` | 0 | 50 | ST motion plugin: extra noise sigma |
+| `VL53L5CX_DET_MOTION_MIN_ZONES` | 1 | 1 | ST motion plugin (sensor-side): zones for the plugin's *global* motion flag |
+| `VL53L5CX_DET_MOTION_PERSIST_FRAMES` | 16 | 16 | ST motion plugin (sensor-side): temporal accumulation |
+| `VL53L5CX_DET_MOTION_EXTRA_NOISE` | 0 | 0 | ST motion plugin (sensor-side): extra noise sigma |
 | `VL53L5CX_DET_MIN_SIGNAL` | 500 | 500 | Per-SPAD signal gate (below → zone ignored) |
 
-The 8×8 grid uses higher thresholds because smaller zones collect fewer photons and are noisier.
+The 8×8 grid uses higher trigger thresholds because smaller zones collect fewer photons and are noisier. The three plugin parameters are identical for both grids — they match the plugin's built-in defaults (the sensor has always run with these values; they are now actually applied to the sensor, see §4.6).
 
 ### 4.4 Baseline refresh — enable ONE mode only
 
@@ -156,11 +157,11 @@ The header explicitly states to pick one mode at a time. The frame counter is a 
 ### 4.5 Debug output
 
 ```c
-/* DEBUG MODE 1: compact ZFRAME (for zone_monitor.py real-time plots) */
+/* DEBUG MODE 1: compact ZFRAME (for vl53l5cx_zone_monitor.py real-time plots) */
 #define VL53L5CX_DET_DEBUG_ZFRAME     1
 #define VL53L5CX_DET_DEBUG_ZFRAME_INT 1   /* emit ZFRAME every N Update() frames */
 
-/* DEBUG MODE 2: ALLPARAM (for datalogger.py + analysis.py) */
+/* DEBUG MODE 2: ALLPARAM (for datalogger.py) */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 ```
@@ -174,13 +175,15 @@ Both modes can be enabled simultaneously:
 | | Primary 4×4 (default) | Primary 8×8 | External (dual mode) |
 |---|---|---|---|
 | Resolution | `VL53L5CX_RESOLUTION_4X4` | `VL53L5CX_RESOLUTION_8X8` | 4×4 (fixed) |
-| Integration time | **30 ms** | 800 ms | 800 ms |
-| Ranging frequency | 15 Hz | 15 Hz | 15 Hz |
+| Integration time | **30 ms** (`VL53L5CX_DET_INTEGRATION_MS`) | 800 ms (same define) | 800 ms (hardcoded) |
+| Ranging frequency | 15 Hz (`VL53L5CX_DET_RANGING_FREQ_HZ`) | 15 Hz (same define) | 15 Hz (hardcoded) |
 | Target order | `STRONGEST` | `STRONGEST` | `CLOSEST` |
-| Ranging mode | `AUTONOMOUS` | `AUTONOMOUS` | `CONTINUOUS` |
+| Ranging mode | `AUTONOMOUS` (3, `VL53L5CX_RANGING_MODE`) | same define | `CONTINUOUS` (1, hardcoded) |
 | Sharpener | 10% | 10% | 10% |
 
-The ST motion indicator plugin is initialized inside `VL53L5CX_Configure()` (and `VL53L5CX_External_Configure()`) with the `MOTION_*` defines above, unless the driver is built with `VL53L5CX_DISABLE_MOTION_INDICATOR`; the plugin's `min_nb_for_global_detection`, `nb_of_temporal_accumulations` and `extra_noise_sigma` fields are overwritten with those defines after `vl53l5cx_motion_indicator_init()`, on both sensors. `VL53L5CX_MotionTest()` (manual hook, currently commented out in `main.c`) prints the global motion indicators and every zone's motion value against `VL53L5CX_DET_MOTION_THRESH`.
+The primary values come from `app_config.h` §9 and are passed to `VL53L5CX_Configure()` by `Src/app_thread.c`; the external column is hardcoded in `VL53L5CX_External_Configure()`. The driver accepts integration times of **2–1000 ms** only.
+
+The ST motion indicator plugin runs the motion computation **inside the sensor's GO2** (programmed by default to monitor movement between 400 and 1500 mm) and is initialized inside `VL53L5CX_Configure()` (and `VL53L5CX_External_Configure()`) unless the driver is built with `VL53L5CX_DISABLE_MOTION_INDICATOR`. The plugin's `min_nb_for_global_detection`, `nb_of_temporal_accumulations` and `extra_noise_sigma` fields are set from the `MOTION_*` defines and **re-applied to the sensor** with `vl53l5cx_motion_indicator_set_resolution()` — the plugin only DCI-writes its configuration during init/set-resolution, so without the re-apply the defines would have no effect on the sensor. The current define values (1 / 16 / 0) match the plugin's built-in defaults. `VL53L5CX_MotionTest()` (manual hook, currently commented out in `main.c`) prints the global motion indicators and every zone's motion value against `VL53L5CX_DET_MOTION_THRESH`.
 
 ---
 
@@ -218,7 +221,7 @@ VL53L5CX_PowerUp();          /* single-mode sequence */
 
 /* app_thread.c — sensor_task() */
 VL53L5CX_Init(&hi2c1);       /* is_alive retry 10×300 ms, init retry 3×200 ms */
-VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 30, 15);  /* 4x4, 30 ms integration, 15 Hz */
+VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, VL53L5CX_DET_INTEGRATION_MS, VL53L5CX_DET_RANGING_FREQ_HZ);  /* 4x4: 30 ms integration, 15 Hz (app_config.h §9) */
 VL53L5CX_StartRanging();
 VL53L5CX_LearnBaseline();    /* 20 samples + 5 settle frames */
 
@@ -276,7 +279,7 @@ When dual mode is enabled, the **external sensor becomes the always-on "guardian
 
 ```c
 VL53L5CX_Init(&hi2c1);          /* primary @ 0x29 — fatal on failure */
-VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, 30, 15);
+VL53L5CX_Configure(VL53L5CX_RESOLUTION_4X4, VL53L5CX_DET_INTEGRATION_MS, VL53L5CX_DET_RANGING_FREQ_HZ);
 VL53L5CX_StartRanging();
 
 if (VL53L5CX_External_Init() == 0) {   /* external @ 0x62 (7-bit 0x31) */
@@ -382,10 +385,10 @@ while (1) {
 
 1. Wait for data ready (`VL53L5CX_WaitForDataReady`, 1000 ms timeout) and fetch ranging data.
 2. For each of the 16 (or 64) zones:
-    1. **Signal channel (gated):** the zone must have a learned baseline (`s_zone_valid`), a target status of 0/5/9 (both sensors), and a current signal present and ≥ `VL53L5CX_DET_MIN_SIGNAL` (500) — otherwise it is skipped for the signal channel.
+    1. **Signal channel (gated):** the zone must have a learned baseline (`s_zone_valid`), a target status of 5/6/9 (`VL53L5CX_STATUS_OK`, both sensors), and a current signal present and ≥ `VL53L5CX_DET_MIN_SIGNAL` (500) — otherwise it is skipped for the signal channel.
     2. **Zero-baseline guard:** if the current signal is 0 and the baseline is below `VL53L5CX_DET_MIN_SIGNAL`, the baseline is zeroed for that zone (prevents ghost zones from re-triggering forever).
     3. **Signal trigger:** drop = `|current − baseline| × 100 / baseline`; triggered when the drop exceeds `VL53L5CX_DET_THRESHOLD_PCT` (6% at 4×4).
-    4. **Motion channel (ST plugin):** a zone is motion-triggered when its per-zone motion value (indexed through the plugin's `map_id[]`) is ≥ `VL53L5CX_DET_MOTION_THRESH` (60 at 4×4). On the **primary** sensor this channel is evaluated for *every* zone — independently of baseline validity and ranging status (the plugin reports motion even for status 255 zones and for zones that were empty at boot); on the **external (guardian)** sensor it sits inside the same gates as the signal channel.
+    4. **Motion channel (ST plugin):** a zone is motion-triggered when its per-zone 32-bit motion value (computed sensor-side by the plugin, programmed by default to see movement between 400 and 1500 mm, indexed through the plugin's `map_id[]`) is ≥ `VL53L5CX_DET_MOTION_THRESH` (60 at 4×4). On the **primary** sensor this channel is evaluated for *every* zone — independently of baseline validity and ranging status (the plugin reports motion even for status 255 zones and for zones that were empty at boot); on the **external (guardian)** sensor it sits inside the same gates as the signal channel.
     5. A zone is in alarm if **either** channel fires; the zone index plus the drop % (signal) or the raw motion value (motion-only) is recorded in the result.
 3. **Global alarm:** if `affected_count ≥ VL53L5CX_DET_MIN_AFFECTED_ZONES` (1 at 4×4), `insect_detected` is set.
 
@@ -397,7 +400,7 @@ while (1) {
 #define VL53L5CX_TRIG_BOTH    0x03  // both channels
 ```
 
-`VL53L5CX_GetResult()` returns the `VL53L5CX_DetectionResult_t`: `insect_detected`, `trigger_source`, `affected_count`, `affected_zones[]`, `affected_drop[]` (drop % when the signal channel fired, raw motion value 0-255 when motion-only), and `valid_measurements` (zones with signal ≥ `VL53L5CX_DET_MIN_SIGNAL` this frame).
+`VL53L5CX_GetResult()` returns the `VL53L5CX_DetectionResult_t`: `insect_detected`, `trigger_source`, `affected_count`, `affected_zones[]`, `affected_drop[]` (drop % when the signal channel fired, raw 32-bit plugin motion value when motion-only), and `valid_measurements` (zones with signal ≥ `VL53L5CX_DET_MIN_SIGNAL` this frame).
 
 ### Baseline learning (`VL53L5CX_LearnBaseline`)
 
@@ -431,7 +434,7 @@ The current firmware build emits the following machine-readable lines, all prefi
 ```
 ZFRAME,<temp>,<sig0>,<dist0>,<base_sig0>,<base_dist0>,<motion0>,<sig1>,...
 ```
-5 fields per zone (signal, distance, baseline signal, baseline distance, motion), plus the temperature. At 4×4: 1 + 5×16 = 81 numeric fields after the `ZFRAME` token (82 tokens). At 8×8: 321 numeric fields. Zones whose status is not 0/5/9 are printed as `0,0`.
+5 fields per zone (signal, distance, baseline signal, baseline distance, motion), plus the temperature. At 4×4: 1 + 5×16 = 81 numeric fields after the `ZFRAME` token (82 tokens). At 8×8: 321 numeric fields. Zones whose status is not 5/6/9 are printed as `0,0`.
 
 ### EXT,ZFRAME (external, dual mode)
 Same layout with the `EXT,` prefix; emitted right after the primary ZFRAME using the same interval counter.
@@ -442,7 +445,7 @@ ALLPARAM,<temp>,<cur_sig0>,<base_sig0>,<cur_dist0>,<base_dist0>,<drop_pct0>,...
 ```
 5 fields per zone, including the computed drop percentage. `EXT,ALLPARAM` is the dual-mode external variant (emitted every `VL53L5CX_DET_DEBUG_ALLPARAM_INT` frames).
 
-> **Note on the Python tools:** `zone_monitor.py` and `datalogger.py` also implement parsers for an **extended 12-field ALLPARAM layout** (adds ambient, sigma, reflectance, status, spads, targets, drop, valid) and for `MOTION,...` / `DETF,...` / `DET,...` event lines used by an extended/optional debug firmware build. The current build emits only the 5-field format above; the extra parsers are kept for forward/backward compatibility.
+> **Note on the Python tools:** `datalogger.py` also implement parsers for an **extended 12-field ALLPARAM layout** (adds ambient, sigma, reflectance, status, spads, targets, drop, valid) and for `MOTION,...` / `DETF,...` / `DET,...` event lines used by an extended/optional debug firmware build. The current build emits only the 5-field format above; the extra parsers are kept for forward/backward compatibility.
 
 ### BASELINE
 ```
@@ -474,24 +477,16 @@ The `>>> INSECT DETECTED` lines are emitted under `#if PERF_DEBUG_LEVEL >= 1`.
 
 ## 9. Python Tools
 
-### zone_monitor.py (project root)
-Real-time visualization:
-- Set `SERIAL_PORT` (e.g. `COM7`) and `BAUD_RATE` (115200) at the top of the file.
-- `RESOLUTION` **must** match `VL53L5CX_DET_RESOLUTION` in the header (4 or 8); the monitor derives 16/64 zones from it and warns on resolution mismatch.
-- `DUAL_SENSOR_MODE = True` when the firmware has `VL53L5CX_DUAL_SENSOR = 1`; external lines are routed from the `EXT,` prefix (older `S2,` builds are also accepted).
-- Per-sensor tabs (S1 primary, S2 guardian): compact view (signal vs baseline, drop %, motion, per-zone heatmap) and detailed view (per-zone plots).
-- GLOBAL view: temperature, motion/detection state, live detection counter.
-- Threshold indicator lines (6% drop, motion) are drawn for reference.
-- `R` key resets all data.
-
 ### datalogger.py
-Saves every frame to `tof_datalog_<timestamp>.csv` (per-zone signal, distance, baseline, motion, drop %, reflectance columns plus MOTION/DETF globals when present); the output feeds `analysis.py`.
-
-### analysis.py
-Motion-parameter sweep/tuning tool; the parameter block at the top must stay in sync with `vl53l5cx_detection.h`.
+Saves every frame to `tof_datalog_<timestamp>.csv` (per-zone signal, distance, baseline, motion, drop %, reflectance columns plus MOTION/DETF globals when present)
 
 ### vl53l5cx_zone_monitor.py (workspace root)
-Original monitor (S1 / EXT tabs), kept for reference. `zone_monitor.py` is the current tool.
+Real-time S1 / EXT monitor with a **tunable host overlay** that mirrors `app_config.h` SECTION 9:
+- The `DETECTION THRESHOLDS` block at the top of the file holds `THRESHOLD_PCT`, `MOTION_THRESH`, `MIN_AFFECTED_ZONES`, `MIN_SIGNAL` (plus the sensor-plugin values as annotations only). Every variable is commented with the exact firmware define it mirrors and its 4×4 / 8×8 defaults.
+- Those values drive the dashed threshold lines on the plots (each labeled with its firmware define name), the heatmap title, and a per-frame **host trigger prediction** (`[TRIG]` / `host: n/N zones` labels) that replays the firmware trigger logic (TUNING_GUIDE.md §4 "How a trigger is computed"). ZFRAME carries no per-zone status, so the replica skips the firmware's status gate (5/6/9) and predicts *at least* what the firmware fires.
+- The active values are printed to the console at startup.
+- Changing values here is a **preview only** — it never changes the sensor. To make a change stick: edit the matching define in `app_config.h` §9, rebuild, flash. `GRID_SIZE` must match `VL53L5CX_DET_RESOLUTION` and `DUAL_SENSOR` must match `VL53L5CX_DUAL_SENSOR`.
+- `R` key resets all data.
 
 **Dependencies:** `pip install pyserial pyqtgraph numpy`
 
@@ -507,8 +502,8 @@ system_ready = 1;      // gate: FreeRTOS tasks only run after this
 ```
 
 ### app_thread.c → sensor_task()
-- Single mode: `Init → Configure(res, 30, 15) → StartRanging → LearnBaseline → Update()` loop with the busy gate + cooldown + LED/capture handshake described in §7.
-- Dual mode: adds `External_Init/Configure/StartRanging → External_LearnBaseline → Primary_SleepAtStartup` at startup, and `External_Update + Primary_CheckWakeTimeout + Primary_IsActive` gating in the loop (see §6).
+- Single mode: `Init → Configure(res, VL53L5CX_DET_INTEGRATION_MS, VL53L5CX_DET_RANGING_FREQ_HZ) → StartRanging → LearnBaseline → Update()` loop (4×4 default: 30 ms, 15 Hz) with the busy gate + cooldown + LED/capture handshake described in §7 (Detection Logic — "Trigger orchestration & synchronization safeguards").
+- Dual mode: adds `External_Init/Configure/StartRanging → External_LearnBaseline → Primary_SleepAtStartup` at startup, and `External_Update + Primary_CheckWakeTimeout + Primary_IsActive` gating in the loop (see §6, Dual Sensor Mode).
 
 ---
 
@@ -524,9 +519,8 @@ system_ready = 1;      // gate: FreeRTOS tasks only run after this
 | Primary stuck in SLEEP (dual mode) | Wake never confirmed | Lower `VL53L5CX_DUAL_CONFIRM_FRAMES` (2 → 1); check `EXT,ZFRAME` for external detections |
 | Zones printed as 0 / invalid status | Sensor not tracking | Increase integration time, clean the lens, check ambient light |
 | Signal drop always 0% | Baseline not learned or zone invalid | Verify `VL53L5CX_IsBaselineReady()`, re-learn with a clear FOV |
-| Too many false detections | Thresholds too low | Raise `DET_THRESHOLD_PCT`, `DET_MOTION_THRESH`, `DET_MIN_AFFECTED_ZONES` (see TUNING_GUIDE.md §8) |
+| Too many false detections | Thresholds too low | Raise `DET_THRESHOLD_PCT`, `DET_MOTION_THRESH`, `DET_MIN_AFFECTED_ZONES` (see TUNING_GUIDE.md §8, Tuning Scenarios) |
 | No detections at all | Thresholds too high / signal below gate | Lower thresholds; compare `ZFRAME` signal against `DET_MIN_SIGNAL` (500) |
-| Monitor shows no data / resolution mismatch | `zone_monitor.py` `RESOLUTION` ≠ firmware | Sync the `RESOLUTION` and `DUAL_SENSOR_MODE` constants |
 | I2C collisions / bus errors | Camera + ToF share I2C1 | The arbiter (`g_i2c1_mutex`) already guards ToF transfers; verify both ToF and camera I2C wrappers take the mutex |
 | Re-triggers on the same insect | Cooldown too short | Increase the `cooldown = 30` value in `sensor_task` |
 

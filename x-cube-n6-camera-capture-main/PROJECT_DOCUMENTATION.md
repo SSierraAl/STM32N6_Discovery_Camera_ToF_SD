@@ -146,7 +146,7 @@ x-cube-n6-camera-capture-main/
 │   │   ├── app_thread.h                  # Task prototypes, IPC types
 │   │   ├── app_cam.h                     # Camera API, capture mode functions
 │   │   ├── i2c_arbiter.h                 # I2C mutex declaration
-│   │   ├── vl53l5cx_detection.h          # Detection API, config macros
+│   │   ├── vl53l5cx_detection.h          # Detection API (tunables in app_config.h)
 │   │   ├── ws2812.h                      # LED control API
 │   │   ├── perf_debug.h                  # Timing markers, report functions
 │   │   └── debug_color.h                 # RGB color constants
@@ -558,8 +558,13 @@ See [TUNING_GUIDE.md](TUNING_GUIDE.md) for detailed explanation of each paramete
 | `SD_BATCH_RECOVERY_GAP_MS` | app_config.h | 15 | 0-30 | SD inter-batch delay |
 | `WS2812_MODE` | app_config.h | 1 | {0,1,2} | LED behavior |
 | `WS2812_ILLUMINATION_BRIGHTNESS` | app_config.h | 20 | 0-100% | LED brightness |
-| `VL53L5CX_DET_THRESHOLD_PCT` | vl53l5cx_detection.h | 6 (4×4) / 15 (8×8) | 1-100 | Signal drop threshold (%) |
-| `VL53L5CX_DET_MOTION_THRESH` | vl53l5cx_detection.h | 60 (4×4) / 100 (8×8) | 0-255 | Motion indicator threshold |
+| `VL53L5CX_DET_THRESHOLD_PCT` | app_config.h | 6 (4×4) / 15 (8×8) | 1-100 | Signal drop threshold (% of baseline) |
+| `VL53L5CX_DET_MOTION_THRESH` | app_config.h | 60 (4×4) / 100 (8×8) | 32-bit plugin motion value | Motion indicator threshold |
+| `VL53L5CX_DET_MIN_AFFECTED_ZONES` | app_config.h | 1 (4×4) / 2 (8×8) | ≥ 1 | Zones needed for a detection |
+| `VL53L5CX_DET_MIN_SIGNAL` | app_config.h | 500 | kcps/spad | Minimum signal floor (noisy-zone gate) |
+| `VL53L5CX_DET_INTEGRATION_MS` | app_config.h | 30 (4×4) / 800 (8×8) | 2-1000 | Integration time (sensitivity vs frame rate) |
+| `VL53L5CX_DET_RANGING_FREQ_HZ` | app_config.h | 15 | Hz | Requested ranging frequency |
+| `VL53L5CX_RANGING_MODE` | app_config.h | 3 (AUTONOMOUS) | {1, 3} | 1 = CONTINUOUS (integration forced to sensor max) |
 
 ---
 
@@ -700,7 +705,7 @@ python read_sd_image.py D:              # Windows
 | Change frames per detection | `CALLBACK_FRAMES` | app_config.h |
 | Adjust image brightness | `CAM_EXPOSURE_VALUE`, `CAM_GAIN_VALUE` | app_config.h |
 | Fix SD write errors | `SD_BATCH_RECOVERY_GAP_MS` | app_config.h |
-| Make detection more sensitive | `VL53L5CX_DET_THRESHOLD_PCT`, `VL53L5CX_DET_MOTION_THRESH` | vl53l5cx_detection.h |
+| Make detection more sensitive | `VL53L5CX_DET_THRESHOLD_PCT`, `VL53L5CX_DET_MOTION_THRESH` | app_config.h |
 | Change LED color | `WS2812_ILLUMINATION_COLOR` | app_config.h |
 | Change capture mode | `CAPTURE_MODE` | app_config.h |
 

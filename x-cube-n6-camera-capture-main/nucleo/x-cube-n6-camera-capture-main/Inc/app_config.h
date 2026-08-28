@@ -395,4 +395,134 @@
     50-200ms = Brief visual confirmation */
 #define WS2812_INDICATOR_MS          0
 
+/* ================================================================
+   SECTION 9: TOF DETECTION (VL53L5CX)
+   All ToF tuning parameters (moved from vl53l5cx_detection.h,
+   which now includes this file). See Documentation/TUNING_GUIDE.md.
+   ================================================================ */
+
+/** ToF operating mode.
+    0 = Single sensor mode: camera ToF always on, standard VL53L5CX_Update() loop
+    1 = Dual sensor mode:
+        - External sensor (secondary, placed before FOV) is continuously ON
+        - Camera ToF (primary sensor) is in SLEEP mode by default
+        - When external sensor detects motion/signal drop, it wakes the camera ToF
+        - Camera ToF stays active for DUAL_WAKE_DURATION_MS, then returns to sleep */
+#define VL53L5CX_DUAL_SENSOR              0
+
+/** I2C addresses — DOCUMENTATION ONLY (the code hardcodes them):
+    Primary (camera ToF):  0x29 (7-bit) — set in VL53L5CX_Init()
+    External (guardian):   0x31 (7-bit) = 0x62 in the 8-bit "write"
+                           convention — set in VL53L5CX_External_Init()
+    (the platform layer left-shifts the stored value by 1, see Src/platform.c)
+    To re-address a sensor: edit the .c call site AND these defines. */
+#define VL53L5CX_PRIMARY_ADDRESS          0x29
+#define VL53L5CX_EXTERNAL_ADDRESS         0x62
+
+/** Camera ToF wake duration (ms).
+    When the external sensor detects something, the camera ToF is woken up
+    and remains active for this duration before returning to sleep mode. */
+#define VL53L5CX_DUAL_WAKE_DURATION_MS    5000
+
+/** External sensor detection confirmation frames.
+    Number of consecutive detection frames required from the external sensor
+    before waking the camera ToF. Prevents false triggers from momentary noise. */
+#define VL53L5CX_DUAL_CONFIRM_FRAMES      2
+
+/** Secondary sensor baseline samples (can be fewer for faster init). */
+#define VL53L5CX_SENSOR2_BASELINE_SAMPLES 15
+
+/** ToF grid resolution:
+    - 4 = VL53L5CX_RESOLUTION_4X4  (16 zones, faster, lower granularity)
+    - 8 = VL53L5CX_RESOLUTION_8X8  (64 zones, slower, higher granularity) */
+#define VL53L5CX_DET_RESOLUTION       4
+
+/** Ranging mode for the PRIMARY sensor (raw VL53L5CX ULD driver codes,
+    see vl53l5cx_api.h — this ULD implements only these two modes):
+    - 1 = CONTINUOUS : integration time is forced to the sensor maximum
+      (highest sensitivity); VL53L5CX_DET_INTEGRATION_MS below is ignored
+      and the effective frame rate drops below VL53L5CX_DET_RANGING_FREQ_HZ.
+    - 3 = AUTONOMOUS (default): the precise integration time from
+      VL53L5CX_DET_INTEGRATION_MS is used.
+    Applied in VL53L5CX_Configure() (Src/vl53l5cx_detection.c); the startup
+    console line "[ToF] Configured: ... mode=..." shows the active value.
+    The external guardian sensor always runs in CONTINUOUS mode
+    (hardcoded in VL53L5CX_External_Configure()). */
+#define VL53L5CX_RANGING_MODE         3
+
+/** Primary sensor integration time (ms) and ranging frequency (Hz).
+    Passed to VL53L5CX_Configure() from Src/app_thread.c.
+    Driver limit: integration 2..1000 ms (outside the range the call
+    fails and the previous value remains).
+    Trade-off: longer integration = more signal per zone (better low-light
+    / long-range detection) but the requested frequency is only achievable
+    while integration + processing < 1/frequency. */
+#if VL53L5CX_DET_RESOLUTION == 8
+#define VL53L5CX_DET_INTEGRATION_MS   800
+#else
+#define VL53L5CX_DET_INTEGRATION_MS   30
+#endif
+#define VL53L5CX_DET_RANGING_FREQ_HZ  15
+
+/* Resolution-specific baseline samples */
+#if VL53L5CX_DET_RESOLUTION == 8
+#define VL53L5CX_DET_BASELINE_SAMPLES 30
+#else
+#define VL53L5CX_DET_BASELINE_SAMPLES 20
+#endif
+
+/* Resolution-specific detection thresholds
+   (8x8 zones are smaller and noisier, so they need higher thresholds) */
+#if VL53L5CX_DET_RESOLUTION == 8
+#define VL53L5CX_DET_THRESHOLD_PCT      15      /* 8x8: higher signal drop threshold */
+#define VL53L5CX_DET_MOTION_THRESH      100     /* 8x8: higher motion threshold */
+#define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
+#else
+#define VL53L5CX_DET_THRESHOLD_PCT      6       /* 4x4: lower signal drop threshold */
+#define VL53L5CX_DET_MOTION_THRESH      60      /* 4x4: lower motion threshold */
+#define VL53L5CX_DET_MIN_AFFECTED_ZONES 1       /* 4x4: single zone triggers */
+#endif
+
+/* Motion indicator tuning — ST plugin level, applied to the SENSOR (via DCI)
+   in VL53L5CX_Configure() on both sensors. The plugin runs the motion
+   computation inside the sensor's GO2; by default it is programmed to
+   monitor movements between 400 mm and 1500 mm. These values match the
+   plugin's built-in defaults, so the sensor behavior is unchanged.
+   NOTE: they shape the raw per-zone motion values that
+   VL53L5CX_DET_MOTION_THRESH is compared against — after changing any of
+   them, re-datalog and re-check the ZFRAME motion column.
+   See Documentation/TUNING_GUIDE.md, section 4. */
+#define VL53L5CX_DET_MOTION_MIN_ZONES       1   /* min_nb_for_global_detection: zones required for the plugin's GLOBAL motion flag (datalog MOTION lines; not part of the firmware trigger) */
+#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  16  /* nb_of_temporal_accumulations: sensor-side temporal accumulation of the per-zone motion value (higher = smoother, slower reaction) */
+#define VL53L5CX_DET_MOTION_EXTRA_NOISE     0   /* extra_noise_sigma: noise margin added to the plugin's estimate (higher = less sensitive) */
+
+/* Minimum signal threshold:
+   Zones with signal below this are skipped during baseline learning
+   and detection. Prevents false triggers from noisy/blind zones. */
+#define VL53L5CX_DET_MIN_SIGNAL 500
+
+/* Baseline refresh - pick ONE mode at a time:
+   MODE 1 periodic:  PERIODIC_RESTART_ENABLED=1,  ADAPTIVE_REFRESH_ENABLED=0
+   MODE 2 adaptive:  PERIODIC_RESTART_ENABLED=0,  ADAPTIVE_REFRESH_ENABLED=1
+   (adaptive uses a real-time sliding window via xTaskGetTickCount();
+    periodic uses a static frame counter in VL53L5CX_Update()) */
+
+/* MODE 1: Periodic restart (frame-based) - DISABLED by default */
+#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   0
+#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500  /* refresh every N Update() frames */
+
+/* MODE 2: Adaptive refresh (detection-based) - ENABLED by default */
+#define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
+#define VL53L5CX_DET_REFRESH_WINDOW_SECS        15   /* real-time sliding window (seconds) */
+#define VL53L5CX_DET_MAX_DETECTIONS             3    /* max detections per window before refresh */
+
+/* UART1 debug output
+   DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
+   DEBUG MODE 2: ALLPARAM - full per-zone parameters every N frames (datalogger.py)
+   Both can be enabled simultaneously (bandwidth trade-off). */
+#define VL53L5CX_DET_DEBUG_ZFRAME       1
+#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1   /* emit ZFRAME every N Update() frames */
+#define VL53L5CX_DET_DEBUG_ALLPARAMS    0
+#define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
+
 #endif /* APP_CONFIG */

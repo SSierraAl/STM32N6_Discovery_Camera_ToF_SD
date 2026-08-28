@@ -197,7 +197,9 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
     vl53l5cx_set_ranging_frequency_hz(&s_dev, freq_hz);
     vl53l5cx_set_target_order(&s_dev, VL53L5CX_TARGET_ORDER_STRONGEST);
     vl53l5cx_set_sharpener_percent(&s_dev, 10);
-    vl53l5cx_set_ranging_mode(&s_dev, VL53L5CX_RANGING_MODE_AUTONOMOUS);
+    /* VL53L5CX_RANGING_MODE (app_config.h): 1 = CONTINUOUS (integration
+       forced to sensor maximum), 3 = AUTONOMOUS (precise integration). */
+    vl53l5cx_set_ranging_mode(&s_dev, VL53L5CX_RANGING_MODE);
 
 #ifndef VL53L5CX_DISABLE_MOTION_INDICATOR
     int motion_st = vl53l5cx_motion_indicator_init(&s_dev, &s_motion_config, resolution);
@@ -208,15 +210,25 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
         s_motion_config.min_nb_for_global_detection = VL53L5CX_DET_MOTION_MIN_ZONES;
         s_motion_config.nb_of_temporal_accumulations = VL53L5CX_DET_MOTION_PERSIST_FRAMES;
         s_motion_config.extra_noise_sigma = VL53L5CX_DET_MOTION_EXTRA_NOISE;
+        /* The plugin only writes its configuration to the sensor during
+           init/set_resolution, so re-apply it here — otherwise the defines
+           above would have no effect on the sensor. */
+        motion_st = vl53l5cx_motion_indicator_set_resolution(&s_dev, &s_motion_config, resolution);
+        if (motion_st) {
+            printf("[ToF] WARN: Motion indicator re-apply failed: %d (plugin defaults remain)\n",
+                   motion_st);
+        }
         s_motion_initialized = 1;
-        printf("[ToF] Motion indicator enabled\n");
+        printf("[ToF] Motion indicator enabled (global_zones=%d, accum=%d, noise_sigma=%d)\n",
+               VL53L5CX_DET_MOTION_MIN_ZONES, VL53L5CX_DET_MOTION_PERSIST_FRAMES,
+               VL53L5CX_DET_MOTION_EXTRA_NOISE);
     }
 #else
     s_motion_initialized = 0;
 #endif
 
-    printf("[ToF] Configured: res=%d, int=%dms, freq=%dHz\n",
-           resolution, integration_ms, freq_hz);
+    printf("[ToF] Configured: res=%d, int=%dms, freq=%dHz, mode=%d\n",
+           resolution, integration_ms, freq_hz, (int)VL53L5CX_RANGING_MODE);
 }
 
 void VL53L5CX_StartRanging(void)
@@ -309,9 +321,7 @@ void VL53L5CX_LearnBaseline(void)
 
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-            if (s_results.target_status[idx] == 0 ||
-                s_results.target_status[idx] == 5 ||
-                s_results.target_status[idx] == 9) {
+            if (VL53L5CX_STATUS_OK(s_results.target_status[idx])) {
                 if (s_results.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) {
                     continue;
                 }
@@ -368,10 +378,9 @@ int VL53L5CX_Update(void)
         int signal_triggered = 0;
         uint32_t signal_drop = 0;
 
-        /* SIGNAL: original gates, unchanged (zone_valid, status 0/5/9,
+        /* SIGNAL: gates (zone_valid, VL53L5CX_STATUS_OK = 5/6/9,
            signal present, >= MIN, baseline drop > THRESH_PCT). */
-        if (s_zone_valid[z] &&
-            (status == 0 || status == 5 || status == 9)) {
+        if (s_zone_valid[z] && VL53L5CX_STATUS_OK(status)) {
             if (s_results.signal_per_spad[idx] == 0 &&
                 s_baseline_signal[z] > 0 &&
                 s_baseline_signal[z] < VL53L5CX_DET_MIN_SIGNAL) {
@@ -546,7 +555,7 @@ void VL53L5CX_PrintZFrame(void)
         uint16_t cur_dist = 0;
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         uint8_t status = s_results.target_status[idx];
-        if (status == 0 || status == 5 || status == 9) {
+        if (VL53L5CX_STATUS_OK(status)) {
             cur_sig  = s_results.signal_per_spad[idx];
             cur_dist = s_results.distance_mm[idx];
         }
@@ -635,9 +644,7 @@ void VL53L5CX_ReadingTest(void)
         float total_sig = 0, avg_dist = 0, zone_cnt = 0;
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-            if (s_results.target_status[idx] == 0 ||
-                s_results.target_status[idx] == 5 ||
-                s_results.target_status[idx] == 9) {
+            if (VL53L5CX_STATUS_OK(s_results.target_status[idx])) {
                 total_sig += s_results.signal_per_spad[idx];
                 avg_dist += s_results.distance_mm[idx];
                 zone_cnt++;
@@ -668,9 +675,7 @@ void VL53L5CX_MotionTest(void)
 
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-        if (s_results.target_status[idx] == 0 ||
-            s_results.target_status[idx] == 5 ||
-            s_results.target_status[idx] == 9) {
+        if (VL53L5CX_STATUS_OK(s_results.target_status[idx])) {
             uint32_t motion_val = s_results.motion_indicator.motion[s_motion_config.map_id[z]];
             printf("  Zone %2d -> motion=%lu (thresh=%d) %s\n",
                    z, (unsigned long)motion_val, VL53L5CX_DET_MOTION_THRESH,
@@ -832,8 +837,17 @@ void VL53L5CX_External_Configure(void)
         s_motion_config_ext.min_nb_for_global_detection = VL53L5CX_DET_MOTION_MIN_ZONES;
         s_motion_config_ext.nb_of_temporal_accumulations = VL53L5CX_DET_MOTION_PERSIST_FRAMES;
         s_motion_config_ext.extra_noise_sigma = VL53L5CX_DET_MOTION_EXTRA_NOISE;
+        /* Re-apply to the sensor (see VL53L5CX_Configure for why). */
+        motion_st = vl53l5cx_motion_indicator_set_resolution(&s_dev_ext, &s_motion_config_ext,
+            VL53L5CX_RESOLUTION_4X4);
+        if (motion_st) {
+            printf("[EXT] WARN: Motion indicator re-apply failed: %d (plugin defaults remain)\n",
+                   motion_st);
+        }
         s_motion_initialized_ext = 1;
-        printf("[EXT] Motion indicator enabled\n");
+        printf("[EXT] Motion indicator enabled (global_zones=%d, accum=%d, noise_sigma=%d)\n",
+               VL53L5CX_DET_MOTION_MIN_ZONES, VL53L5CX_DET_MOTION_PERSIST_FRAMES,
+               VL53L5CX_DET_MOTION_EXTRA_NOISE);
     }
 #else
     s_motion_initialized_ext = 0;
@@ -884,9 +898,7 @@ void VL53L5CX_External_LearnBaseline(void)
 
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-            if (s_results_ext.target_status[idx] == 0 ||
-                s_results_ext.target_status[idx] == 5 ||
-                s_results_ext.target_status[idx] == 9) {
+            if (VL53L5CX_STATUS_OK(s_results_ext.target_status[idx])) {
                 if (s_results_ext.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) continue;
                 s_baseline_signal_ext[z] += s_results_ext.signal_per_spad[idx];
                 s_baseline_distance_ext[z] += s_results_ext.distance_mm[idx];
@@ -942,9 +954,7 @@ int VL53L5CX_External_Update(void)
 
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
 
-        if (s_results_ext.target_status[idx] != 0 &&
-            s_results_ext.target_status[idx] != 5 &&
-            s_results_ext.target_status[idx] != 9)
+        if (!VL53L5CX_STATUS_OK(s_results_ext.target_status[idx]))
             continue;
 
         if (s_results_ext.signal_per_spad[idx] == 0) continue;
@@ -1078,7 +1088,7 @@ void VL53L5CX_External_PrintZFrame(void)
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         uint8_t status = s_results_ext.target_status[idx];
 
-        if (status == 0 || status == 5 || status == 9) {
+        if (VL53L5CX_STATUS_OK(status)) {
             cur_sig  = s_results_ext.signal_per_spad[idx];
             cur_dist = s_results_ext.distance_mm[idx];
         }
