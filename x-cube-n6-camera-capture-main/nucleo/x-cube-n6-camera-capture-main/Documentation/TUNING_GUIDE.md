@@ -34,6 +34,7 @@ Inc/app_config.h
 ├── SECTION 5:  BUTTON / LED PARAMETERS
 ├── SECTION 7:  PERFORMANCE DEBUG / TIMING
 ├── SECTION 8:  WS2812 ILLUMINATION CONFIGURATION
+├── SECTION 8B: TOF TEST MODE (on-site validation)
 └── SECTION 9:  TOF DETECTION (VL53L5CX)
 ```
 
@@ -288,7 +289,7 @@ All ToF parameters live in the **SECTION 9 "ToF Detection (VL53L5CX)"** block of
 | Debug UART output | `VL53L5CX_DET_DEBUG_ZFRAME*`, `VL53L5CX_DET_DEBUG_ALLPARAM*` | `app_config.h` §9 | ZFRAME on, ALLPARAM off |
 | I2C addresses | — **hardcoded, not a define** | `Src/vl53l5cx_detection.c`: primary `0x29` in `VL53L5CX_Init()`, external `0x31` (7-bit, = `0x62` 8-bit) in `VL53L5CX_External_Init()` | — |
 | External (guardian) sensor timing | — **hardcoded** | `VL53L5CX_External_Configure()`: 4×4, 800 ms, 15 Hz, CONTINUOUS, CLOSEST | — |
-| Python tuning variables | `MOTION_THRESH`, `MIN_AFFECTED_ZONES`, … | top of `analysis.py` | see "Translating an analysis.py sweep into the firmware" below |
+| Python tuning variables | `MOTION_THRESH`, `MIN_AFFECTED_ZONES`, … | top of `vl53l5cx_analysis.py` (workspace root) | see "Translating a vl53l5cx_analysis.py sweep into the firmware" below |
 | Preview thresholds live (host overlay only) | `THRESHOLD_PCT`, `MOTION_THRESH`, `MIN_AFFECTED_ZONES`, `MIN_SIGNAL` | top of `vl53l5cx_zone_monitor.py` (workspace root) | 6 / 60 / 1 / 500 (4×4) — mirrors the §9 defines; does NOT change the firmware |
 
 ### How a trigger is computed (exact logic)
@@ -475,15 +476,15 @@ Number of frames averaged while learning the per-zone signal baseline at startup
 
 ---
 
-### Translating an analysis.py sweep into the firmware
+### Translating a vl53l5cx_analysis.py sweep into the firmware
 
-`analysis.py` (project root) replays the recorded per-zone motion values and, for each candidate pair (threshold T, min-zones M), counts the frames that would trip the firmware motion trigger:
+`vl53l5cx_analysis.py` (workspace root, next to `vl53l5cx_datalogger.py`) replays the recorded per-zone motion values and, for each candidate pair (threshold T, min-zones M), counts the frames that would trip the firmware motion trigger:
 
 ```
 triggered_frame = (number of zones with motion >= T) >= M
 ```
 
-| analysis.py variable (top of file) | Firmware define to edit (`app_config.h` §9) |
+| vl53l5cx_analysis.py variable (top of file) | Firmware define to edit (`app_config.h` §9) |
 |---|---|
 | `MOTION_THRESH` (marked on plots) | `VL53L5CX_DET_MOTION_THRESH` |
 | `MIN_AFFECTED_ZONES` (marked on plots) | `VL53L5CX_DET_MIN_AFFECTED_ZONES` |
@@ -495,10 +496,10 @@ triggered_frame = (number of zones with motion >= T) >= M
 
 **Workflow:**
 1. Set `VL53L5CX_DET_DEBUG_ALLPARAMS 1` in `app_config.h` §9, rebuild, flash.
-2. `python datalogger.py` → record a CSV (empty scene first, then your target insect).
-3. `python analysis.py <csv>` → open the sweep table; pick (T, M) with few `events` on the empty-scene frames that still catches the insect.
+2. `python vl53l5cx_datalogger.py` (workspace root) → records `datalog\tof_datalog_<timestamp>.csv` next to the script (launch-folder independent; `RESOLUTION` must match the firmware). Record an empty scene first, then your target insect. `E` exports the session summary (`*_summary.csv`), `S` stops and closes with a console recap.
+3. From the workspace root: `python vl53l5cx_analysis.py` (auto-detects the newest datalog in `datalog\`, or pass a specific CSV) → open the sweep table (`motion_threshold_sweep.csv` + plot 13); pick (T, M) with few `events` on the empty-scene frames that still catches the insect.
 4. Edit the two defines in `app_config.h` §9, rebuild, flash.
-5. Keep the same values in the `analysis.py` header block so the next report marks the new firmware point.
+5. Keep the same values in the `vl53l5cx_analysis.py` header block so the next report marks the new firmware point.
 
 > **Live preview (optional, any time):** the `DETECTION THRESHOLDS` block at the top of `vl53l5cx_zone_monitor.py` (workspace root) mirrors the same §9 defines and drives the labeled threshold lines, the heatmap title, and a per-frame host trigger prediction. Change the values there while the sensor streams to *preview* a candidate setting in real time — it is host-side only; the firmware still runs with the values in `app_config.h`.
 
@@ -521,6 +522,14 @@ When `DUAL_SENSOR = 1`, the external "guardian" sensor runs continuously and the
 
 **Tuning**: Primary never wakes → lower `CONFIRM_FRAMES` to 1 and check the `EXT,ZFRAME` serial output. Too many false wakes → raise to 3-4. The I2C addresses are fixed at power-up (the external is re-addressed from 0x29 → 0x62) — do not change them without updating the power-up sequence.
 
+### `TEST_TOF_MODE` — ToF-Only Test Mode (on-site validation)
+```c
+#define TEST_TOF_MODE    1    /* app_config.h §8B: 1 = LED-only, 0 = production */
+#define TEST_TOF_LED_MS  3000 /* LED indication duration (ms) */
+```
+With `TEST_TOF_MODE = 1`, a detection does **not** trigger the camera or SD card: the RED board LED + WS2812 strip (white, 100%) stay on for `TEST_TOF_LED_MS` then turn off automatically, and the console prints the trigger source and the **affected zone numbers** with their drop/motion values. Everything else (baseline learning, periodic refresh, signal + motion trigger rules, 30-frame cooldown) is unchanged.
+Use it on-site to validate sensor position/orientation and to calibrate the detection thresholds in this section; **revert to 0 for production** (button-triggered capture still works in test mode).
+
 ---
 
 ### ToF troubleshooting — symptom → knob
@@ -535,9 +544,10 @@ When `DUAL_SENSOR = 1`, the external "guardian" sensor runs continuously and the
 | Only the first frame after boot/wake is accepted (or none) | Console status values | The status gate accepts only 5/6/9 — 0 (stale data) is correctly rejected; if fresh frames never arrive: integration too long for the requested frequency, or ranging not started (`StartRanging` failed in the console log) |
 | Sensitivity slowly decays over a session | Console "Adaptive refresh" lines | `ADAPTIVE_REFRESH` `MAX_DETECTIONS` (↓) or enable `PERIODIC_RESTART` (1) with `INTERVAL` (500) |
 | Dual mode: guardian sees it, primary never wakes | Console `[EXT] Detection confirmed!` lines | `DUAL_CONFIRM_FRAMES` (↓ to 1), `DUAL_WAKE_DURATION_MS` (↑) |
-| Dual mode: false wakes | Guardian ZFRAME (it uses the same §9 defines) | `THRESHOLD_PCT` / `MOTION_THRESH` (↑), `DUAL_CONFIRM_FRAMES` (↑ to 3–4) |
+| Dual mode: false wakes | Guardian ZFRAME (it uses the same `app_config.h` §9 defines) | `THRESHOLD_PCT` / `MOTION_THRESH` (↑), `DUAL_CONFIRM_FRAMES` (↑ to 3–4) |
 | "Primary ToF baseline not ready!" at boot (task stops) | LearnBaseline console output | Field of view blocked? Raise `INTEGRATION_MS`, lower `MIN_SIGNAL`, raise `BASELINE_SAMPLES` (→ 30) |
-| No ZFRAME/ALLPARAM on UART | `VL53L5CX_DET_DEBUG_*` flags in `app_config.h` §9 | set `DEBUG_ZFRAME` (or `DEBUG_ALLPARAMS`) to 1 and rebuild |
+| No ZFRAME/ALLPARAM on UART | `VL53L5CX_DET_DEBUG_*` flags in `app_config.h` §9 | set `DEBUG_ZFRAME` (or `DEBUGALLPARAMS`) to 1 and rebuild |
+| Validating sensor position/orientation on-site (no photos wanted) | Console `>>> TEST:` zone list | `TEST_TOF_MODE` (`app_config.h` §8B) → 1: LED-only indication for `TEST_TOF_LED_MS` + per-zone console output. Revert to 0 for production |
 
 ---
 
@@ -691,6 +701,22 @@ Step 3: Reduce SD_BATCH_RECOVERY_GAP_MS (15 → 10) if card allows
 Step 4: Use a faster SD card (U3/V30 rated)
 ```
 
+### Scenario 8: "Validate ToF placement on-site (no capture)"
+```
+Step 1: Set TEST_TOF_MODE = 1 (app_config.h §8B) and rebuild
+**It is recommended to also put VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED and VL53L5CX_DET_PERIODIC_RESTART_ENABLED to 0** in order to validate the detections on-site.
+Step 2: Mount the unit at its final position and power-cycle it once
+        (baseline learning runs at boot — it must learn the real site)
+Step 3: Move a target (insect, hand, card) across the detection area at
+        different speeds — watch the LEDs and the console, no SD card needed
+Step 4: Read the ">>> TEST:" lines: trigger source (SIGNAL/MOTION) and the
+        affected zone numbers (0-15 on the 4x4 grid) show WHERE in the FOV
+        the target was — rotate/reposition the sensor until zones cluster
+        where the target is expected to cross
+Step 5: Tune thresholds here (Scenarios 4-5) and re-test
+Step 6: Set TEST_TOF_MODE = 0 for the production build
+```
+
 ---
 
 ## 9. Parameter Dependencies
@@ -727,4 +753,4 @@ VL53L5CX_DET_THRESHOLD_PCT + VL53L5CX_DET_MIN_AFFECTED_ZONES:
 
 ---
 
-*Parameter Tuning Guide — Updated July 2026*
+*Parameter Tuning Guide — Updated September 2026*

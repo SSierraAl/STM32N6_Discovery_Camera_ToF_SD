@@ -3,7 +3,7 @@
 
 **Developers:** 
 *   Dr. Sebastian Sierra Alarcon
-*   Rafael Hernan Valverde
+*   Hernan Rafael Valverde
 
 **Établissement coordinateur:** INRAE  
 **Établissements partenaires:** CNRS | INP Toulouse | Sorbonne Université | Muséum national d'Histoire naturelle | ONF  

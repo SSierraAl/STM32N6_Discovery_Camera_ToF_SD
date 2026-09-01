@@ -424,6 +424,22 @@ void sensor_task(void *arg)
                 else trig_str = "UNKNOWN";
                 printf(">>> INSECT DETECTED (Primary, woken by external) [%s]!\n", trig_str);
 #endif
+
+#if TEST_TOF_MODE
+                /* === ON-SITE TEST MODE: no camera, no SD — indication only === */
+                printf(">>> TEST: %u zone(s) affected, %u valid\r\n",
+                       (unsigned)res.affected_count, (unsigned)res.valid_measurements);
+                for (int a = 0; a < res.affected_count; a++)
+                    printf("    zone %u -> %lu\r\n", (unsigned)res.affected_zones[a],
+                           (unsigned long)res.affected_drop[a]);
+                BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
+                WS2812_Flash(0xFFFFFF, 100, TEST_TOF_LED_MS);
+                BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+                g_sensor_state = SENSOR_STATE_RUNNING;
+                g_capture_busy = 0;
+                cooldown = 30;
+                continue;
+#else
                 BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
 #if WS2812_MODE == 1
                 WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
@@ -458,6 +474,7 @@ void sensor_task(void *arg)
                     printf("[SENSOR] Capture FAILED rc=%d\n", rc);
 #endif
                 }
+#endif /* TEST_TOF_MODE */
             }
         }
 #else
@@ -486,6 +503,26 @@ void sensor_task(void *arg)
             else trig_str = "UNKNOWN";
             printf(">>> INSECT DETECTED [%s]!\n", trig_str);
 #endif
+
+#if TEST_TOF_MODE
+            /* === ON-SITE TEST MODE: no camera, no SD — indication only ===
+               Zone list shows WHERE in the FOV the target was, so sensor
+               position/orientation can be validated. The strip flash is
+               self-contained (on for TEST_TOF_LED_MS, then off, global
+               brightness restored). */
+            printf(">>> TEST: %u zone(s) affected, %u valid\r\n",
+                   (unsigned)res.affected_count, (unsigned)res.valid_measurements);
+            for (int a = 0; a < res.affected_count; a++)
+                printf("    zone %u -> %lu\r\n", (unsigned)res.affected_zones[a],
+                       (unsigned long)res.affected_drop[a]);
+            BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
+            WS2812_Flash(0xFFFFFF, 100, TEST_TOF_LED_MS);
+            BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+            g_sensor_state = SENSOR_STATE_RUNNING;
+            g_capture_busy = 0;
+            cooldown = 30;
+            continue;
+#else
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
 #if WS2812_MODE == 1
             WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
@@ -520,6 +557,7 @@ void sensor_task(void *arg)
                 printf("[SENSOR] Capture FAILED rc=%d\n", rc);
 #endif
             }
+#endif /* TEST_TOF_MODE */
         }
 #endif /* VL53L5CX_DUAL_SENSOR */
 

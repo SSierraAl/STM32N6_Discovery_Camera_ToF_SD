@@ -24,7 +24,8 @@ The detection module compares live per-zone signal data against a learned baseli
 | `Src/platform.c` | VL53L5CX low-level I2C (every transfer wrapped by the arbiter mutex) |
 | `Src/i2c_arbiter.c/.h` | `g_i2c1_mutex` — serializes I2C1 traffic between camera and ToF |
 | `vl53l5cx_zone_monitor.py` | S1/EXT real-time monitor with a tunable threshold overlay mirroring `app_config.h` §9 (workspace root) |
-| `datalogger.py` | CSV data logging for offline tuning |
+| `vl53l5cx_datalogger.py` | CSV data logging for offline tuning (workspace root; writes to the workspace-root `datalog\` folder) |
+| `vl53l5cx_analysis.py` | Offline analysis + engineering reports from the datalog CSVs (workspace root; run from the workspace root) |
 
 *Thread ownership:* all ToF polling and trigger logic is strictly owned by `sensor_task`. The ToF and the camera share the physical I2C1 bus; the arbiter mutex (`g_i2c1_mutex`) serializes their traffic.
 
@@ -161,7 +162,7 @@ The header explicitly states to pick one mode at a time. The frame counter is a 
 #define VL53L5CX_DET_DEBUG_ZFRAME     1
 #define VL53L5CX_DET_DEBUG_ZFRAME_INT 1   /* emit ZFRAME every N Update() frames */
 
-/* DEBUG MODE 2: ALLPARAM (for datalogger.py) */
+/* DEBUG MODE 2: ALLPARAM (for vl53l5cx_datalogger.py) */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 ```
@@ -184,6 +185,22 @@ Both modes can be enabled simultaneously:
 The primary values come from `app_config.h` §9 and are passed to `VL53L5CX_Configure()` by `Src/app_thread.c`; the external column is hardcoded in `VL53L5CX_External_Configure()`. The driver accepts integration times of **2–1000 ms** only.
 
 The ST motion indicator plugin runs the motion computation **inside the sensor's GO2** (programmed by default to monitor movement between 400 and 1500 mm) and is initialized inside `VL53L5CX_Configure()` (and `VL53L5CX_External_Configure()`) unless the driver is built with `VL53L5CX_DISABLE_MOTION_INDICATOR`. The plugin's `min_nb_for_global_detection`, `nb_of_temporal_accumulations` and `extra_noise_sigma` fields are set from the `MOTION_*` defines and **re-applied to the sensor** with `vl53l5cx_motion_indicator_set_resolution()` — the plugin only DCI-writes its configuration during init/set-resolution, so without the re-apply the defines would have no effect on the sensor. The current define values (1 / 16 / 0) match the plugin's built-in defaults. `VL53L5CX_MotionTest()` (manual hook, currently commented out in `main.c`) prints the global motion indicators and every zone's motion value against `VL53L5CX_DET_MOTION_THRESH`.
+
+### 4.7 Test mode (`TEST_TOF_MODE`) — on-site commissioning
+
+```c
+/* app_config.h §8B */
+#define TEST_TOF_MODE    1    /* 1 = LED-only indication, no camera/SD */
+#define TEST_TOF_LED_MS  3000 /* indication duration (ms) */
+```
+
+With `TEST_TOF_MODE = 1` the ToF pipeline is unchanged (init, configure, baseline learning, periodic refresh, the same signal + motion trigger rules), but the *reaction* to a detection replaces the capture:
+
+- console: trigger source (`SIGNAL` / `MOTION` / `SIGNAL+MOTION`) plus the **affected zone numbers** and their drop/motion values — the zone indices (0–15 on the default 4×4 grid) show *where* in the FOV the target was, which validates sensor position/orientation;
+- the RED board LED and the WS2812 strip (white, 100%, via the self-contained `WS2812_Flash()`) stay on for `TEST_TOF_LED_MS`, then turn off automatically;
+- no camera init, no snapshot, no SD write; the sensor is never stopped, and the normal 30-frame cooldown applies afterwards.
+
+Use it on-site to position the sensor, watch insects at different speeds, and calibrate the `app_config.h` §9 detection thresholds without consuming SD cards. **Set it back to `0` for production builds** (button-triggered camera capture still works either way).
 
 ---
 
@@ -211,6 +228,8 @@ Standard operation: the camera ToF sensor runs continuously.
                               | cooldown=30 |              +------------+
                               +-------------+
 ```
+
+With `TEST_TOF_MODE = 1` (§4.7) the "Capture" box becomes a `TEST_TOF_LED_MS` (3 s) LED-only indication — no camera, no SD.
 
 ### API flow
 
@@ -422,7 +441,7 @@ Refresh procedure: `vl53l5cx_stop_ranging()` → 50 ms → `vl53l5cx_start_rangi
 1. **The busy gate (`g_capture_busy`):** if a capture/SD write is already in flight, the new detection is dropped (no queue buildup, no re-entrant triggers).
 2. **I2C arbitration:** the ToF and the camera share the physical I2C1 bus; every ToF I2C transfer in `platform.c` takes `g_i2c1_mutex`, so ToF polling never collides with camera register access.
 3. **The cooldown phase:** after a successful trigger, `cooldown = 30` frames. During cooldown, detections are ignored — a dead time while the insect leaves and the LED afterglow decays.
-4. **State handshake:** on trigger, the task sets `SENSOR_STATE_PAUSED`, drives the LEDs, issues `Capture_RequestSnapshot(60000)`, restores `SENSOR_STATE_RUNNING` and restarts ranging.
+4. **State handshake:** on trigger, the task sets `SENSOR_STATE_PAUSED`, drives the LEDs, issues `Capture_RequestSnapshot(60000)`, restores `SENSOR_STATE_RUNNING` and restarts ranging. In `TEST_TOF_MODE = 1` (§4.7) the snapshot issue is replaced by the self-contained `TEST_TOF_LED_MS` LED indication, and ranging is neither stopped nor restarted (the sensor is never paused).
 
 ---
 
@@ -445,7 +464,7 @@ ALLPARAM,<temp>,<cur_sig0>,<base_sig0>,<cur_dist0>,<base_dist0>,<drop_pct0>,...
 ```
 5 fields per zone, including the computed drop percentage. `EXT,ALLPARAM` is the dual-mode external variant (emitted every `VL53L5CX_DET_DEBUG_ALLPARAM_INT` frames).
 
-> **Note on the Python tools:** `datalogger.py` also implement parsers for an **extended 12-field ALLPARAM layout** (adds ambient, sigma, reflectance, status, spads, targets, drop, valid) and for `MOTION,...` / `DETF,...` / `DET,...` event lines used by an extended/optional debug firmware build. The current build emits only the 5-field format above; the extra parsers are kept for forward/backward compatibility.
+> **Note on the Python tools:** `vl53l5cx_datalogger.py` also implements parsers for an **extended 12-field ALLPARAM layout** (adds ambient, sigma, reflectance, status, spads, targets, drop, valid) and for `MOTION,...` / `DETF,...` / `DET,...` event lines used by an extended/optional debug firmware build. The current build emits only the 5-field format above; the extra parsers are kept for forward/backward compatibility.
 
 ### BASELINE
 ```
@@ -477,8 +496,21 @@ The `>>> INSECT DETECTED` lines are emitted under `#if PERF_DEBUG_LEVEL >= 1`.
 
 ## 9. Python Tools
 
-### datalogger.py
-Saves every frame to `tof_datalog_<timestamp>.csv` (per-zone signal, distance, baseline, motion, drop %, reflectance columns plus MOTION/DETF globals when present)
+All three tools sit together in the **workspace root** (`STM32N6_Discovery_Camera_ToF_SD\`, the parent of `x-cube-n6-camera-capture-main\`), and every datalog session — CSV, summary, plots, reports — lands in the single `datalog\` folder there.
+
+### vl53l5cx_datalogger.py (workspace root)
+- Live session window with **Signal Heatmap**, **Distance Heatmap**, **Motion Heatmap** and **Session Control** tabs; the heatmaps use the same orientation as the zone monitor (FLIP_V, Z0 top-left).
+- Saves every frame to `datalog\tof_datalog_<timestamp>.csv` (per-zone signal, distance, baseline, motion, drop %, reflectance columns plus MOTION/DETF globals when present). The data folder resolves next to the script, so it can be launched from any working directory.
+- Keys: `E` = Export Summary Report (`tof_datalog_<timestamp>_summary.csv` with per-zone statistics), `S` = Stop & Exit (console recap + summary report). `RESOLUTION` at the top must match `VL53L5CX_DET_RESOLUTION`, and `SERIAL_PORT` must be set.
+- **Dependencies:** `pip install pyserial numpy pyqtgraph`
+
+### vl53l5cx_analysis.py (workspace root)
+- Reads a datalog CSV and produces the engineering report: `python vl53l5cx_analysis.py` auto-detects the newest `datalog\tof_datalog_*.csv` (end-of-session `*_summary.csv` files are excluded), or pass a specific CSV as argument.
+- **Must be run from the workspace root** — it reads the CWD-relative `datalog/` folder.
+- Prints a per-zone summary table to the console, then writes to `datalog\tof_datalog_<timestamp>_plots\`: 14 PNGs (`01_signal_boxplot` … `13_threshold_sweep`, incl. `05_stability_heatmap`, `05b_motion_heatmap`, `09_timeseries_motion`, `10_motion_histogram`, `11_max_motion_flags`, `12_flagged_zones`), the sweep table `motion_threshold_sweep.csv`, and `analysis_report_<timestamp>.pdf` / `.html` with all plots embedded.
+- Heatmaps use the same FLIP_V orientation as the live monitor; the motion heatmap (`hot` colormap) picks each zone label's color from the normalized cell intensity, so labels stay readable on both dark and bright cells.
+- The tuning constants at the top of the file (`MOTION_THRESH`, `MIN_AFFECTED_ZONES`, …) mirror `app_config.h` §9 and are marked on the plots — see TUNING_GUIDE.md §4 "Translating a vl53l5cx_analysis.py sweep into the firmware".
+- **Dependencies:** `pip install numpy pandas matplotlib seaborn scipy`
 
 ### vl53l5cx_zone_monitor.py (workspace root)
 Real-time S1 / EXT monitor with a **tunable host overlay** that mirrors `app_config.h` SECTION 9:
@@ -523,6 +555,7 @@ system_ready = 1;      // gate: FreeRTOS tasks only run after this
 | No detections at all | Thresholds too high / signal below gate | Lower thresholds; compare `ZFRAME` signal against `DET_MIN_SIGNAL` (500) |
 | I2C collisions / bus errors | Camera + ToF share I2C1 | The arbiter (`g_i2c1_mutex`) already guards ToF transfers; verify both ToF and camera I2C wrappers take the mutex |
 | Re-triggers on the same insect | Cooldown too short | Increase the `cooldown = 30` value in `sensor_task` |
+| On-site: validate sensor position/orientation without taking photos | `TEST_TOF_MODE` in `app_config.h` §8B | Set to 1: detection gives a 3 s LED indication (`TEST_TOF_LED_MS`) and prints the affected zone numbers — no camera/SD involved. Revert to 0 for production |
 
 ---
 

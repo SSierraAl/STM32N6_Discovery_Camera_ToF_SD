@@ -27,9 +27,35 @@ BAUD_RATE        = 115200
 MAX_POINTS       = 100
 GRID_SIZE        = 4       # MUST match VL53L5CX_DET_RESOLUTION in app_config.h (4 or 8)
 NUM_ZONES        = GRID_SIZE * GRID_SIZE  # 16
-PLOT_ZONES       = 8       # zones to show on line charts
+PLOT_ZONES       = 16       # zones to show on line charts
 COMPACT_FIELDS   = 5       # sig, dist, base_sig, base_dist, motion
-DUAL_SENSOR      = True    # match VL53L5CX_DUAL_SENSOR in app_config.h
+DUAL_SENSOR      = False    # match VL53L5CX_DUAL_SENSOR in app_config.h
+
+# ==================================================================
+# Zone-grid orientation (display layout)
+# ==================================================================
+# Firmware data order is Z0..Z15, row by row (z = 4*row + col).
+# With both flips False (the layout validated against the manual's
+# SPAD figure): Z0 bottom-left, the z=0..3 row at the BOTTOM,
+# Z15 top-right. The heatmap title shows the active combination:
+#
+#   (V=F,H=F) validated layout (manual SPAD figure)   Z0 bottom-left
+#   (V=T,H=F) vertical flip                           Z0 top-left
+#   (V=F,H=T) horizontal flip (scene view through the
+#             Rx lens: Z0 sees the target top-right)  Z0 bottom-right
+#   (V=T,H=T) 180-deg rotation of (V=F,H=F)           Z0 top-right
+FLIP_V = True
+FLIP_H = False
+
+# pyqtgraph 0.14: ImageItem's default mode ("col-major") draws the
+# array's FIRST axis horizontally, so hm[row][col] would show its rows
+# as screen columns. Transposing before setImage makes the matrix rows
+# run down the screen (matching FLIP_V and the zone order). Keep True.
+COLOR_TRANSPOSE = True
+
+# Draw the Z0..Z15 overlay on the heatmap (handy to verify orientation;
+# set False for a clean display).
+SHOW_ZONE_LABELS = True
 
 # ================================================================
 # DETECTION THRESHOLDS — mirror Inc/app_config.h, SECTION 9
@@ -157,7 +183,19 @@ class Sensor:
                 lut[i] = [255, int(255 * (1 - (t - 0.5) * 2)), 0, 255]  # yellow->red
         self.img.setLookupTable(lut)
         self.img.setLevels([0, 25])
-        self.hm.setTitle(f"{GRID_SIZE}x{GRID_SIZE} Drop%  (host trigger: > {THRESHOLD_PCT}% and sig >= {MIN_SIGNAL})")
+        self.hm.setTitle(f"{GRID_SIZE}x{GRID_SIZE} Drop%  [FLIP V={int(FLIP_V)} H={int(FLIP_H)}]  (host trigger: > {THRESHOLD_PCT}% and sig >= {MIN_SIGNAL})")
+        # Z-ID overlay: placed with the same FLIP logic as the colors, so
+        # the labels always sit under the matching colored cells.
+        if SHOW_ZONE_LABELS:
+            for z in range(NUM_ZONES):
+                r, c = z // GRID_SIZE, z % GRID_SIZE
+                if FLIP_V:
+                    r = GRID_SIZE - 1 - r
+                if FLIP_H:
+                    c = GRID_SIZE - 1 - c
+                ti = pg.TextItem(f'Z{z}', color='#e8e8e8', anchor=(0.5, 0.5))
+                ti.setPos(c, r)
+                self.hm.addItem(ti)
         right.addWidget(self.hm)
 
         # info labels (plain QLabel, no pyqtgraph)
@@ -207,10 +245,16 @@ class Sensor:
             self.c_drop[z].setData(list(self.drop[z]))
             self.c_mot[z].setData(list(self.motion[z]))
 
-        # heatmap
+        # heatmap (orientation: see FLIP_V / FLIP_H / COLOR_TRANSPOSE above)
         hm = np.zeros((GRID_SIZE, GRID_SIZE))
         for z in range(NUM_ZONES):
             hm[z // GRID_SIZE, z % GRID_SIZE] = zones[z]['drop']
+        if FLIP_V:
+            hm = hm[::-1, :].copy()      # top <-> bottom
+        if FLIP_H:
+            hm = hm[:, ::-1].copy()      # left <-> right
+        if COLOR_TRANSPOSE:
+            hm = hm.T.copy()             # pyqtgraph col-major correction (keep True)
         self.img.setImage(hm, autoLevels=False)
 
         # status + host-side trigger replica

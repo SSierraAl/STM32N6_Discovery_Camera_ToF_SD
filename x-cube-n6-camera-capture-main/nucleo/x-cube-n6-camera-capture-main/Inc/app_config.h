@@ -396,6 +396,26 @@
 #define WS2812_INDICATOR_MS          0
 
 /* ================================================================
+   SECTION 8B: TOF TEST MODE (on-site commissioning)
+   ================================================================
+   1 = TEST MODE: the ToF loop runs exactly like production
+       (init, configure, baseline learning, periodic refresh,
+       detection), but on detection NO photo is taken and NOTHING is
+       saved. Instead:
+         - console: trigger source + list of affected zones
+           (zone numbers show WHERE in the FOV the target was, so
+           sensor position/orientation can be validated)
+         - RED board LED + WS2812 strip (white, 100%) ON for
+           TEST_TOF_LED_MS, then off
+       Use for: on-site positioning of the sensor, watching insects
+       at different speeds, calibrating detection thresholds.
+   0 = PRODUCTION: normal capture + SD save on detection. */
+#define TEST_TOF_MODE                1
+
+/** LED indication duration in TEST_TOF_MODE (ms). */
+#define TEST_TOF_LED_MS              300
+
+/* ================================================================
    SECTION 9: TOF DETECTION (VL53L5CX)
    All ToF tuning parameters (moved from vl53l5cx_detection.h,
    which now includes this file). See Documentation/TUNING_GUIDE.md.
@@ -512,7 +532,7 @@
 #define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500  /* refresh every N Update() frames */
 
 /* MODE 2: Adaptive refresh (detection-based) - ENABLED by default */
-#define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
+#define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   0
 #define VL53L5CX_DET_REFRESH_WINDOW_SECS        15   /* real-time sliding window (seconds) */
 #define VL53L5CX_DET_MAX_DETECTIONS             3    /* max detections per window before refresh */
 

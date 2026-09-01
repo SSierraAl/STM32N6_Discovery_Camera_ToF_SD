@@ -61,7 +61,7 @@
    All other statuses (7 no-return, 8 no-target, saturation, error...) are
    likewise rejected: acting on them means reacting to missing data.
    NOTE: the primary sensor's motion channel is status-independent. */
-#define VL53L5CX_STATUS_OK(st) \
+#define VL53L5CX_STATUS_OK_FILT(st) \
     ((st) == 5 || (st) == 6 || (st) == 9)
 
 

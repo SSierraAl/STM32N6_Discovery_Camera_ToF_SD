@@ -321,7 +321,7 @@ void VL53L5CX_LearnBaseline(void)
 
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-            if (VL53L5CX_STATUS_OK(s_results.target_status[idx])) {
+            if (VL53L5CX_STATUS_OK_FILT(s_results.target_status[idx])) {
                 if (s_results.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) {
                     continue;
                 }
@@ -378,9 +378,9 @@ int VL53L5CX_Update(void)
         int signal_triggered = 0;
         uint32_t signal_drop = 0;
 
-        /* SIGNAL: gates (zone_valid, VL53L5CX_STATUS_OK = 5/6/9,
+        /* SIGNAL: gates (zone_valid, VL53L5CX_STATUS_OK_FILT = 5/6/9,
            signal present, >= MIN, baseline drop > THRESH_PCT). */
-        if (s_zone_valid[z] && VL53L5CX_STATUS_OK(status)) {
+        if (s_zone_valid[z] && VL53L5CX_STATUS_OK_FILT(status)) {
             if (s_results.signal_per_spad[idx] == 0 &&
                 s_baseline_signal[z] > 0 &&
                 s_baseline_signal[z] < VL53L5CX_DET_MIN_SIGNAL) {
@@ -555,7 +555,7 @@ void VL53L5CX_PrintZFrame(void)
         uint16_t cur_dist = 0;
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         uint8_t status = s_results.target_status[idx];
-        if (VL53L5CX_STATUS_OK(status)) {
+        if (VL53L5CX_STATUS_OK_FILT(status)) {
             cur_sig  = s_results.signal_per_spad[idx];
             cur_dist = s_results.distance_mm[idx];
         }
@@ -644,7 +644,7 @@ void VL53L5CX_ReadingTest(void)
         float total_sig = 0, avg_dist = 0, zone_cnt = 0;
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-            if (VL53L5CX_STATUS_OK(s_results.target_status[idx])) {
+            if (VL53L5CX_STATUS_OK_FILT(s_results.target_status[idx])) {
                 total_sig += s_results.signal_per_spad[idx];
                 avg_dist += s_results.distance_mm[idx];
                 zone_cnt++;
@@ -675,7 +675,7 @@ void VL53L5CX_MotionTest(void)
 
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-        if (VL53L5CX_STATUS_OK(s_results.target_status[idx])) {
+        if (VL53L5CX_STATUS_OK_FILT(s_results.target_status[idx])) {
             uint32_t motion_val = s_results.motion_indicator.motion[s_motion_config.map_id[z]];
             printf("  Zone %2d -> motion=%lu (thresh=%d) %s\n",
                    z, (unsigned long)motion_val, VL53L5CX_DET_MOTION_THRESH,
@@ -898,7 +898,7 @@ void VL53L5CX_External_LearnBaseline(void)
 
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
-            if (VL53L5CX_STATUS_OK(s_results_ext.target_status[idx])) {
+            if (VL53L5CX_STATUS_OK_FILT(s_results_ext.target_status[idx])) {
                 if (s_results_ext.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) continue;
                 s_baseline_signal_ext[z] += s_results_ext.signal_per_spad[idx];
                 s_baseline_distance_ext[z] += s_results_ext.distance_mm[idx];
@@ -954,7 +954,7 @@ int VL53L5CX_External_Update(void)
 
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
 
-        if (!VL53L5CX_STATUS_OK(s_results_ext.target_status[idx]))
+        if (!VL53L5CX_STATUS_OK_FILT(s_results_ext.target_status[idx]))
             continue;
 
         if (s_results_ext.signal_per_spad[idx] == 0) continue;
@@ -1088,7 +1088,7 @@ void VL53L5CX_External_PrintZFrame(void)
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         uint8_t status = s_results_ext.target_status[idx];
 
-        if (VL53L5CX_STATUS_OK(status)) {
+        if (VL53L5CX_STATUS_OK_FILT(status)) {
             cur_sig  = s_results_ext.signal_per_spad[idx];
             cur_dist = s_results_ext.distance_mm[idx];
         }
