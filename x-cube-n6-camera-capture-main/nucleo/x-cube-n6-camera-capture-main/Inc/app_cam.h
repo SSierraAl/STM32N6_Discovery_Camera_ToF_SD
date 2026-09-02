@@ -204,6 +204,52 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
  */
 int CAM_IsCallbackReady(void);
 
+/* ================================================================
+   PUBLIC API — SLEEP-SNAPSHOT MODE (CAPTURE_MODE = 5)
+   Camera is initialized ONCE at boot via CAM_CallbackInit() and kept
+   in sensor STANDBY (pipe stopped). On each button wake,
+   CAM_StandbySnap() wakes the sensor, captures ONE frame with the
+   SAME warmup/exposure as the other modes, then parks the sensor
+   back in standby. No CAM_Init/CAM_Deinit per capture.
+   ================================================================ */
+
+/**
+ * @brief  Cold-boot power pre-warm for the camera module (boot, mode 5 only).
+ *
+ *   CMW's internal power-on (CMW_IMX335_PowerOn) waits only 1 ms after
+ *   enabling the module DVDD (EN_MODULE/PD2) and after releasing XCLR
+ *   (NRST/PC8), but the IMX335 datasheet allows the rails up to 200 ms
+ *   to rise. On a cold boot the chip-ID read (0x3912) then fails (CMW
+ *   ret=-7), and CAM_Init's 200 ms retries re-clear XCLR on every pass
+ *   so the sensor never stabilizes.
+ *
+ *   This function powers the module with XCLR held LOW, waits for the
+ *   rails, releases XCLR, and prints a raw (bypass-CMW) I2C chip-ID
+ *   probe so a remaining failure points at the exact stage.
+ *   Call ONCE before CAM_CallbackInit(). Idempotent on re-runs.
+ *
+ * @return 0 always (diagnostics are printed, never fatal here)
+ */
+int CAM_PowerPreWarm(void);
+
+/**
+ * @brief  Wake sensor from standby, capture ONE frame, return to standby.
+ *
+ *   Sensor standby->streaming (SLEEP_SENSOR_SETTLE_MS) -> pipe start
+ *   (single buffer, continuous — same as mode 0) -> re-apply exposure
+ *   -> discard warmup_frames (vsync-gated, identical mechanism to
+ *   CAM_CaptureSingleFrame) -> stop pipe -> sensor standby.
+ *
+ * @param  buf            Pre-allocated buffer (>= width*height*2 bytes, YUV422)
+ * @param  buf_size       Size of buf in bytes
+ * @param  width          Capture width
+ * @param  height         Capture height
+ * @param  fps            Sensor frame rate
+ * @param  warmup_frames  Frames to discard (use SNAP_WARMUP_FRAMES)
+ * @return 0 on success, -1 on timeout or if not initialized at boot
+ */
+int CAM_StandbySnap(uint8_t *buf, int buf_size, int width, int height, int fps, int warmup_frames);
+
 /* Called by CMW frame callback when a full frame transfer is complete. */
 void CAM_NotifyFrameEvent(void);
 

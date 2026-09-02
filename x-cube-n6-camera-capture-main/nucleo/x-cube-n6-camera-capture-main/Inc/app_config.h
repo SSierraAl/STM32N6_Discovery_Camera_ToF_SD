@@ -24,7 +24,7 @@
    ================================================================ */
 
 #ifndef CAPTURE_MODE
-#define CAPTURE_MODE            4
+#define CAPTURE_MODE            5
 #endif
 
 /** Capture mode for ToF-triggered photography.
@@ -43,6 +43,12 @@
                      ALL frames are sharp because the pipe never restarts mid-batch.
                      Uses the SAME callback infrastructure as STANDBY-BATCH but eliminates
                      the Stop/Restart tearing that causes blurry frames.
+     5 = SLEEP-SNAPSHOT — Camera init+warmup ONCE at boot, then the MCU enters
+                     STOP sleep. USER button (PC13 = PWR WKUP3, HIGH level) wakes
+                     the CPU; PLL clocks are restored, the sensor wakes from standby,
+                     ONE full-res frame is captured (same warmup/exposure as mode 0),
+                     saved to SD with the same raw layout, and the MCU returns to STOP.
+                     Lowest idle power — see SLEEP_MODE_PLAN.md.
      Snapshot mode is the same as ON-DEMAND (CAPTURE_MODE = 0). */
 
 
@@ -328,8 +334,14 @@
     3 = DEBUG prints (everything + per-block SD timing + wait-state analysis)
 
     For bottleneck analysis, use level 2 or 3.
-    For production deployment, use level 0. */
+    For production deployment, use level 0.
+    CAPTURE_MODE = 5 (sleep-snapshot) defaults to 0: the sleep state
+    machine prints its own explicit [SLEEP]/[CAM]/[SD] messages. */
+#if CAPTURE_MODE == 5
+#define PERF_DEBUG_LEVEL         0
+#else
 #define PERF_DEBUG_LEVEL         2
+#endif
 
 /** When PERF_DEBUG_LEVEL >= 2, print SD batch timing every N batches.
     Set to 1 for every batch (very verbose), 4 for every 4th batch. */
@@ -394,5 +406,30 @@
     0 = No indicator (silent operation)
     50-200ms = Brief visual confirmation */
 #define WS2812_INDICATOR_MS          0
+
+/* ================================================================
+   SECTION 9: SLEEP-SNAPSHOT MODE (CAPTURE_MODE = 5)
+   MCU parks in STOP sleep; USER button (PC13 = PWR WKUP3, HIGH) wakes.
+   ================================================================ */
+
+/** Sensor standby->streaming settle time after wake (ms).
+    Same proven value as the CAPTURE_MODE=4 wake path. */
+#define SLEEP_SENSOR_SETTLE_MS    35
+
+/** Grace period after SD save before re-entering STOP sleep (ms).
+    Absorbs button bounce / held presses and lets the console finish. */
+#define SLEEP_ENTER_DELAY_MS      500
+
+/** Turn user LEDs (green/red) OFF while sleeping to save current. */
+#define SLEEP_LEDS_OFF            1
+
+/** Put NOR flash (XSPI2, instance 0) into deep power-down while sleeping.
+    1 = yes (saves uA, default)    0 = keep NOR active (faster wake) */
+#define SLEEP_NOR_DEEP_PD         1
+
+/** Extra settle time (ms) after the last console print before WFI,
+    so the UART transmitter is guaranteed idle when clocks stop
+    (the console is blocking; this is only extra margin). */
+#define SLEEP_UART_SETTLE_MS      10
 
 #endif /* APP_CONFIG */

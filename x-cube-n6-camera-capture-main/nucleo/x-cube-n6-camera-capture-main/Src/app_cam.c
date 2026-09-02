@@ -769,3 +769,141 @@ int CAM_IsCallbackReady(void)
 {
   return g_callback_ready;
 }
+
+/* ================================================================
+   SLEEP-SNAPSHOT MODE (CAPTURE_MODE = 5)
+   ================================================================ */
+#if CAPTURE_MODE == 5
+#include "stm32n6570_discovery_bus.h" /* BSP_I2C1_* for the raw probe */
+
+#define IMX335_REG_CHIP_ID  0x3912U   /* chip ID register (probe reads 1 byte) */
+
+/**
+ * @brief  Cold-boot power pre-warm (see app_cam.h).
+ *
+ *   Brings the camera module up the way the IMX335 datasheet requires
+ *   (XCLR held low while DVDD rises, rails given >= 200 ms), then runs
+ *   a raw chip-ID probe that bypasses CMW so a failure pinpoints the
+ *   stage:
+ *     ret != 0            -> no ACK from 0x34 (power/bus problem)
+ *     ret == 0, id != 0x00-> sensor alive but not yet in reset state
+ *     ret == 0, id == 0x00-> ready, CMW probe should now pass
+ */
+int CAM_PowerPreWarm(void)
+{
+  GPIO_InitTypeDef g = {0};
+  uint8_t id = 0xAA;
+  int32_t  r;
+
+  /* XCLR (NRST_CAM, PC8 on VDDIO4): hold LOW while DVDD rises. */
+  NRST_CAM_GPIO_ENABLE_VDDIO();
+  NRST_CAM_GPIO_CLK_ENABLE();
+  g.Pin   = NRST_CAM_PIN;
+  g.Mode  = GPIO_MODE_OUTPUT_PP;
+  g.Pull  = GPIO_NOPULL;
+  g.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+  HAL_GPIO_Init(NRST_CAM_PORT, &g);
+  HAL_GPIO_WritePin(NRST_CAM_PORT, NRST_CAM_PIN, GPIO_PIN_RESET);
+
+  /* EN_MODULE (EN_CAM, PD2): enables the module 1V2 DVDD + 24MHz clock. */
+  EN_CAM_GPIO_ENABLE_VDDIO();
+  EN_CAM_GPIO_CLK_ENABLE();
+  g.Pin = EN_CAM_PIN;
+  HAL_GPIO_Init(EN_CAM_PORT, &g);
+  HAL_GPIO_WritePin(EN_CAM_PORT, EN_CAM_PIN, GPIO_PIN_SET);
+
+  HAL_Delay(300); /* >= 200 ms max rail rise time */
+
+  /* Release XCLR (system clear done) and let the I2C slave come up. */
+  HAL_GPIO_WritePin(NRST_CAM_PORT, NRST_CAM_PIN, GPIO_PIN_SET);
+  HAL_Delay(100);
+
+  /* Raw probe via the BSP (single-threaded at this point: no ToF yet,
+     no need for the arbiter mutex). BSP_I2C1_Init is idempotent —
+     CMW's later probe will just skip re-initialization. */
+  BSP_I2C1_Init();
+  r = BSP_I2C1_ReadReg16(CAMERA_IMX335_ADDRESS, IMX335_REG_CHIP_ID, &id, 1);
+  printf("[PREWARM] EN_MODULE=1 XCLR=1 settled; raw I2C probe ret=%ld id=0x%02X (expect 0x00)\n",
+         (long)r, (unsigned)id);
+
+  return 0;
+}
+#endif /* CAPTURE_MODE == 5 */
+
+/* ================================================================
+   Camera is initialized ONCE at boot (CAM_CallbackInit) and parked in
+   sensor STANDBY with the pipe stopped. On each button wake:
+     sensor standby->streaming -> start pipe (single buffer, same as
+     mode 0) -> re-apply exposure -> discard SNAP_WARMUP_FRAMES
+     (vsync gated, identical to CAM_CaptureSingleFrame) -> stop pipe
+     -> sensor standby.
+   Same image path as mode 0 = same image quality, without the
+   per-capture CAM_Init/CAM_Deinit (which is what saves power and time).
+   ================================================================ */
+int CAM_StandbySnap(uint8_t *buf, int buf_size, int width, int height, int fps, int warmup_frames)
+{
+#if CAPTURE_MODE != 5
+  (void)buf; (void)buf_size; (void)width; (void)height; (void)fps; (void)warmup_frames;
+  return -1;
+#endif
+  int min_size = width * height * 2;
+  (void)fps; /* sensor frame rate already set at boot by CAM_CallbackInit */
+  if (!buf || buf_size < min_size || !g_callback_ready) return -1;
+  if (warmup_frames < 1) warmup_frames = SNAP_WARMUP_FRAMES;
+
+  DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
+  if (!h) return -1;
+
+#if PERF_DEBUG_LEVEL >= 1
+  uint32_t t0 = HAL_GetTick();
+  printf("[CAM] Sleep-snap: wake sensor + %d warmup frames...\n", warmup_frames);
+#endif
+
+  /* Step 1: wake sensor from standby (same as mode 4 wake path). */
+  CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STREAMING);
+  HAL_Delay(SLEEP_SENSOR_SETTLE_MS);
+
+  /* Step 2: pre-start exposure config + arm the frame counter, then
+     start the pipe — same order as CAM_CaptureSingleFrame (mode 0). */
+  CMW_CAMERA_SetExposureMode(CAM_EXPOSURE_MODE == 1 ? CMW_EXPOSUREMODE_MANUAL :
+                             CAM_EXPOSURE_MODE == 2 ? CMW_EXPOSUREMODE_AUTOFREEZE : CMW_EXPOSUREMODE_AUTO);
+  if (CAM_EXPOSURE_MODE == 1) {
+    CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+    CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+  }
+  CAM_ResetFrameCounter(warmup_frames + 1);
+  CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
+
+  /* Step 3: re-apply exposure/gain AFTER pipe start (the ISP library
+     overwrites exposure during start — proven bug, same fix as mode 0). */
+  if (CAM_EXPOSURE_MODE == 1) {
+    CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+    CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+    CAM_IspUpdate();
+  }
+
+  /* Step 4: discard warmup frames; the kept frame is the next one
+     (vsync gating identical to CAM_CaptureSingleFrame). */
+  uint32_t tw = HAL_GetTick();
+  while (g_wait_frames != 0) {
+    CAM_IspUpdate();
+    vTaskDelay(pdMS_TO_TICKS(5));
+    if (HAL_GetTick() - tw > 5000) {
+      HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
+      CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
+      return -1;
+    }
+  }
+
+  /* Step 5: stop pipe and park the sensor in standby again. */
+  HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
+  HAL_Delay(5);
+  CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
+  SCB_InvalidateDCache_by_Addr((uint32_t *)buf, min_size);
+
+#if PERF_DEBUG_LEVEL >= 1
+  printf("[CAM] Sleep-snap: frame ready in %lu ms\n", (unsigned long)(HAL_GetTick() - t0));
+#endif
+  return 0;
+}
+/* end of CAPTURE_MODE 5 sleep-snapshot support */

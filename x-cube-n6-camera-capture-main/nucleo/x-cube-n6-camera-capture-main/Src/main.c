@@ -70,6 +70,7 @@
 #include "app_cam.h"
 #include "app_fuseprogramming.h"
 #include "app_thread.h"
+#include "app_sleep.h"
 #include "debug_color.h"
 #include "main.h"
 #include "npu_cache.h"
@@ -129,7 +130,9 @@ static StackType_t     storage_thread_stack[STORAGE_TASK_STACK_SIZE];
    ================================================================ */
 
 /* ---- System Configuration ---- */
-static void SystemClock_Config(void);
+/* Non-static: re-called by app_sleep.c after every STOP wake to
+   re-lock the PLL clocks. */
+void SystemClock_Config(void);
 static void Security_Config(void);
 static void IAC_Config(void);
 static void CONSOLE_Config(void);
@@ -139,6 +142,9 @@ static void Setup_Mpu(void);
 static int   main_freertos(void);
 static void  main_thread_fct(void *arg);
 static void  btn_thread_fct(void *arg);
+#if CAPTURE_MODE == 5
+static void  btn_sleep_fct(void *arg);
+#endif
 /* insect_detection_task moved to app_thread.c as sensor_task() */
 
 /* ---- SD Card Operations ---- */
@@ -402,7 +408,7 @@ void IAC_IRQHandler(void) { while (1) {} }
  *         PLL3: IC11         — 225 MHz
  *         PLL4: USB          —  480 MHz / 32 = 15 MHz → USB 480M
  */
-static void SystemClock_Config(void)
+void SystemClock_Config(void)
 {
     RCC_ClkInitTypeDef              RCC_ClkInitStruct      = {0};
     RCC_OscInitTypeDef              RCC_OscInitStruct      = {0};
@@ -896,6 +902,112 @@ static void btn_thread_fct(void *arg)
     }
 }
 
+#if CAPTURE_MODE == 5
+/* ================================================================
+   SLEEP-SNAPSHOT BUTTON STATE MACHINE (CAPTURE_MODE = 5)
+
+   SLEEP --(PC13 / PWR WKUP3 wake)--> WAKE: sensor standby->streaming,
+   WS2812 on, ONE 5MP frame (same settings as mode 0) --> SAVE to SD
+   (identical raw path + recovery/retry as mode 0) --> SETTLE -->
+   SLEEP again.
+
+   Any error falls back to SLEEP so the device always returns to the
+   low-power state. See SLEEP_MODE_PLAN.md.
+   ================================================================ */
+static void btn_sleep_fct(void *arg)
+{
+    (void)arg;
+
+    /* Wait until main_thread completes initialization */
+    while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
+
+    printf("\n============================================\n");
+    printf("  SLEEP-SNAPSHOT MODE (CAPTURE_MODE = 5)\n");
+    printf("  Resolution: %d x %d @ %d FPS\n", SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
+    printf("  MCU sleeps in STOP mode; press USER button (PC13)\n");
+    printf("  to wake and capture one frame to SD.\n");
+    printf("============================================\n\n");
+
+    for (;;) {
+        /* ---- SLEEP: waits for button release, LEDs off, STOP mode ---- */
+        App_Sleep_Enter();
+
+        /* ---- WAKE: capture one frame ---- */
+        BSP_LED_On(LED_RED);
+        uint32_t t_capture_start = HAL_GetTick();
+        uint32_t snap_num = snap_count + 1;
+        printf("[SLEEP] >>> WAKE: capturing #%lu...\n", (unsigned long)snap_num);
+
+        WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
+        int rc = CAM_StandbySnap(capture_buf, MAX_SNAP_FRAME_SIZE,
+                                 SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS,
+                                 SNAP_WARMUP_FRAMES);
+        uint32_t capture_elapsed = HAL_GetTick() - t_capture_start;
+
+        if (rc != 0) {
+            printf("[SLEEP] >>> capture FAILED (rc=%d) - back to sleep\n", rc);
+            BSP_LED_Off(LED_RED);
+            WS2812_FlashStop();
+            while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
+                vTaskDelay(pdMS_TO_TICKS(20));
+            vTaskDelay(pdMS_TO_TICKS(SLEEP_ENTER_DELAY_MS));
+            continue;
+        }
+
+        /* ---- SAVE: same SD block path as CAPTURE_MODE = 0 ---- */
+        uint32_t frame_size   = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
+        uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
+        uint32_t target_block = snap_base_block + (snap_count * total_blocks);
+        SD_IMG_BASE_BLOCK     = target_block;
+
+        printf("[CAM] Captured in %lu ms!\n", (unsigned long)capture_elapsed);
+        uint32_t t_sd_start = HAL_GetTick();
+
+        /* Reinit SD before each write (same recovery path as mode 0):
+           recovers a card that was removed/inserted while asleep. */
+        if (SD_Reinit() != 0) {
+            printf("[SLEEP] >>> SD card not ready (reinit failed) - back to sleep\n");
+            BSP_LED_Off(LED_RED);
+            WS2812_FlashStop();
+            while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
+                vTaskDelay(pdMS_TO_TICKS(20));
+            vTaskDelay(pdMS_TO_TICKS(SLEEP_ENTER_DELAY_MS));
+            continue;
+        }
+
+        if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
+            snap_count++;
+            SD_IMG_BASE_BLOCK = target_block + total_blocks;
+            uint32_t t_sd_end = HAL_GetTick();
+            printf("[SLEEP] >>> Snapshot #%lu SAVED (block %lu, SD %lu ms)\n",
+                   (unsigned long)snap_num, (unsigned long)target_block,
+                   (unsigned long)(t_sd_end - t_sd_start));
+        } else {
+            printf("[SLEEP] >>> SD write FAILED - recovery + retry...\n");
+            if (SD_Reinit() == 0) {
+                if (SD_StoreRawImage(capture_buf, frame_size, SNAP_WIDTH, SNAP_HEIGHT, 0) == 0) {
+                    snap_count++;
+                    SD_IMG_BASE_BLOCK = target_block + total_blocks;
+                    uint32_t t_sd_end = HAL_GetTick();
+                    printf("[SLEEP] >>> Snapshot #%lu SAVED on retry (block %lu, SD %lu ms)\n",
+                           (unsigned long)snap_num, (unsigned long)target_block,
+                           (unsigned long)(t_sd_end - t_sd_start));
+                } else {
+                    printf("[SLEEP] >>> Snapshot #%lu LOST after retry\n", (unsigned long)snap_num);
+                }
+            } else {
+                printf("[SLEEP] >>> Snapshot #%lu LOST (reinit failed)\n", (unsigned long)snap_num);
+            }
+        }
+
+        /* ---- SETTLE: back to the low-power state ---- */
+        BSP_LED_Off(LED_RED);
+        WS2812_FlashStop();
+        vTaskDelay(pdMS_TO_TICKS(SLEEP_ENTER_DELAY_MS));
+    }
+}
+#endif
+
 /* ================================================================
    SECTION 15: FREERTOS INITIALIZATION
    ================================================================ */
@@ -960,6 +1072,12 @@ static int main_freertos(void)
     /* ---- Button task (manual capture, ON-DEMAND mode only) ---- */
 #if CAPTURE_MODE == 0
     hdl = xTaskCreateStatic(btn_thread_fct, "btn",
+                            4 * configMINIMAL_STACK_SIZE, NULL,
+                            tskIDLE_PRIORITY + 3,
+                            btn_thread_stack, &btn_thread_cb);
+    assert(hdl != NULL);
+#elif CAPTURE_MODE == 5
+    hdl = xTaskCreateStatic(btn_sleep_fct, "btn",
                             4 * configMINIMAL_STACK_SIZE, NULL,
                             tskIDLE_PRIORITY + 3,
                             btn_thread_stack, &btn_thread_cb);
@@ -1204,6 +1322,25 @@ static void main_thread_fct(void *arg)
     } else {
         printf("[INIT] Camera CONTINUOUS mode active, pipe running.\n");
     }
+#elif CAPTURE_MODE == 5
+    printf("[INIT] Camera sleep-snapshot init (standby, before tasks start)...\n");
+    /* Cold-boot pre-warm: CMW's internal PowerOn waits only 1 ms after
+       enabling DVDD / releasing XCLR (datasheet allows 200 ms for the
+       rails) and CAM_Init's 200 ms retries re-clear XCLR every pass, so
+       a cold sensor never stabilizes and the chip-ID read fails (-7).
+       Power the module deterministically first; the raw I2C probe it
+       prints also pinpoints the failure stage if it still fails. */
+    CAM_PowerPreWarm();
+    /* One-shot init like mode 4: full init + warmup, then sensor parked
+       in STANDBY with the pipe stopped. Every button wake runs
+       CAM_StandbySnap() instead of re-initialising the whole camera. */
+    if (CAM_CallbackInit(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS) != 0) {
+        printf("[WARN] Camera standby init FAILED! Sleep-snapshot captures may fail.\n");
+    } else {
+        printf("[INIT] Camera in STANDBY, ready for sleep-snapshot wake.\n");
+    }
+    App_Sleep_Init();
+    printf("[INIT] Sleep module ready: STOP mode, wake on USER button (PC13, HIGH).\n");
 #endif
 
     /* ---- System Ready ---- */
@@ -1219,6 +1356,8 @@ static void main_thread_fct(void *arg)
     printf("[INFO] Capture Mode: BATCH (%d frames/detection)\n", BATCH_FRAMES);
 #elif CAPTURE_MODE == 4
     printf("[INFO] Capture Mode: CALLBACK-BATCH (%d frames/detection, NO stop/restart)\n", CALLBACK_FRAMES);
+#elif CAPTURE_MODE == 5
+    printf("[INFO] Capture Mode: SLEEP-SNAPSHOT (STOP sleep + button wake)\n");
 #elif CAPTURE_MODE == 1
     printf("[INFO] Capture Mode: CONTINUOUS (camera_task starts pipe)\n");
 #else

@@ -65,6 +65,16 @@ C_SOURCES += Src/freertos_bsp.c
 C_SOURCES += Src/app_filex.c
 C_SOURCES += Src/app_sdcard.c
 C_SOURCES += Src/i2c_arbiter.c
+C_SOURCES += Src/app_sleep.c
+# Also compiled by the STM32CubeIDE project; required to link the
+# standalone snapshot app (WS2812, ToF + platform, SD HAL/MSP, FX glue).
+C_SOURCES += Src/ws2812.c
+C_SOURCES += Src/vl53l5cx_detection.c
+C_SOURCES += Src/platform.c
+C_SOURCES += Src/fx_stm32_sd_driver_glue.c
+C_SOURCES += Src/stm32n6xx_hal_sd.c
+C_SOURCES += Src/stm32n6xx_hal_sd_ex.c
+C_SOURCES += Src/stm32n6xx_ll_sdmmc.c
 
 # ASM sources
 ASM_SOURCES =

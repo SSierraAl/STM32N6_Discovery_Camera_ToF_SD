@@ -123,6 +123,16 @@ void CSI_IRQHandler(void)
   HAL_DCMIPP_CSI_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());
 }
 
+/**
+ * @brief This handles the PWR dedicated wake-pin interrupt (WKUP1..WKUP4).
+ *        Used by CAPTURE_MODE = 5 (sleep-snapshot): PC13 = WKUP3 wakes
+ *        the CPU from STOP mode; the HAL ISR clears the PWR flag.
+ */
+void WAKEUP_PIN_IRQHandler(void)
+{
+  HAL_PWR_WAKEUP_PIN_IRQHandler();
+}
+
 void DCMIPP_IRQHandler(void)
 {
   HAL_DCMIPP_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());
