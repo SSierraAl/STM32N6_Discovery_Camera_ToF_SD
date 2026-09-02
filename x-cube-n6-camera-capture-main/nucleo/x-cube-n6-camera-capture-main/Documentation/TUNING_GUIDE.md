@@ -282,19 +282,20 @@ All ToF parameters live in the **SECTION 9 "ToF Detection (VL53L5CX)"** block of
 | Ranging frequency (primary) | `VL53L5CX_DET_RANGING_FREQ_HZ` | same as above | 15 Hz (both) |
 | Ranging mode (primary) | `VL53L5CX_RANGING_MODE` | `app_config.h` §9 → applied in `VL53L5CX_Configure()` (`Src/vl53l5cx_detection.c`) | 3 = AUTONOMOUS (both) |
 | Baseline samples (primary) | `VL53L5CX_DET_BASELINE_SAMPLES` | `app_config.h` §9 | 20 / 30 |
-| Sensor motion plugin (global flag / accumulation / noise) | `VL53L5CX_DET_MOTION_MIN_ZONES`, `…_MOTION_PERSIST_FRAMES`, `…_MOTION_EXTRA_NOISE` | `app_config.h` §9 → applied to the sensor in `VL53L5CX_Configure()` | 1 / 16 / 0 (both) |
+| Sensor motion plugin (global flag / accumulation / noise) | `VL53L5CX_DET_MOTION_MIN_ZONES`, `…_MOTION_PERSIST_FRAMES`, `…_MOTION_EXTRA_NOISE` (guardian: `VL53L5CX_EXT_MOTION_*`) | `app_config.h` §9 → applied to the sensor in `VL53L5CX_Configure()` / `VL53L5CX_External_Configure()` | 1 / 16 / 0 (independent per sensor) |
 | Baseline refresh | `VL53L5CX_DET_PERIODIC_RESTART_*`, `VL53L5CX_DET_ADAPTIVE_REFRESH_*` | `app_config.h` §9 | adaptive: 15 s window, max 3 detections |
 | Single vs dual (guardian) mode | `VL53L5CX_DUAL_SENSOR` | `app_config.h` §9 | 0 |
 | Guardian wake duration / confirmation | `VL53L5CX_DUAL_WAKE_DURATION_MS`, `VL53L5CX_DUAL_CONFIRM_FRAMES` | `app_config.h` §9 | 5000 ms / 2 frames |
 | Debug UART output | `VL53L5CX_DET_DEBUG_ZFRAME*`, `VL53L5CX_DET_DEBUG_ALLPARAM*` | `app_config.h` §9 | ZFRAME on, ALLPARAM off |
 | I2C addresses | — **hardcoded, not a define** | `Src/vl53l5cx_detection.c`: primary `0x29` in `VL53L5CX_Init()`, external `0x31` (7-bit, = `0x62` 8-bit) in `VL53L5CX_External_Init()` | — |
-| External (guardian) sensor timing | — **hardcoded** | `VL53L5CX_External_Configure()`: 4×4, 800 ms, 15 Hz, CONTINUOUS, CLOSEST | — |
+| External (guardian) sensor timing | `VL53L5CX_EXT_INTEGRATION_MS`, `VL53L5CX_EXT_RANGING_FREQ_HZ`, `VL53L5CX_EXT_RANGING_MODE` | `app_config.h` §9 EXT block → applied in `VL53L5CX_External_Configure()` | 800 ms / 15 Hz / 1 (CONTINUOUS) — independent of the primary |
+| External (guardian) detection thresholds | `VL53L5CX_EXT_THRESHOLD_PCT`, `VL53L5CX_EXT_MOTION_THRESH`, `VL53L5CX_EXT_MIN_AFFECTED_ZONES`, `VL53L5CX_EXT_MIN_SIGNAL` | `app_config.h` §9 EXT block → `VL53L5CX_External_Update()` / `VL53L5CX_External_LearnBaseline()` | 6 / 60 / 1 / 500 (4×4) — independent of the primary |
 | Python tuning variables | `MOTION_THRESH`, `MIN_AFFECTED_ZONES`, … | top of `vl53l5cx_analysis.py` (workspace root) | see "Translating a vl53l5cx_analysis.py sweep into the firmware" below |
 | Preview thresholds live (host overlay only) | `THRESHOLD_PCT`, `MOTION_THRESH`, `MIN_AFFECTED_ZONES`, `MIN_SIGNAL` | top of `vl53l5cx_zone_monitor.py` (workspace root) | 6 / 60 / 1 / 500 (4×4) — mirrors the §9 defines; does NOT change the firmware |
 
 ### How a trigger is computed (exact logic)
 
-For every zone `z` of the current frame (`VL53L5CX_Update()`, identical logic in `VL53L5CX_External_Update()`):
+For every zone `z` of the current frame (`VL53L5CX_Update()`; `VL53L5CX_External_Update()` runs the identical logic with the guardian's own `VL53L5CX_EXT_*` values):
 
 1. **Baseline gate:** the zone must have a valid baseline (`s_zone_valid[z]`).
 2. **Signal channel** (additionally gated by the fresh-data status `VL53L5CX_STATUS_OK(status)` — only status 5, 6 or 9; status 0 = stale data is rejected — see `05_ToF_Detection_System.md` §7):
@@ -332,7 +333,7 @@ The VL53L5CX ULD driver implements **only two** ranging modes (raw driver codes,
 
 **How to change**: edit `VL53L5CX_RANGING_MODE` in `app_config.h` §9 → rebuild/flash. Verify on the console: `VL53L5CX_Configure()` prints `[ToF] Configured: res=…, int=…ms, freq=…Hz, mode=…`.
 
-**Scope**: primary sensor only. The **external guardian** is always CONTINUOUS (hardcoded in `VL53L5CX_External_Configure()`).
+**Scope**: primary sensor only. The **external guardian** has its own mode define `VL53L5CX_EXT_RANGING_MODE` (default 1 = CONTINUOUS — the previous hardcoded behavior).
 
 ---
 
@@ -351,7 +352,7 @@ The VL53L5CX ULD driver implements **only two** ranging modes (raw driver codes,
 | **Driver limit** | 2 … 1000 ms. Values outside the range are rejected (`VL53L5CX_STATUS_INVALID_PARAM`) and the sensor keeps its previous integration time. |
 | **Frequency trade-off** | The requested `…FREQ_HZ` is only achievable while `integration + processing < 1/frequency`. 30 ms @ 15 Hz (4×4) is honored; with 800 ms integration (8×8) the effective rate is far below 15 Hz. |
 | **Interaction with mode** | In CONTINUOUS mode (`VL53L5CX_RANGING_MODE = 1`) the integration time is forced to the sensor maximum and `VL53L5CX_DET_INTEGRATION_MS` is ignored. |
-| **Where it is applied** | `Src/app_thread.c` passes both values to `VL53L5CX_Configure()` at startup (the external guardian keeps its own hardcoded 800 ms / 15 Hz). |
+| **Where it is applied** | `Src/app_thread.c` passes both values to `VL53L5CX_Configure()` at startup (the external guardian keeps its own `VL53L5CX_EXT_INTEGRATION_MS` / `VL53L5CX_EXT_RANGING_FREQ_HZ`, default 800 ms / 15 Hz). |
 
 **Tuning**: weak/missing detections at distance or in low light → raise integration (30 → 60 → 100 → 300 ms). Detections too slow for fast insects (object vanishes between frames) → lower integration or raise the frequency.
 
@@ -470,7 +471,7 @@ Two mutually exclusive refresh modes exist (periodic: every N frames; adaptive: 
 #define VL53L5CX_DET_BASELINE_SAMPLES  20
 #endif
 ```
-Number of frames averaged while learning the per-zone signal baseline at startup. More samples = steadier baseline but slower start. The external (guardian) sensor uses its own count: `VL53L5CX_SENSOR2_BASELINE_SAMPLES` (15).
+Number of frames averaged while learning the per-zone signal baseline at startup. More samples = steadier baseline but slower start. The external (guardian) sensor uses its own count: `VL53L5CX_SENSOR2_BASELINE_SAMPLES` (60).
 
 **Tuning**: Leave at defaults. Lower only if boot-time learning is too slow.
 
@@ -505,12 +506,12 @@ triggered_frame = (number of zones with motion >= T) >= M
 
 ### `VL53L5CX_DUAL_SENSOR` — Dual Sensor (Guardian) Mode
 ```c
-#define VL53L5CX_DUAL_SENSOR              0    /* 0 = single sensor (current), 1 = dual (guardian) */
+#define VL53L5CX_DUAL_SENSOR              1    /* 0 = single sensor, 1 = dual (guardian) — current */
 #define VL53L5CX_PRIMARY_ADDRESS          0x29 /* camera ToF (7-bit) */
 #define VL53L5CX_EXTERNAL_ADDRESS         0x62 /* external ToF (8-bit; 7-bit 0x31) */
 #define VL53L5CX_DUAL_WAKE_DURATION_MS    5000 /* primary active window after wake (ms) */
 #define VL53L5CX_DUAL_CONFIRM_FRAMES      2    /* consecutive external detections needed */
-#define VL53L5CX_SENSOR2_BASELINE_SAMPLES 15
+#define VL53L5CX_SENSOR2_BASELINE_SAMPLES 60
 ```
 When `DUAL_SENSOR = 1`, the external "guardian" sensor runs continuously and the camera ToF stays in ST sleep to save power. The guardian must see `CONFIRM_FRAMES` consecutive detections before waking the primary, which then runs for `WAKE_DURATION_MS` and returns to sleep.
 
@@ -522,13 +523,41 @@ When `DUAL_SENSOR = 1`, the external "guardian" sensor runs continuously and the
 
 **Tuning**: Primary never wakes → lower `CONFIRM_FRAMES` to 1 and check the `EXT,ZFRAME` serial output. Too many false wakes → raise to 3-4. The I2C addresses are fixed at power-up (the external is re-addressed from 0x29 → 0x62) — do not change them without updating the power-up sequence.
 
+### `VL53L5CX_EXT_*` — Independent EXT (Guardian) Configuration
+
+With `DUAL_SENSOR = 1`, the guardian's configuration is **fully independent** of the primary's: `app_config.h` §9 has a dedicated EXT block (active only in dual mode). Every default equals the value the guardian used before the block existed (hardcoded timing + shared DET thresholds), so an untouched block changes nothing:
+
+```c
+/* app_config.h §9 — EXT block (dual mode only) */
+#define VL53L5CX_EXT_INTEGRATION_MS        800  /* ms, driver limit 2..1000 (was hardcoded) */
+#define VL53L5CX_EXT_RANGING_FREQ_HZ       15   /* Hz (was hardcoded) */
+#define VL53L5CX_EXT_RANGING_MODE          1    /* 1 = CONTINUOUS, 3 = AUTONOMOUS (was hardcoded) */
+#define VL53L5CX_EXT_THRESHOLD_PCT         6    /* 4×4 (8×8: 15) — signal drop % strictly greater than */
+#define VL53L5CX_EXT_MOTION_THRESH         60   /* 4×4 (8×8: 100) — per-zone motion value >= this */
+#define VL53L5CX_EXT_MIN_AFFECTED_ZONES    1    /* 4×4 (8×8: 2) — zones needed for a frame trigger */
+#define VL53L5CX_EXT_MIN_SIGNAL            500  /* kcps/spad floor (baseline learning + detection) */
+#define VL53L5CX_EXT_MOTION_MIN_ZONES      1    /* plugin min_nb_for_global_detection */
+#define VL53L5CX_EXT_MOTION_PERSIST_FRAMES 16   /* plugin nb_of_temporal_accumulations */
+#define VL53L5CX_EXT_MOTION_EXTRA_NOISE    0    /* plugin extra_noise_sigma */
+```
+
+| Parameter | Where it is applied | Notes |
+|---|---|---|
+| `…_EXT_INTEGRATION_MS` / `…_EXT_RANGING_FREQ_HZ` / `…_EXT_RANGING_MODE` | `VL53L5CX_External_Configure()` | Independent of `VL53L5CX_DET_INTEGRATION_MS` / `…_FREQ_HZ` / `VL53L5CX_RANGING_MODE`. Console: `[EXT] Configured: …` |
+| `…_EXT_THRESHOLD_PCT` / `…_EXT_MOTION_THRESH` / `…_EXT_MIN_AFFECTED_ZONES` / `…_EXT_MIN_SIGNAL` | `VL53L5CX_External_Update()` (guardian trigger → wakes the primary) + `VL53L5CX_External_LearnBaseline()` (signal floor) | Console: `[EXT] Detection: …` |
+| `…_EXT_MOTION_MIN_ZONES` / `…_EXT_MOTION_PERSIST_FRAMES` / `…_EXT_MOTION_EXTRA_NOISE` | ST motion plugin inside the guardian (via DCI) | Shapes the raw motion values; after changing, re-check the `EXT,ZFRAME` motion column |
+
+**Not independent** (still shared/hardcoded for the guardian): grid resolution (`VL53L5CX_DET_RESOLUTION` sizes the zone arrays and both the `ZFRAME` / `EXT,ZFRAME` layouts), target order (CLOSEST), sharpener (10 %), and the baseline-refresh policy (the `PERIODIC` / `ADAPTIVE` flags are common; the guardian keeps its own counters). The baseline sample count was already independent (`VL53L5CX_SENSOR2_BASELINE_SAMPLES`).
+
+**Tuning**: the guardian drives the wake decisions, so tune it from `EXT,ZFRAME` — `vl53l5cx_zone_monitor.py`'s EXT tab now uses these values for its overlay lines, heatmap title and host-trigger prediction (mirrored in the script's `EXT_*` variables). Too many false wakes → raise `VL53L5CX_EXT_THRESHOLD_PCT` / `VL53L5CX_EXT_MOTION_THRESH` / `VL53L5CX_EXT_MIN_AFFECTED_ZONES` (or `DUAL_CONFIRM_FRAMES`). Wake too slow → lower them and/or raise `VL53L5CX_EXT_INTEGRATION_MS`.
+
 ### `TEST_TOF_MODE` — ToF-Only Test Mode (on-site validation)
 ```c
-#define TEST_TOF_MODE    1    /* app_config.h §8B: 1 = LED-only, 0 = production */
-#define TEST_TOF_LED_MS  3000 /* LED indication duration (ms) */
+#define TEST_TOF_MODE    1    /* app_config.h §8B: 1 = ToF-only (no camera/SD), 0 = production */
+#define TEST_TOF_LED_MS  300  /* RED LED indication duration (ms) */
 ```
-With `TEST_TOF_MODE = 1`, a detection does **not** trigger the camera or SD card: the RED board LED + WS2812 strip (white, 100%) stay on for `TEST_TOF_LED_MS` then turn off automatically, and the console prints the trigger source and the **affected zone numbers** with their drop/motion values. Everything else (baseline learning, periodic refresh, signal + motion trigger rules, 30-frame cooldown) is unchanged.
-Use it on-site to validate sensor position/orientation and to calibrate the detection thresholds in this section; **revert to 0 for production** (button-triggered capture still works in test mode).
+With `TEST_TOF_MODE = 1` the build is **ToF-only**: at boot the SD card and the camera are **never initialized** (and `camera_task` / `storage_task` are not created), so no photo can be taken and the card is never touched. A detection only lights the RED board LED for `TEST_TOF_LED_MS` (the WS2812 strip stays OFF) and the console prints the **affected zone numbers** with their drop values. Everything else (baseline learning, periodic refresh, signal + motion trigger rules, 30-frame cooldown) is unchanged.
+Use it on-site to validate sensor position/orientation and to calibrate the detection thresholds in this section. **revert to 0 for production**
 
 ---
 
@@ -544,10 +573,10 @@ Use it on-site to validate sensor position/orientation and to calibrate the dete
 | Only the first frame after boot/wake is accepted (or none) | Console status values | The status gate accepts only 5/6/9 — 0 (stale data) is correctly rejected; if fresh frames never arrive: integration too long for the requested frequency, or ranging not started (`StartRanging` failed in the console log) |
 | Sensitivity slowly decays over a session | Console "Adaptive refresh" lines | `ADAPTIVE_REFRESH` `MAX_DETECTIONS` (↓) or enable `PERIODIC_RESTART` (1) with `INTERVAL` (500) |
 | Dual mode: guardian sees it, primary never wakes | Console `[EXT] Detection confirmed!` lines | `DUAL_CONFIRM_FRAMES` (↓ to 1), `DUAL_WAKE_DURATION_MS` (↑) |
-| Dual mode: false wakes | Guardian ZFRAME (it uses the same `app_config.h` §9 defines) | `THRESHOLD_PCT` / `MOTION_THRESH` (↑), `DUAL_CONFIRM_FRAMES` (↑ to 3–4) |
+| Dual mode: false wakes | `EXT,ZFRAME` (uses the independent `VL53L5CX_EXT_*` defines) | `VL53L5CX_EXT_THRESHOLD_PCT` / `VL53L5CX_EXT_MOTION_THRESH` (↑), `VL53L5CX_EXT_MIN_AFFECTED_ZONES` (↑), `DUAL_CONFIRM_FRAMES` (↑ to 3–4) |
 | "Primary ToF baseline not ready!" at boot (task stops) | LearnBaseline console output | Field of view blocked? Raise `INTEGRATION_MS`, lower `MIN_SIGNAL`, raise `BASELINE_SAMPLES` (→ 30) |
 | No ZFRAME/ALLPARAM on UART | `VL53L5CX_DET_DEBUG_*` flags in `app_config.h` §9 | set `DEBUG_ZFRAME` (or `DEBUGALLPARAMS`) to 1 and rebuild |
-| Validating sensor position/orientation on-site (no photos wanted) | Console `>>> TEST:` zone list | `TEST_TOF_MODE` (`app_config.h` §8B) → 1: LED-only indication for `TEST_TOF_LED_MS` + per-zone console output. Revert to 0 for production |
+| Validating sensor position/orientation on-site (no photos wanted) | Console `>>> TEST:` zone list | `TEST_TOF_MODE` (`app_config.h` §8B) → 1: camera/SD not initialized at all; RED LED on for `TEST_TOF_LED_MS` + per-zone console output. Revert to 0 for production |
 
 ---
 
@@ -706,9 +735,10 @@ Step 4: Use a faster SD card (U3/V30 rated)
 Step 1: Set TEST_TOF_MODE = 1 (app_config.h §8B) and rebuild
 **It is recommended to also put VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED and VL53L5CX_DET_PERIODIC_RESTART_ENABLED to 0** in order to validate the detections on-site.
 Step 2: Mount the unit at its final position and power-cycle it once
-        (baseline learning runs at boot — it must learn the real site)
+        (baseline learning runs at boot — it must learn the real site).
 Step 3: Move a target (insect, hand, card) across the detection area at
-        different speeds — watch the LEDs and the console, no SD card needed
+        different speeds — watch the RED LED and the console
+        (no camera, no SD card: neither is even initialized)
 Step 4: Read the ">>> TEST:" lines: trigger source (SIGNAL/MOTION) and the
         affected zone numbers (0-15 on the 4x4 grid) show WHERE in the FOV
         the target was — rotate/reposition the sensor until zones cluster

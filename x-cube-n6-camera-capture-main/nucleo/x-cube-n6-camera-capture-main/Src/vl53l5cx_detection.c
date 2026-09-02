@@ -311,6 +311,18 @@ void VL53L5CX_LearnBaseline(void)
     VL53L5CX_ResetBaseline();
     const uint8_t baseline_samples = VL53L5CX_DET_BASELINE_SAMPLES;
     const uint8_t settle_frames = 5;
+    const uint16_t min_valid_frames = baseline_samples / 2;
+
+    /* Per-zone accumulation with per-zone OK-frame counts.
+       Right after power-on some zones only have OK status on PART of the
+       samples (the sensor's internal baseline engine is still converging).
+       Dividing by the TOTAL sample count (previous behavior) biased those
+       baselines low; since the drop test is |base-cur|/base, a 50%-low
+       baseline reads as a ~100% drop -> fake detection on EVERY frame.
+       A zone is only valid if it was OK on at least half the samples. */
+    uint32_t sum_signal[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint32_t sum_distance[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint16_t ok_frames[VL53L5CX_DET_NUM_ZONES] = {0};
 
     printf("[BASELINE] Learning %d samples + %d settle frames...\n",
            baseline_samples, settle_frames);
@@ -325,9 +337,9 @@ void VL53L5CX_LearnBaseline(void)
                 if (s_results.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) {
                     continue;
                 }
-                s_baseline_signal[z] += s_results.signal_per_spad[idx];
-                s_baseline_distance[z] += s_results.distance_mm[idx];
-                s_zone_valid[z] = 1;
+                sum_signal[z]   += s_results.signal_per_spad[idx];
+                sum_distance[z] += s_results.distance_mm[idx];
+                ok_frames[z]++;
             }
         }
         printf("  [BASELINE %d/%d]\r", i + 1, baseline_samples);
@@ -335,9 +347,10 @@ void VL53L5CX_LearnBaseline(void)
 
     uint8_t valid_count = 0;
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-        if (s_zone_valid[z]) {
-            s_baseline_signal[z] /= baseline_samples;
-            s_baseline_distance[z] /= baseline_samples;
+        if (ok_frames[z] >= min_valid_frames) {
+            s_baseline_signal[z]   = sum_signal[z] / ok_frames[z];
+            s_baseline_distance[z] = (uint16_t)(sum_distance[z] / ok_frames[z]);
+            s_zone_valid[z] = 1;
             valid_count++;
         }
     }
@@ -378,7 +391,7 @@ int VL53L5CX_Update(void)
         int signal_triggered = 0;
         uint32_t signal_drop = 0;
 
-        /* SIGNAL: gates (zone_valid, VL53L5CX_STATUS_OK_FILT = 5/6/9,
+        /* SIGNAL: gates (zone_valid, VL53L5CX_STATUS_OK = 5/6/9,
            signal present, >= MIN, baseline drop > THRESH_PCT). */
         if (s_zone_valid[z] && VL53L5CX_STATUS_OK_FILT(status)) {
             if (s_results.signal_per_spad[idx] == 0 &&
@@ -490,9 +503,6 @@ int VL53L5CX_Update(void)
     if (zframe_counter >= VL53L5CX_DET_DEBUG_ZFRAME_INT) {
         zframe_counter = 0;
         VL53L5CX_PrintZFrame();
-#if VL53L5CX_DUAL_SENSOR
-        VL53L5CX_External_PrintZFrame();
-#endif
     }
 #endif
 
@@ -820,12 +830,16 @@ int VL53L5CX_External_Init(void)
 
 void VL53L5CX_External_Configure(void)
 {
+    /* Independent EXT (guardian) configuration — VL53L5CX_EXT_* block
+       in app_config.h section 9. The defaults there equal the previous
+       hardcoded values, so an untouched block keeps the old behavior.
+       Target order (CLOSEST) and sharpener (10%) stay hardcoded. */
     vl53l5cx_set_resolution(&s_dev_ext, VL53L5CX_RESOLUTION_4X4);
-    vl53l5cx_set_integration_time_ms(&s_dev_ext, 800);
-    vl53l5cx_set_ranging_frequency_hz(&s_dev_ext, 15);
+    vl53l5cx_set_integration_time_ms(&s_dev_ext, VL53L5CX_EXT_INTEGRATION_MS);
+    vl53l5cx_set_ranging_frequency_hz(&s_dev_ext, VL53L5CX_EXT_RANGING_FREQ_HZ);
     vl53l5cx_set_target_order(&s_dev_ext, VL53L5CX_TARGET_ORDER_CLOSEST);
     vl53l5cx_set_sharpener_percent(&s_dev_ext, 10);
-    vl53l5cx_set_ranging_mode(&s_dev_ext, VL53L5CX_RANGING_MODE_CONTINUOUS);
+    vl53l5cx_set_ranging_mode(&s_dev_ext, VL53L5CX_EXT_RANGING_MODE);
 
 #ifndef VL53L5CX_DISABLE_MOTION_INDICATOR
     int motion_st = vl53l5cx_motion_indicator_init(&s_dev_ext, &s_motion_config_ext,
@@ -834,9 +848,9 @@ void VL53L5CX_External_Configure(void)
         printf("[EXT] WARN: Motion indicator init failed: %d\n", motion_st);
         s_motion_initialized_ext = 0;
     } else {
-        s_motion_config_ext.min_nb_for_global_detection = VL53L5CX_DET_MOTION_MIN_ZONES;
-        s_motion_config_ext.nb_of_temporal_accumulations = VL53L5CX_DET_MOTION_PERSIST_FRAMES;
-        s_motion_config_ext.extra_noise_sigma = VL53L5CX_DET_MOTION_EXTRA_NOISE;
+        s_motion_config_ext.min_nb_for_global_detection = VL53L5CX_EXT_MOTION_MIN_ZONES;
+        s_motion_config_ext.nb_of_temporal_accumulations = VL53L5CX_EXT_MOTION_PERSIST_FRAMES;
+        s_motion_config_ext.extra_noise_sigma = VL53L5CX_EXT_MOTION_EXTRA_NOISE;
         /* Re-apply to the sensor (see VL53L5CX_Configure for why). */
         motion_st = vl53l5cx_motion_indicator_set_resolution(&s_dev_ext, &s_motion_config_ext,
             VL53L5CX_RESOLUTION_4X4);
@@ -846,14 +860,19 @@ void VL53L5CX_External_Configure(void)
         }
         s_motion_initialized_ext = 1;
         printf("[EXT] Motion indicator enabled (global_zones=%d, accum=%d, noise_sigma=%d)\n",
-               VL53L5CX_DET_MOTION_MIN_ZONES, VL53L5CX_DET_MOTION_PERSIST_FRAMES,
-               VL53L5CX_DET_MOTION_EXTRA_NOISE);
+               VL53L5CX_EXT_MOTION_MIN_ZONES, VL53L5CX_EXT_MOTION_PERSIST_FRAMES,
+               VL53L5CX_EXT_MOTION_EXTRA_NOISE);
     }
 #else
     s_motion_initialized_ext = 0;
 #endif
 
-    printf("[EXT] Configured: res=4x4, int=800ms, freq=15Hz\n");
+    printf("[EXT] Configured: res=4x4, int=%dms, freq=%dHz, mode=%d (target=CLOSEST, sharpener=10%%)\n",
+           VL53L5CX_EXT_INTEGRATION_MS, VL53L5CX_EXT_RANGING_FREQ_HZ,
+           (int)VL53L5CX_EXT_RANGING_MODE);
+    printf("[EXT] Detection: drop>%d%%, motion>=%d, zones>=%d, min_signal=%d (VL53L5CX_EXT_* in app_config.h section 9)\n",
+           VL53L5CX_EXT_THRESHOLD_PCT, VL53L5CX_EXT_MOTION_THRESH,
+           VL53L5CX_EXT_MIN_AFFECTED_ZONES, VL53L5CX_EXT_MIN_SIGNAL);
 }
 
 void VL53L5CX_External_StartRanging(void)
@@ -877,8 +896,16 @@ void VL53L5CX_External_LearnBaseline(void)
     memset(s_zone_valid_ext, 0, sizeof(s_zone_valid_ext));
     s_baseline_ready_ext = 0;
 
-    const uint8_t baseline_samples = VL53L5CX_SENSOR2_BASELINE_SAMPLES;
+    const uint8_t baseline_samples = VL53L5CX_EXT_BASELINE_SAMPLES;
     const uint8_t settle_frames = 3;
+    const uint16_t min_valid_frames = baseline_samples / 2;
+
+    /* Per-zone OK counts (same rationale as VL53L5CX_LearnBaseline):
+       dividing by the total sample count biases zones that are only OK
+       on part of the samples, causing fake detections. */
+    uint32_t sum_signal[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint32_t sum_distance[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint16_t ok_frames[VL53L5CX_DET_NUM_ZONES] = {0};
 
     printf("[EXT] Baseline: %d samples + %d settle...\n", baseline_samples, settle_frames);
 
@@ -899,10 +926,10 @@ void VL53L5CX_External_LearnBaseline(void)
         for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
             uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
             if (VL53L5CX_STATUS_OK_FILT(s_results_ext.target_status[idx])) {
-                if (s_results_ext.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) continue;
-                s_baseline_signal_ext[z] += s_results_ext.signal_per_spad[idx];
-                s_baseline_distance_ext[z] += s_results_ext.distance_mm[idx];
-                s_zone_valid_ext[z] = 1;
+                if (s_results_ext.signal_per_spad[idx] < VL53L5CX_EXT_MIN_SIGNAL) continue;
+                sum_signal[z]   += s_results_ext.signal_per_spad[idx];
+                sum_distance[z] += s_results_ext.distance_mm[idx];
+                ok_frames[z]++;
             }
         }
         printf("  [EXT BASELINE %d/%d]\r", i + 1, baseline_samples);
@@ -910,9 +937,10 @@ void VL53L5CX_External_LearnBaseline(void)
 
     uint8_t valid_count = 0;
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-        if (s_zone_valid_ext[z]) {
-            s_baseline_signal_ext[z] /= baseline_samples;
-            s_baseline_distance_ext[z] /= baseline_samples;
+        if (ok_frames[z] >= min_valid_frames) {
+            s_baseline_signal_ext[z]   = sum_signal[z] / ok_frames[z];
+            s_baseline_distance_ext[z] = (uint16_t)(sum_distance[z] / ok_frames[z]);
+            s_zone_valid_ext[z] = 1;
             valid_count++;
         }
     }
@@ -958,7 +986,7 @@ int VL53L5CX_External_Update(void)
             continue;
 
         if (s_results_ext.signal_per_spad[idx] == 0) continue;
-        if (s_results_ext.signal_per_spad[idx] < VL53L5CX_DET_MIN_SIGNAL) continue;
+        if (s_results_ext.signal_per_spad[idx] < VL53L5CX_EXT_MIN_SIGNAL) continue;
 
         s_last_result_ext.valid_measurements++;
 
@@ -969,12 +997,12 @@ int VL53L5CX_External_Update(void)
             signal_drop = (uint32_t)diff * 100 / s_baseline_signal_ext[z];
         }
 
-        int signal_triggered = (signal_drop > VL53L5CX_DET_THRESHOLD_PCT);
+        int signal_triggered = (signal_drop > VL53L5CX_EXT_THRESHOLD_PCT);
 
         int motion_triggered = 0;
         if (s_motion_initialized_ext) {
             uint32_t motion_val = s_results_ext.motion_indicator.motion[s_motion_config_ext.map_id[z]];
-            motion_triggered = (motion_val >= VL53L5CX_DET_MOTION_THRESH);
+            motion_triggered = (motion_val >= VL53L5CX_EXT_MOTION_THRESH);
         }
 
         if (signal_triggered || motion_triggered) {
@@ -988,7 +1016,7 @@ int VL53L5CX_External_Update(void)
             if (motion_triggered) frame_trig_motion = 1;
         }
 
-        if (s_last_result_ext.affected_count >= VL53L5CX_DET_MIN_AFFECTED_ZONES) {
+        if (s_last_result_ext.affected_count >= VL53L5CX_EXT_MIN_AFFECTED_ZONES) {
             s_last_insect_detected_ext = 1;
             s_last_result_ext.insect_detected = 1;
             s_last_result_ext.trigger_source = (frame_trig_signal | frame_trig_motion)
@@ -1046,6 +1074,16 @@ int VL53L5CX_External_Update(void)
         }
     }
 #endif
+
+#if VL53L5CX_DET_DEBUG_ZFRAME > 0
+    static uint32_t zframe_counter = 0;
+    zframe_counter++;
+    if (zframe_counter >= VL53L5CX_DET_DEBUG_ZFRAME_INT) {
+        zframe_counter = 0;
+        VL53L5CX_External_PrintZFrame();
+    }
+#endif
+
 
     /* If detection and primary is sleeping, wake it up */
     if (s_last_insect_detected_ext && s_primary_state == PRIMARY_STATE_SLEEP) {

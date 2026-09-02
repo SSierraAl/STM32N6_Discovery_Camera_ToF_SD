@@ -426,14 +426,14 @@ void sensor_task(void *arg)
 #endif
 
 #if TEST_TOF_MODE
-                /* === ON-SITE TEST MODE: no camera, no SD — indication only === */
+                /* === ON-SITE TEST MODE: no camera, no SD — RED LED only === */
                 printf(">>> TEST: %u zone(s) affected, %u valid\r\n",
                        (unsigned)res.affected_count, (unsigned)res.valid_measurements);
                 for (int a = 0; a < res.affected_count; a++)
                     printf("    zone %u -> %lu\r\n", (unsigned)res.affected_zones[a],
                            (unsigned long)res.affected_drop[a]);
                 BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
-                WS2812_Flash(0xFFFFFF, 100, TEST_TOF_LED_MS);
+                vTaskDelay(pdMS_TO_TICKS(TEST_TOF_LED_MS));
                 BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
                 g_sensor_state = SENSOR_STATE_RUNNING;
                 g_capture_busy = 0;
@@ -505,18 +505,17 @@ void sensor_task(void *arg)
 #endif
 
 #if TEST_TOF_MODE
-            /* === ON-SITE TEST MODE: no camera, no SD — indication only ===
+            /* === ON-SITE TEST MODE: no camera, no SD — RED LED only ===
                Zone list shows WHERE in the FOV the target was, so sensor
-               position/orientation can be validated. The strip flash is
-               self-contained (on for TEST_TOF_LED_MS, then off, global
-               brightness restored). */
+               position/orientation can be validated. The WS2812 strip is
+               not used in test mode. */
             printf(">>> TEST: %u zone(s) affected, %u valid\r\n",
                    (unsigned)res.affected_count, (unsigned)res.valid_measurements);
             for (int a = 0; a < res.affected_count; a++)
                 printf("    zone %u -> %lu\r\n", (unsigned)res.affected_zones[a],
                        (unsigned long)res.affected_drop[a]);
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
-            WS2812_Flash(0xFFFFFF, 100, TEST_TOF_LED_MS);
+            vTaskDelay(pdMS_TO_TICKS(TEST_TOF_LED_MS));
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
             g_sensor_state = SENSOR_STATE_RUNNING;
             g_capture_busy = 0;

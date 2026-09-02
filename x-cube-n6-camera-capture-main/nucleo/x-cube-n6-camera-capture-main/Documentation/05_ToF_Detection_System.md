@@ -99,7 +99,7 @@ From the VL53L5CX datasheet:
 | External guardian detection (`VL53L5CX_External_Update`) | **5, 6, 9** | The guardian only needs to see a change, not a perfect range |
 | Debug output (`ZFRAME` / `EXT,ZFRAME`) | **5, 6, 9** | Zones with any other status are printed as `0,0` |
 
-The set is defined once as `VL53L5CX_STATUS_OK()` in `Inc/vl53l5cx_detection.h` and used by every signal-channel path. Only **fresh-data** statuses are accepted: status 0 (`DATA_NOT_UPDATED`) is deliberately excluded — on such frames the values being read are the last ones measured (carried data), and acting on them would just re-evaluate the previous frame's verdict (a stale drop would re-trigger). Status 6's only known flaw — a possible wrap-around error when the true range exceeds the max range — is limited to the single first frame after ranging (re)start and usually fails the `VL53L5CX_DET_MIN_SIGNAL` gate anyway.
+The set is defined once as `VL53L5CX_STATUS_OK_FILT()` in `Inc/vl53l5cx_detection.h` and used by every signal-channel path. Only **fresh-data** statuses are accepted: status 0 (`DATA_NOT_UPDATED`) is deliberately excluded — on such frames the values being read are the last ones measured (carried data), and acting on them would just re-evaluate the previous frame's verdict (a stale drop would re-trigger). Status 6's only known flaw — a possible wrap-around error when the true range exceeds the max range — is limited to the single first frame after ranging (re)start and usually fails the `VL53L5CX_DET_MIN_SIGNAL` gate anyway.
 
 All other statuses are silently skipped for the signal channel (baseline learning, detection, debug output). The primary sensor's motion channel is status-independent (it can trigger even on status 255 zones) — see §7 Detection Logic.
 
@@ -176,31 +176,31 @@ Both modes can be enabled simultaneously:
 | | Primary 4×4 (default) | Primary 8×8 | External (dual mode) |
 |---|---|---|---|
 | Resolution | `VL53L5CX_RESOLUTION_4X4` | `VL53L5CX_RESOLUTION_8X8` | 4×4 (fixed) |
-| Integration time | **30 ms** (`VL53L5CX_DET_INTEGRATION_MS`) | 800 ms (same define) | 800 ms (hardcoded) |
-| Ranging frequency | 15 Hz (`VL53L5CX_DET_RANGING_FREQ_HZ`) | 15 Hz (same define) | 15 Hz (hardcoded) |
-| Target order | `STRONGEST` | `STRONGEST` | `CLOSEST` |
-| Ranging mode | `AUTONOMOUS` (3, `VL53L5CX_RANGING_MODE`) | same define | `CONTINUOUS` (1, hardcoded) |
-| Sharpener | 10% | 10% | 10% |
+| Integration time | **30 ms** (`VL53L5CX_DET_INTEGRATION_MS`) | 800 ms (same define) | 800 ms (`VL53L5CX_EXT_INTEGRATION_MS`) |
+| Ranging frequency | 15 Hz (`VL53L5CX_DET_RANGING_FREQ_HZ`) | 15 Hz (same define) | 15 Hz (`VL53L5CX_EXT_RANGING_FREQ_HZ`) |
+| Target order | `STRONGEST` | `STRONGEST` | `CLOSEST` (hardcoded) |
+| Ranging mode | `AUTONOMOUS` (3, `VL53L5CX_RANGING_MODE`) | same define | `CONTINUOUS` (1, `VL53L5CX_EXT_RANGING_MODE`) |
+| Sharpener | 10% | 10% | 10% (hardcoded) |
 
-The primary values come from `app_config.h` §9 and are passed to `VL53L5CX_Configure()` by `Src/app_thread.c`; the external column is hardcoded in `VL53L5CX_External_Configure()`. The driver accepts integration times of **2–1000 ms** only.
+The primary values come from `app_config.h` §9 and are passed to `VL53L5CX_Configure()` by `Src/app_thread.c`; the external column comes from the independent `VL53L5CX_EXT_*` defines (§9 EXT block, active with `DUAL_SENSOR = 1`) applied in `VL53L5CX_External_Configure()` — their defaults (800 ms / 15 Hz / CONTINUOUS) are exactly the previous hardcoded values. The driver accepts integration times of **2–1000 ms** only.
 
-The ST motion indicator plugin runs the motion computation **inside the sensor's GO2** (programmed by default to monitor movement between 400 and 1500 mm) and is initialized inside `VL53L5CX_Configure()` (and `VL53L5CX_External_Configure()`) unless the driver is built with `VL53L5CX_DISABLE_MOTION_INDICATOR`. The plugin's `min_nb_for_global_detection`, `nb_of_temporal_accumulations` and `extra_noise_sigma` fields are set from the `MOTION_*` defines and **re-applied to the sensor** with `vl53l5cx_motion_indicator_set_resolution()` — the plugin only DCI-writes its configuration during init/set-resolution, so without the re-apply the defines would have no effect on the sensor. The current define values (1 / 16 / 0) match the plugin's built-in defaults. `VL53L5CX_MotionTest()` (manual hook, currently commented out in `main.c`) prints the global motion indicators and every zone's motion value against `VL53L5CX_DET_MOTION_THRESH`.
+The ST motion indicator plugin runs the motion computation **inside the sensor's GO2** (programmed by default to monitor movement between 400 and 1500 mm) and is initialized inside `VL53L5CX_Configure()` (and `VL53L5CX_External_Configure()`) unless the driver is built with `VL53L5CX_DISABLE_MOTION_INDICATOR`. The plugin's `min_nb_for_global_detection`, `nb_of_temporal_accumulations` and `extra_noise_sigma` fields are set from the `VL53L5CX_DET_MOTION_*` defines (primary) / `VL53L5CX_EXT_MOTION_*` defines (guardian — independent EXT configuration) and **re-applied to the sensor** with `vl53l5cx_motion_indicator_set_resolution()` — the plugin only DCI-writes its configuration during init/set-resolution, so without the re-apply the defines would have no effect on the sensor. The current define values (1 / 16 / 0) match the plugin's built-in defaults. `VL53L5CX_MotionTest()` (manual hook, currently commented out in `main.c`) prints the global motion indicators and every zone's motion value against `VL53L5CX_DET_MOTION_THRESH`.
 
 ### 4.7 Test mode (`TEST_TOF_MODE`) — on-site commissioning
 
 ```c
 /* app_config.h §8B */
-#define TEST_TOF_MODE    1    /* 1 = LED-only indication, no camera/SD */
-#define TEST_TOF_LED_MS  3000 /* indication duration (ms) */
+#define TEST_TOF_MODE    1    /* 1 = ToF-only build (no camera, no SD) */
+#define TEST_TOF_LED_MS  300  /* RED LED indication duration (ms) */
 ```
 
-With `TEST_TOF_MODE = 1` the ToF pipeline is unchanged (init, configure, baseline learning, periodic refresh, the same signal + motion trigger rules), but the *reaction* to a detection replaces the capture:
+With `TEST_TOF_MODE = 1` the build is **ToF-only** — nothing camera- or SD-related is even present:
 
-- console: trigger source (`SIGNAL` / `MOTION` / `SIGNAL+MOTION`) plus the **affected zone numbers** and their drop/motion values — the zone indices (0–15 on the default 4×4 grid) show *where* in the FOV the target was, which validates sensor position/orientation;
-- the RED board LED and the WS2812 strip (white, 100%, via the self-contained `WS2812_Flash()`) stay on for `TEST_TOF_LED_MS`, then turn off automatically;
-- no camera init, no snapshot, no SD write; the sensor is never stopped, and the normal 30-frame cooldown applies afterwards.
+- **at boot** (`main_thread`, `main.c`): the SD card initialization and the camera pre-init are skipped, and `camera_task` / `storage_task` are never created — only the ToF driver, console, board LEDs and WS2812 hardware are initialized;
+- **on detection**: only the RED board LED is lit for `TEST_TOF_LED_MS` (the WS2812 strip stays OFF), then GREEN is restored; the console prints how many zones are affected and each **zone number with its drop value** — the zone indices (0–15 on the default 4×4 grid) show *where* in the FOV the target was, which validates sensor position/orientation;
+- the ToF pipeline itself is otherwise unchanged (init, configure, baseline learning, periodic refresh, the same signal + motion trigger rules, the normal 30-frame cooldown).
 
-Use it on-site to position the sensor, watch insects at different speeds, and calibrate the `app_config.h` §9 detection thresholds without consuming SD cards. **Set it back to `0` for production builds** (button-triggered camera capture still works either way).
+Use it on-site to position the sensor, watch insects at different speeds, and calibrate the `app_config.h` §9 detection thresholds without touching the camera or the SD card. **Set it back to `0` for production builds** (manual button capture only exists in `CAPTURE_MODE = 0` builds).
 
 ---
 
@@ -229,7 +229,7 @@ Standard operation: the camera ToF sensor runs continuously.
                               +-------------+
 ```
 
-With `TEST_TOF_MODE = 1` (§4.7) the "Capture" box becomes a `TEST_TOF_LED_MS` (3 s) LED-only indication — no camera, no SD.
+With `TEST_TOF_MODE = 1` (§4.7) the "Capture" box becomes a `TEST_TOF_LED_MS` RED-LED-only indication — no camera, no SD, no WS2812 strip.
 
 ### API flow
 
@@ -308,7 +308,7 @@ if (VL53L5CX_External_Init() == 0) {   /* external @ 0x62 (7-bit 0x31) */
 /* on failure: warning only → graceful degradation, primary-only mode */
 
 VL53L5CX_LearnBaseline();        /* primary baseline (fatal if no valid zones) */
-VL53L5CX_External_LearnBaseline(); /* external baseline: 15 samples + 3 settle */
+VL53L5CX_External_LearnBaseline(); /* external baseline: VL53L5CX_SENSOR2_BASELINE_SAMPLES (60) + 3 settle */
 VL53L5CX_Primary_SleepAtStartup();  /* park the camera ToF in ST sleep */
 ```
 
@@ -345,6 +345,18 @@ while (1) {
 - Each external detection while the primary is sleeping increments a confirm counter; any non-detecting frame resets it to 0.
 - When the count reaches `VL53L5CX_DUAL_CONFIRM_FRAMES` (2), the external state goes to `EXTERNAL_STATE_DETECTED` and `VL53L5CX_Primary_Wake()` is called.
 - `VL53L5CX_Primary_CheckWakeTimeout()` returns the primary to sleep once `VL53L5CX_DUAL_WAKE_DURATION_MS` (5000 ms) has elapsed since wake, and resets the external state to `EXTERNAL_STATE_MONITORING`.
+
+### Independent EXT (guardian) configuration
+
+The guardian no longer shares the primary's detection parameters. `app_config.h` §9 has a dedicated `VL53L5CX_EXT_*` block (active with `DUAL_SENSOR = 1`) that makes its configuration independent:
+
+| Group | Defines (current defaults) | Applied in |
+|---|---|---|
+| Timing | `VL53L5CX_EXT_INTEGRATION_MS` (800), `VL53L5CX_EXT_RANGING_FREQ_HZ` (15), `VL53L5CX_EXT_RANGING_MODE` (1 = CONTINUOUS) | `VL53L5CX_External_Configure()` — console: `[EXT] Configured: …` |
+| Trigger thresholds | `VL53L5CX_EXT_THRESHOLD_PCT` (6), `VL53L5CX_EXT_MOTION_THRESH` (60), `VL53L5CX_EXT_MIN_AFFECTED_ZONES` (1), `VL53L5CX_EXT_MIN_SIGNAL` (500) | `VL53L5CX_External_Update()` (guardian trigger → wakes the primary) and `VL53L5CX_External_LearnBaseline()` — console: `[EXT] Detection: …` |
+| ST motion plugin | `VL53L5CX_EXT_MOTION_MIN_ZONES` (1), `VL53L5CX_EXT_MOTION_PERSIST_FRAMES` (16), `VL53L5CX_EXT_MOTION_EXTRA_NOISE` (0) | motion plugin inside the guardian (via DCI) |
+
+All defaults equal the previous effective values (hardcoded timing + shared DET thresholds), so behavior is unchanged until edited; the threshold defaults stay resolution-dependent (8×8: 15 / 100 / 2) exactly like the primary's. Still shared for the guardian: grid resolution, target order (CLOSEST), sharpener (10 %), and the baseline-refresh policy. Tuning guidance: `TUNING_GUIDE.md` §4 (`VL53L5CX_EXT_*`); `vl53l5cx_zone_monitor.py` mirrors the block in its `EXT_*` variables for the live EXT-tab overlay.
 
 ### External state machine
 
@@ -394,7 +406,7 @@ while (1) {
 
 - `VL53L5CX_Primary_Sleep()` only acts from `ACTIVE`/`RETURNING`: stop ranging → 50 ms → `vl53l5cx_set_power_mode(POWER_MODE_SLEEP)`. The sensor keeps its firmware and configuration in sleep, so waking is fast.
 - `VL53L5CX_Primary_Wake()` skips if already active: set `POWER_MODE_WAKEUP` → 200 ms → `StartRanging` → 200 ms → `ACTIVE`, recording `HAL_GetTick()` for the timeout.
-- `VL53L5CX_IsPrimaryActive()` returns non-zero in `ACTIVE`/`WAKEUP`/`RETURNING`.
+- `VL53L5CX_Primary_IsActive()` returns non-zero **only** in `ACTIVE` (not in `WAKING`/`RETURNING`); use `VL53L5CX_Primary_GetState()` for the full `PrimaryState_t`.
 
 ---
 
@@ -404,12 +416,14 @@ while (1) {
 
 1. Wait for data ready (`VL53L5CX_WaitForDataReady`, 1000 ms timeout) and fetch ranging data.
 2. For each of the 16 (or 64) zones:
-    1. **Signal channel (gated):** the zone must have a learned baseline (`s_zone_valid`), a target status of 5/6/9 (`VL53L5CX_STATUS_OK`, both sensors), and a current signal present and ≥ `VL53L5CX_DET_MIN_SIGNAL` (500) — otherwise it is skipped for the signal channel.
+    1. **Signal channel (gated):** the zone must have a learned baseline (`s_zone_valid`), a target status of 5/6/9 (`VL53L5CX_STATUS_OK_FILT`, both sensors), and a current signal present and ≥ `VL53L5CX_DET_MIN_SIGNAL` (500) — otherwise it is skipped for the signal channel.
     2. **Zero-baseline guard:** if the current signal is 0 and the baseline is below `VL53L5CX_DET_MIN_SIGNAL`, the baseline is zeroed for that zone (prevents ghost zones from re-triggering forever).
     3. **Signal trigger:** drop = `|current − baseline| × 100 / baseline`; triggered when the drop exceeds `VL53L5CX_DET_THRESHOLD_PCT` (6% at 4×4).
     4. **Motion channel (ST plugin):** a zone is motion-triggered when its per-zone 32-bit motion value (computed sensor-side by the plugin, programmed by default to see movement between 400 and 1500 mm, indexed through the plugin's `map_id[]`) is ≥ `VL53L5CX_DET_MOTION_THRESH` (60 at 4×4). On the **primary** sensor this channel is evaluated for *every* zone — independently of baseline validity and ranging status (the plugin reports motion even for status 255 zones and for zones that were empty at boot); on the **external (guardian)** sensor it sits inside the same gates as the signal channel.
     5. A zone is in alarm if **either** channel fires; the zone index plus the drop % (signal) or the raw motion value (motion-only) is recorded in the result.
 3. **Global alarm:** if `affected_count ≥ VL53L5CX_DET_MIN_AFFECTED_ZONES` (1 at 4×4), `insect_detected` is set.
+
+The external (guardian) sensor runs this same evaluation with its own `VL53L5CX_EXT_*` values (independent EXT configuration — see §6); each threshold above is replaced by its `VL53L5CX_EXT_` counterpart.
 
 ### Trigger source encoding
 
@@ -441,7 +455,7 @@ Refresh procedure: `vl53l5cx_stop_ranging()` → 50 ms → `vl53l5cx_start_rangi
 1. **The busy gate (`g_capture_busy`):** if a capture/SD write is already in flight, the new detection is dropped (no queue buildup, no re-entrant triggers).
 2. **I2C arbitration:** the ToF and the camera share the physical I2C1 bus; every ToF I2C transfer in `platform.c` takes `g_i2c1_mutex`, so ToF polling never collides with camera register access.
 3. **The cooldown phase:** after a successful trigger, `cooldown = 30` frames. During cooldown, detections are ignored — a dead time while the insect leaves and the LED afterglow decays.
-4. **State handshake:** on trigger, the task sets `SENSOR_STATE_PAUSED`, drives the LEDs, issues `Capture_RequestSnapshot(60000)`, restores `SENSOR_STATE_RUNNING` and restarts ranging. In `TEST_TOF_MODE = 1` (§4.7) the snapshot issue is replaced by the self-contained `TEST_TOF_LED_MS` LED indication, and ranging is neither stopped nor restarted (the sensor is never paused).
+4. **State handshake:** on trigger, the task sets `SENSOR_STATE_PAUSED`, drives the LEDs, issues `Capture_RequestSnapshot(60000)`, restores `SENSOR_STATE_RUNNING` and restarts ranging. In `TEST_TOF_MODE = 1` (§4.7) the snapshot issue is replaced by a `TEST_TOF_LED_MS` RED-LED indication (WS2812 strip untouched), and ranging is neither stopped nor restarted (the sensor is never paused).
 
 ---
 
@@ -514,11 +528,12 @@ All three tools sit together in the **workspace root** (`STM32N6_Discovery_Camer
 
 ### vl53l5cx_zone_monitor.py (workspace root)
 Real-time S1 / EXT monitor with a **tunable host overlay** that mirrors `app_config.h` SECTION 9:
-- The `DETECTION THRESHOLDS` block at the top of the file holds `THRESHOLD_PCT`, `MOTION_THRESH`, `MIN_AFFECTED_ZONES`, `MIN_SIGNAL` (plus the sensor-plugin values as annotations only). Every variable is commented with the exact firmware define it mirrors and its 4×4 / 8×8 defaults.
-- Those values drive the dashed threshold lines on the plots (each labeled with its firmware define name), the heatmap title, and a per-frame **host trigger prediction** (`[TRIG]` / `host: n/N zones` labels) that replays the firmware trigger logic (TUNING_GUIDE.md §4 "How a trigger is computed"). ZFRAME carries no per-zone status, so the replica skips the firmware's status gate (5/6/9) and predicts *at least* what the firmware fires.
-- The active values are printed to the console at startup.
+- The `DETECTION THRESHOLDS` block at the top of the file holds `THRESHOLD_PCT`, `MOTION_THRESH`, `MIN_AFFECTED_ZONES`, `MIN_SIGNAL` (plus the sensor-plugin values as annotations only). Every variable is commented with the exact firmware define it mirrors and its 4×4 / 8×8 defaults. The `EXT_*` variables mirror the independent `VL53L5CX_EXT_*` defines (EXT block, dual mode only) and drive only the EXT tab.
+- Those values drive the dashed threshold lines on the plots (each labeled with its firmware define name), the heatmap title, and a per-frame **host trigger prediction** (`[TRIG]` / `host: n/N zones` labels) that replays the firmware trigger logic (TUNING_GUIDE.md §4 "How a trigger is computed") — each sensor tab uses its own set (S1: `VL53L5CX_DET_*`, EXT: `VL53L5CX_EXT_*`). ZFRAME carries no per-zone status, so the replica skips the firmware's status gate (5/6/9) and predicts *at least* what the firmware fires.
+- The active values (S1 and, in dual mode, EXT) are printed to the console at startup.
 - Changing values here is a **preview only** — it never changes the sensor. To make a change stick: edit the matching define in `app_config.h` §9, rebuild, flash. `GRID_SIZE` must match `VL53L5CX_DET_RESOLUTION` and `DUAL_SENSOR` must match `VL53L5CX_DUAL_SENSOR`.
 - `R` key resets all data.
+- The toolbar has **Connect / Disconnect** buttons with a link-status label. If the USB port is unplugged while running, the status turns red (DISCONNECTED), the banner reads "PORT LOST — press Connect to resume" and the console prints a single `[WARN]` (instead of repeating the Windows `ClearCommError` / `PermissionError(13, …, 22)`). Re-plug and press **Connect** to resume with a fresh serial port — no script restart needed. If the port is missing at startup, the window stays open showing CONNECT FAILED and waits for **Connect**.
 
 **Dependencies:** `pip install pyserial pyqtgraph numpy`
 
@@ -555,7 +570,7 @@ system_ready = 1;      // gate: FreeRTOS tasks only run after this
 | No detections at all | Thresholds too high / signal below gate | Lower thresholds; compare `ZFRAME` signal against `DET_MIN_SIGNAL` (500) |
 | I2C collisions / bus errors | Camera + ToF share I2C1 | The arbiter (`g_i2c1_mutex`) already guards ToF transfers; verify both ToF and camera I2C wrappers take the mutex |
 | Re-triggers on the same insect | Cooldown too short | Increase the `cooldown = 30` value in `sensor_task` |
-| On-site: validate sensor position/orientation without taking photos | `TEST_TOF_MODE` in `app_config.h` §8B | Set to 1: detection gives a 3 s LED indication (`TEST_TOF_LED_MS`) and prints the affected zone numbers — no camera/SD involved. Revert to 0 for production |
+| On-site: validate sensor position/orientation without taking photos | `TEST_TOF_MODE` in `app_config.h` §8B | Set to 1: camera and SD card are not initialized at all; a detection lights the RED board LED for `TEST_TOF_LED_MS` and prints the affected zone numbers. Revert to 0 for production |
 
 ---
 
