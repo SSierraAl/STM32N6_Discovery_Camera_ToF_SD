@@ -131,12 +131,7 @@
       and reduced gain below, for a much better signal-to-noise ratio while still
       easily freezing motion. Tune down toward 8 if you confirm actual motion blur
       (not noise) at 200 µs; tune up if still too dark. */
-#define CAM_EXPOSURE_VALUE   80000
-
-/** Print the requested exposure and the VMAX/SHS1 values read directly from
-    the IMX335 after each exposure write. Set to 0 after validation to reduce
-    serial output. */
-#define CAM_EXPOSURE_REG_DEBUG  1
+#define CAM_EXPOSURE_VALUE   8
 
 /** Analog gain (only used in MANUAL mode).
       Range: 0-72000 (IMX335_GAIN_MIN to IMX335_GAIN_MAX).
@@ -155,7 +150,7 @@
       and ~8x more LED brightness, far less analog gain is needed to reach the
       same brightness, and less gain means less sensor noise (sharper-looking
       images). Raise back toward 4000 if images come out too dark. */
-#define CAM_GAIN_VALUE      10000
+#define CAM_GAIN_VALUE       8
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).

@@ -547,34 +547,24 @@ int32_t IMX335_SetGain(IMX335_Object_t *pObj, int32_t gain)
 int32_t IMX335_SetExposure(IMX335_Object_t *pObj, int32_t exposure)
 {
   int32_t ret = IMX335_OK;
-  uint32_t exposure_lines, shutter, vmax;
-  uint8_t shutter_reg[3];
-  uint8_t vmax_reg[3];
+  uint32_t vmax, shutter;
   uint8_t hold;
 
   /* Clamp to sensor minimum (8us per datasheet) */
   if (exposure < IMX335_EXPOSURE_MIN)
     exposure = IMX335_EXPOSURE_MIN;
 
-  /* VMAX is a 20-bit register at 0x3030..0x3032. Reading four bytes also
-   * consumes 0x3033 and can corrupt the decoded frame length. */
-  if (imx335_read_reg(&pObj->Ctx, IMX335_REG_VMAX, vmax_reg, sizeof(vmax_reg)) != IMX335_OK)
+  if (imx335_read_reg(&pObj->Ctx, IMX335_REG_VMAX, (uint8_t *)&vmax, 4) != IMX335_OK)
   {
     ret = IMX335_ERROR;
   }
   else
   {
-    vmax = (uint32_t)vmax_reg[0] |
-           ((uint32_t)vmax_reg[1] << 8) |
-           (((uint32_t)vmax_reg[2] & 0x0FU) << 16);
-    exposure_lines = (uint32_t)((float)exposure / IMX335_1H_PERIOD_USEC);
+    shutter = (uint32_t) (vmax - (exposure / IMX335_1H_PERIOD_USEC));
 
-    /* Avoid unsigned underflow when the request exceeds the current frame
-     * period. SHS1=1 gives the longest exposure supported by this setup. */
-    shutter = (exposure_lines >= vmax) ? 1U : (vmax - exposure_lines);
-
-    /* Keep SHS1 inside the frame. A one-line (~8 us) exposure naturally
-     * produces SHS1=VMAX-1; SHS1=1 is the longest possible exposure. */
+    /* RELAXED CLAMP: Allow shutter down to 1 (enables ~8us exposure)
+       Original: IMX335_SHUTTER_MIN = 9, which clamped exposure to ~100us
+       Sensor supports 8us minimum per imx335_reg.h */
     if (shutter < 1)
     {
       shutter = 1;
@@ -587,10 +577,7 @@ int32_t IMX335_SetExposure(IMX335_Object_t *pObj, int32_t exposure)
     }
     else
     {
-      shutter_reg[0] = (uint8_t)(shutter & 0xFFU);
-      shutter_reg[1] = (uint8_t)((shutter >> 8) & 0xFFU);
-      shutter_reg[2] = (uint8_t)((shutter >> 16) & 0x0FU);
-      if(imx335_write_reg(&pObj->Ctx, IMX335_REG_SHUTTER, shutter_reg, sizeof(shutter_reg)) != IMX335_OK)
+      if(imx335_write_reg(&pObj->Ctx, IMX335_REG_SHUTTER, (uint8_t *)&shutter, 3) != IMX335_OK)
       {
         ret = IMX335_ERROR;
       }

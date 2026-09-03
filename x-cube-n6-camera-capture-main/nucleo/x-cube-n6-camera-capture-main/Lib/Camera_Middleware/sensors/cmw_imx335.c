@@ -20,7 +20,6 @@
 #include <stdio.h>
 #include <stddef.h>
 #include <string.h>
-#include "app_config.h"
 #include "cmw_imx335.h"
 #include "cmw_camera.h"
 #include "imx335_reg.h"
@@ -30,12 +29,6 @@
 #endif
 
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
-
-/* Exposure mode is commonly selected after CAM_Init(), before the first
- * CMW_CAMERA_Start(). Keep the requested AEC state until ISP_Init() has made
- * the ISP handle valid. */
-static uint8_t imx335_aec_enabled = (CAM_EXPOSURE_MODE == 0) ? 1U : 0U;
-static uint8_t imx335_isp_started;
 
 
 static int CMW_IMX335_GetResType(uint32_t width, uint32_t height, uint32_t*res)
@@ -78,7 +71,6 @@ static int32_t CMW_IMX335_getMirrorFlipConfig(uint32_t Config)
 static int32_t CMW_IMX335_DeInit(void *io_ctx)
 {
   int ret = CMW_ERROR_NONE;
-  imx335_isp_started = 0U;
   ret = ISP_DeInit(&((CMW_IMX335_t *)io_ctx)->hIsp);
   if (ret)
   {
@@ -105,72 +97,7 @@ static int32_t CMW_IMX335_SetGain(void *io_ctx, int32_t gain)
 
 static int32_t CMW_IMX335_SetExposure(void *io_ctx, int32_t exposure)
 {
-  CMW_IMX335_t *ctx = (CMW_IMX335_t *)io_ctx;
-  int32_t ret = IMX335_SetExposure(&ctx->ctx_driver, exposure);
-
-#if CAM_EXPOSURE_REG_DEBUG
-  if (ret == IMX335_OK)
-  {
-    uint8_t vmax_reg[3];
-    uint8_t shs1_reg[3];
-
-    if ((imx335_read_reg(&ctx->ctx_driver.Ctx, IMX335_REG_VMAX,
-                         vmax_reg, sizeof(vmax_reg)) == IMX335_OK) &&
-        (imx335_read_reg(&ctx->ctx_driver.Ctx, IMX335_REG_SHUTTER,
-                         shs1_reg, sizeof(shs1_reg)) == IMX335_OK))
-    {
-      uint32_t vmax = (uint32_t)vmax_reg[0] |
-                      ((uint32_t)vmax_reg[1] << 8) |
-                      (((uint32_t)vmax_reg[2] & 0x0FU) << 16);
-      uint32_t shs1 = (uint32_t)shs1_reg[0] |
-                      ((uint32_t)shs1_reg[1] << 8) |
-                      (((uint32_t)shs1_reg[2] & 0x0FU) << 16);
-      uint32_t exposure_lines = (vmax > shs1) ? (vmax - shs1) : 0U;
-      uint32_t actual_us = (uint32_t)(((uint64_t)exposure_lines * 1000000ULL + 67500ULL) /
-                                      135000ULL);
-
-      printf("[IMX335] exposure request=%ld us, VMAX=%lu, SHS1=%lu, actual=%lu us\n",
-             (long)exposure, (unsigned long)vmax, (unsigned long)shs1,
-             (unsigned long)actual_us);
-    }
-    else
-    {
-      printf("[IMX335] exposure register readback failed\n");
-    }
-  }
-#endif
-
-  return ret;
-}
-
-static int32_t CMW_IMX335_SetExposureMode(void *io_ctx, int32_t mode)
-{
-  switch (mode)
-  {
-    case CMW_EXPOSUREMODE_AUTO:
-      imx335_aec_enabled = 1U;
-      break;
-
-    case CMW_EXPOSUREMODE_AUTOFREEZE:
-    case CMW_EXPOSUREMODE_MANUAL:
-      imx335_aec_enabled = 0U;
-      break;
-
-    default:
-      return CMW_ERROR_WRONG_PARAM;
-  }
-
-  if ((imx335_isp_started != 0U) &&
-      (ISP_SetAECState(&((CMW_IMX335_t *)io_ctx)->hIsp, imx335_aec_enabled) != ISP_OK))
-  {
-    return CMW_ERROR_COMPONENT_FAILURE;
-  }
-
-#if CAM_EXPOSURE_REG_DEBUG
-  printf("[IMX335] exposure mode=%ld, ISP AEC=%u%s\n", (long)mode,
-         imx335_aec_enabled, (imx335_isp_started != 0U) ? "" : " (pending ISP start)");
-#endif
-  return CMW_ERROR_NONE;
+  return IMX335_SetExposure(&((CMW_IMX335_t *)io_ctx)->ctx_driver, exposure);
 }
 
 /**
@@ -325,17 +252,6 @@ static int32_t CMW_IMX335_Start(void *io_ctx)
   {
       return CMW_ERROR_PERIPH_FAILURE;
   }
-
-  imx335_isp_started = 1U;
-  ret = ISP_SetAECState(&((CMW_IMX335_t *)io_ctx)->hIsp, imx335_aec_enabled);
-  if (ret != ISP_OK)
-  {
-    imx335_isp_started = 0U;
-    return CMW_ERROR_COMPONENT_FAILURE;
-  }
-#if CAM_EXPOSURE_REG_DEBUG
-  printf("[IMX335] ISP started, AEC=%u\n", imx335_aec_enabled);
-#endif
 #endif
   return IMX335_Start(&((CMW_IMX335_t *)io_ctx)->ctx_driver);
 }
@@ -450,7 +366,6 @@ int CMW_IMX335_Probe(CMW_IMX335_t *io_ctx, CMW_Sensor_if_t *imx335_if)
   imx335_if->ReadID = CMW_IMX335_ReadID;
   imx335_if->SetGain = CMW_IMX335_SetGain;
   imx335_if->SetExposure = CMW_IMX335_SetExposure;
-  imx335_if->SetExposureMode = CMW_IMX335_SetExposureMode;
   imx335_if->SetWBRefMode = CMW_IMX335_SetWBRefMode;
   imx335_if->ListWBRefModes = CMW_IMX335_ListWBRefModes;
   imx335_if->SetFrequency = CMW_IMX335_SetFrequency;
