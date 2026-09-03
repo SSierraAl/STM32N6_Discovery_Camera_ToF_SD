@@ -383,6 +383,32 @@ void sensor_task(void *arg)
     while (1) {
         if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
 
+#if TEST_TOF_MODE
+        /* ---- Manual baseline refresh via USER button (PC13) ----
+           TEST build only: one press = one full refresh of the primary
+           baseline and, in dual mode, the external guardian baseline as
+           well (see VL53L5CX_RefreshBaseline_Manual()). Debounced and
+           edge-triggered — re-arms once the button is released. The RED
+           LED stays on for the whole refresh (a few seconds). */
+        static uint8_t btn_refresh_armed = 1;
+        if (btn_refresh_armed &&
+            HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
+            vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
+            if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
+                btn_refresh_armed = 0;
+                printf("[BTN] PC13 pressed — refreshing baseline(s)...\n");
+                BSP_LED_Off(LED_GREEN);
+                BSP_LED_On(LED_RED);
+                VL53L5CX_RefreshBaseline_Manual();
+                BSP_LED_Off(LED_RED);
+                BSP_LED_On(LED_GREEN);
+                while (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET)
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                btn_refresh_armed = 1;
+            }
+        }
+#endif
+
 #if VL53L5CX_DUAL_SENSOR
         /* ---- DUAL SENSOR MODE ----
            External sensor is always ON, monitoring for motion/signal drop.

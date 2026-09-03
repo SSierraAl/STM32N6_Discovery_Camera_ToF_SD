@@ -116,6 +116,16 @@ int  VL53L5CX_IsBaselineReady(void);
 void VL53L5CX_LearnBaseline(void);
 void VL53L5CX_ResetBaseline(void);
 
+/** Manual (button-triggered) baseline refresh — TEST_TOF_MODE only.
+    Refreshes the primary (camera ToF) baseline with the same procedure
+    as the periodic/adaptive auto-refresh (stop-ranging -> 50 ms ->
+    start-ranging -> 200 ms -> re-learn). In dual mode the primary is
+    woken first if parked in ST sleep, refreshed, then parked back to
+    sleep (external state machine reset to MONITORING). The external
+    guardian baseline is refreshed too when it is running.
+    Blocks for a few seconds — call only from sensor_task. */
+void VL53L5CX_RefreshBaseline_Manual(void);
+
 /* --- Detection --- */
 int  VL53L5CX_Update(void);
 int  VL53L5CX_IsInsectDetected(void);

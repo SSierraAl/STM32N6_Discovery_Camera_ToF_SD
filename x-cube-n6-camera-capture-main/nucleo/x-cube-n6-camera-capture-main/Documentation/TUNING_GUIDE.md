@@ -557,6 +557,7 @@ With `DUAL_SENSOR = 1`, the guardian's configuration is **fully independent** of
 #define TEST_TOF_LED_MS  300  /* RED LED indication duration (ms) */
 ```
 With `TEST_TOF_MODE = 1` the build is **ToF-only**: at boot the SD card and the camera are **never initialized** (and `camera_task` / `storage_task` are not created), so no photo can be taken and the card is never touched. A detection only lights the RED board LED for `TEST_TOF_LED_MS` (the WS2812 strip stays OFF) and the console prints the **affected zone numbers** with their drop values. Everything else (baseline learning, periodic refresh, signal + motion trigger rules, 30-frame cooldown) is unchanged.
+The USER button (PC13) re-learns the baseline(s) **on demand**: one press runs the same refresh procedure as the auto-refresh (stop-ranging → 50 ms → start-ranging → 200 ms → re-learn) on the primary, and — with `DUAL_SENSOR = 1` — on the external guardian as well (the primary is woken first if parked in ST sleep, then parked back to sleep; the RED LED stays on for the whole refresh). Use it to re-baseline after repositioning the sensor or after a lighting change without a power cycle — and if you disable `ADAPTIVE_REFRESH` / `PERIODIC_RESTART` for a clean validation, it becomes the *only* baseline-refresh path.
 Use it on-site to validate sensor position/orientation and to calibrate the detection thresholds in this section. **revert to 0 for production**
 
 ---
@@ -576,7 +577,7 @@ Use it on-site to validate sensor position/orientation and to calibrate the dete
 | Dual mode: false wakes | `EXT,ZFRAME` (uses the independent `VL53L5CX_EXT_*` defines) | `VL53L5CX_EXT_THRESHOLD_PCT` / `VL53L5CX_EXT_MOTION_THRESH` (↑), `VL53L5CX_EXT_MIN_AFFECTED_ZONES` (↑), `DUAL_CONFIRM_FRAMES` (↑ to 3–4) |
 | "Primary ToF baseline not ready!" at boot (task stops) | LearnBaseline console output | Field of view blocked? Raise `INTEGRATION_MS`, lower `MIN_SIGNAL`, raise `BASELINE_SAMPLES` (→ 30) |
 | No ZFRAME/ALLPARAM on UART | `VL53L5CX_DET_DEBUG_*` flags in `app_config.h` §9 | set `DEBUG_ZFRAME` (or `DEBUGALLPARAMS`) to 1 and rebuild |
-| Validating sensor position/orientation on-site (no photos wanted) | Console `>>> TEST:` zone list | `TEST_TOF_MODE` (`app_config.h` §8B) → 1: camera/SD not initialized at all; RED LED on for `TEST_TOF_LED_MS` + per-zone console output. Revert to 0 for production |
+| Validating sensor position/orientation on-site (no photos wanted) | Console `>>> TEST:` zone list | `TEST_TOF_MODE` (`app_config.h` §8B) → 1: camera/SD not initialized at all; RED LED on for `TEST_TOF_LED_MS` + per-zone console output; USER button (PC13) re-learns the baseline(s) on demand. Revert to 0 for production |
 
 ---
 
@@ -736,6 +737,9 @@ Step 1: Set TEST_TOF_MODE = 1 (app_config.h §8B) and rebuild
 **It is recommended to also put VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED and VL53L5CX_DET_PERIODIC_RESTART_ENABLED to 0** in order to validate the detections on-site.
 Step 2: Mount the unit at its final position and power-cycle it once
         (baseline learning runs at boot — it must learn the real site).
+        After any repositioning or lighting change, one USER button (PC13)
+        press re-learns the baseline(s) on demand (primary + external
+        guardian in dual mode) — no power cycle needed.
 Step 3: Move a target (insect, hand, card) across the detection area at
         different speeds — watch the RED LED and the console
         (no camera, no SD card: neither is even initialized)

@@ -375,6 +375,11 @@ s2 = Sensor("EXT (Guardian)", PINK, tabs,
 win.show()
 
 total_det = 0
+cam_fail = False   # set when the CAM_Init assert ("CAMERA NOT DETECTED") is seen
+
+def _gbar_default():
+    gbar.setText("WAITING FOR DATA...")
+    gbar.setStyleSheet(f"color:{CYAN};font-family:Consolas;font-size:13pt;font-weight:bold;background:{PLOT_BG};padding:6px;border-radius:4px")
 
 # ================================================================
 # SERIAL CONNECT / DISCONNECT
@@ -386,12 +391,12 @@ def _set_link(connected, text, color):
     btn_disconnect.setEnabled(connected)
 
 def _reset_host_data():
-    global total_det
+    global total_det, cam_fail
     s1.reset()
     if s2: s2.reset()
     total_det = 0
-    gbar.setText("WAITING FOR DATA...")
-    gbar.setStyleSheet(f"color:{CYAN};font-family:Consolas;font-size:13pt;font-weight:bold;background:{PLOT_BG};padding:6px;border-radius:4px")
+    cam_fail = False
+    _gbar_default()
 
 def connect_port():
     global ser, serial_buffer
@@ -466,7 +471,7 @@ def parse(line):
 # SERIAL LOOP
 # ================================================================
 def tick():
-    global serial_buffer, total_det
+    global serial_buffer, total_det, cam_fail
     if ser is None or not ser.is_open:
         return
     try:
@@ -482,6 +487,26 @@ def tick():
         line, serial_buffer = serial_buffer.split('\n', 1)
         line = line.strip().rstrip('\r')
         if not line: continue
+
+        # Camera fault: the firmware assert(0) in CAM_Init (app_cam.c) means
+        # the IMX335 sensor never answered on I2C after 3 retries. ARM's
+        # __assert prints exactly:  assertion "0" failed: file "...app_cam.c",
+        # line 163, function: CAM_Init
+        # Show CAMERA NOT DETECTED in the status bar instead of the generic
+        # "WAITING FOR DATA..." so the cause is obvious while waiting.
+        if "CAM_Init" in line and "assertion" in line:
+            cam_fail = True
+            gbar.setText("CAMERA NOT DETECTED (CAM_Init assert)")
+            gbar.setStyleSheet(f"color:{RED};font-family:Consolas;font-size:13pt;font-weight:bold;background:{PLOT_BG};padding:6px;border-radius:4px")
+            continue
+
+        # Firmware rebooted (boot banner): the old CAMERA NOT DETECTED flag
+        # no longer applies, so fall back to the generic waiting state.
+        if "[INFO] System READY!" in line:
+            if cam_fail:
+                cam_fail = False
+                _gbar_default()
+            continue
 
         if line.startswith("EXT,ZFRAME"):
             if s2:

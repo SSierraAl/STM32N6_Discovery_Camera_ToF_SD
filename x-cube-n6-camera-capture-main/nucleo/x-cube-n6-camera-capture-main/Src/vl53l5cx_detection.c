@@ -1171,3 +1171,58 @@ void VL53L5CX_External_PrintAllZoneParams(void)
 }
 
 #endif /* VL53L5CX_DUAL_SENSOR */
+
+/* ================================================================
+   Manual Baseline Refresh (button-triggered, TEST_TOF_MODE)
+   ================================================================
+   Same procedure as the documented periodic/adaptive refresh:
+   stop-ranging -> 50 ms -> start-ranging -> 200 ms -> re-learn.
+   In dual mode the camera ToF (primary) is parked in ST sleep by
+   default, so it is woken first and put back to sleep afterwards;
+   the external (guardian) baseline is refreshed in place.
+   Blocking for a few seconds — only call from sensor_task.
+   ================================================================ */
+
+void VL53L5CX_RefreshBaseline_Manual(void)
+{
+#if VL53L5CX_DUAL_SENSOR
+    printf("[BTN] Refreshing PRIMARY baseline (waking from sleep)...\n");
+    /* Wake the camera ToF if it is parked in ST sleep. Already-active
+       states (mid detection cycle) simply skip the wake sequence. */
+    if (!VL53L5CX_Primary_IsActive())
+        VL53L5CX_Primary_Wake();
+#else
+    printf("[BTN] Refreshing PRIMARY baseline...\n");
+#endif
+
+    /* Documented refresh procedure (same as periodic/adaptive refresh) */
+    vl53l5cx_stop_ranging(&s_dev);
+    vTaskDelay(pdMS_TO_TICKS(50));
+    vl53l5cx_start_ranging(&s_dev);
+    vTaskDelay(pdMS_TO_TICKS(200));
+    VL53L5CX_LearnBaseline();
+    s_last_insect_detected = 0;  /* drop any stale pre-press detection */
+
+#if VL53L5CX_DUAL_SENSOR
+    /* Park the camera ToF back in ST sleep (default dual-mode state) —
+       same state dance as VL53L5CX_Primary_CheckWakeTimeout(). */
+    s_external_state = EXTERNAL_STATE_WAITING;
+    VL53L5CX_Primary_Sleep();
+    s_external_state = EXTERNAL_STATE_MONITORING;
+    s_primary_detection_confirm = 0;
+
+    /* External guardian: always on, refresh in place. */
+    if (VL53L5CX_External_GetState() != EXTERNAL_STATE_IDLE) {
+        printf("[BTN] Refreshing EXTERNAL (guardian) baseline...\n");
+        vl53l5cx_stop_ranging(&s_dev_ext);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        vl53l5cx_start_ranging(&s_dev_ext);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        VL53L5CX_External_LearnBaseline();
+        s_last_insect_detected_ext = 0;
+    }
+#endif
+
+    printf("[BTN] Baseline refresh done\n");
+}
+

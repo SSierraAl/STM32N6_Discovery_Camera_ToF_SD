@@ -198,9 +198,10 @@ With `TEST_TOF_MODE = 1` the build is **ToF-only** — nothing camera- or SD-rel
 
 - **at boot** (`main_thread`, `main.c`): the SD card initialization and the camera pre-init are skipped, and `camera_task` / `storage_task` are never created — only the ToF driver, console, board LEDs and WS2812 hardware are initialized;
 - **on detection**: only the RED board LED is lit for `TEST_TOF_LED_MS` (the WS2812 strip stays OFF), then GREEN is restored; the console prints how many zones are affected and each **zone number with its drop value** — the zone indices (0–15 on the default 4×4 grid) show *where* in the FOV the target was, which validates sensor position/orientation;
+- **on button press** (USER button PC13, polled in `sensor_task`): the baseline(s) are re-learned on demand via `VL53L5CX_RefreshBaseline_Manual()` — the same procedure as the documented periodic/adaptive refresh (stop-ranging → 50 ms → start-ranging → 200 ms → re-learn). In dual mode the camera ToF is woken first if parked in ST sleep, refreshed, then parked back to sleep (guardian state machine reset to MONITORING), and the external guardian's baseline is re-learned as well. The RED LED stays on for the whole refresh (a few seconds) and GREEN returns when it is done;
 - the ToF pipeline itself is otherwise unchanged (init, configure, baseline learning, periodic refresh, the same signal + motion trigger rules, the normal 30-frame cooldown).
 
-Use it on-site to position the sensor, watch insects at different speeds, and calibrate the `app_config.h` §9 detection thresholds without touching the camera or the SD card. **Set it back to `0` for production builds** (manual button capture only exists in `CAPTURE_MODE = 0` builds).
+Use it on-site to position the sensor, watch insects at different speeds, and calibrate the `app_config.h` §9 detection thresholds without touching the camera or the SD card. **Set it back to `0` for production builds** (manual button capture only exists in `CAPTURE_MODE = 0` builds — in test builds the same button is repurposed for the baseline refresh above; `TEST_TOF_MODE = 1` + `CAPTURE_MODE = 0` is a compile error, so the button can never have two jobs at once).
 
 ---
 
