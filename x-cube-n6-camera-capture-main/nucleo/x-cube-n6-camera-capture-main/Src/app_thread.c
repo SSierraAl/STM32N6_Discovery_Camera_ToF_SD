@@ -379,6 +379,11 @@ void sensor_task(void *arg)
     g_sensor_state = SENSOR_STATE_RUNNING;
     printf("[SENSOR] Running\n");
     uint32_t capture_count = 0, cooldown = 0;
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+    uint8_t consecutive_captures = 0;
+    uint8_t consecutive_window_active = 0;
+    TickType_t consecutive_window_start = 0;
+#endif
 
     while (1) {
         if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
@@ -435,6 +440,16 @@ void sensor_task(void *arg)
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
 
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+            if (consecutive_window_active &&
+                (xTaskGetTickCount() - consecutive_window_start) >=
+                    pdMS_TO_TICKS(VL53L5CX_DET_REFRESH_WINDOW_SECS * 1000UL)) {
+                consecutive_captures = 0;
+                consecutive_window_active = 0;
+                printf("[ADAPT] Window expired, counter reset\n");
+            }
+#endif
+
             /* Check primary sensor detection while it's awake */
             if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
                 if (g_capture_busy) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
@@ -477,15 +492,47 @@ void sensor_task(void *arg)
                 WS2812_TurnOff();
 #endif
 
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+                if (consecutive_window_active) {
+                    consecutive_captures++;
+                } else {
+                    consecutive_captures = 1;
+                }
+                consecutive_window_active = 0;
+                printf("[ADAPT] Camera activation %u/%u\n",
+                       (unsigned)consecutive_captures,
+                       (unsigned)VL53L5CX_DET_MAX_DETECTIONS);
+#endif
+
                 PerfTimer_t t;
                 PERF_START(t);
                 int rc = Capture_RequestSnapshot(60000);
                 PERF_STOP(t);
                 BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+                if (consecutive_captures >= VL53L5CX_DET_MAX_DETECTIONS) {
+                    printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
+                    VL53L5CX_StopRanging();
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                    VL53L5CX_StartRanging();
+                    vTaskDelay(pdMS_TO_TICKS(200));
+                    VL53L5CX_LearnBaseline();
+                    consecutive_captures = 0;
+                    consecutive_window_active = 0;
+                    printf("[ADAPT] Baseline refresh complete\n");
+                } else {
+                    VL53L5CX_StartRanging();
+                    consecutive_window_start = xTaskGetTickCount();
+                    consecutive_window_active = 1;
+                    printf("[ADAPT] Window opened for %lu s\n",
+                           (unsigned long)VL53L5CX_DET_REFRESH_WINDOW_SECS);
+                }
+#else
                 VL53L5CX_StartRanging();
+#endif
                 g_sensor_state = SENSOR_STATE_RUNNING;
                 g_capture_busy = 0;
-                cooldown = 30;
+                cooldown = 5;
 
                 if (rc == 0) {
                     capture_count++;
@@ -513,6 +560,16 @@ void sensor_task(void *arg)
         g_debug_frame_count++;
         if (g_debug_frame_count >= 1) g_debug_frame_count = 0;
         if (cooldown > 0) cooldown--;
+
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+        if (consecutive_window_active &&
+            (xTaskGetTickCount() - consecutive_window_start) >=
+                pdMS_TO_TICKS(VL53L5CX_DET_REFRESH_WINDOW_SECS * 1000UL)) {
+            consecutive_captures = 0;
+            consecutive_window_active = 0;
+            printf("[ADAPT] Window expired, counter reset\n");
+        }
+#endif
 
         /* Check primary sensor detection */
         if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
@@ -559,15 +616,47 @@ void sensor_task(void *arg)
             WS2812_TurnOff();
 #endif
 
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+            if (consecutive_window_active) {
+                consecutive_captures++;
+            } else {
+                consecutive_captures = 1;
+            }
+            consecutive_window_active = 0;
+            printf("[ADAPT] Camera activation %u/%u\n",
+                   (unsigned)consecutive_captures,
+                   (unsigned)VL53L5CX_DET_MAX_DETECTIONS);
+#endif
+
             PerfTimer_t t;
             PERF_START(t);
             int rc = Capture_RequestSnapshot(60000);
             PERF_STOP(t);
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+            if (consecutive_captures >= VL53L5CX_DET_MAX_DETECTIONS) {
+                printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
+                VL53L5CX_StopRanging();
+                vTaskDelay(pdMS_TO_TICKS(50));
+                VL53L5CX_StartRanging();
+                vTaskDelay(pdMS_TO_TICKS(200));
+                VL53L5CX_LearnBaseline();
+                consecutive_captures = 0;
+                consecutive_window_active = 0;
+                printf("[ADAPT] Baseline refresh complete\n");
+            } else {
+                VL53L5CX_StartRanging();
+                consecutive_window_start = xTaskGetTickCount();
+                consecutive_window_active = 1;
+                printf("[ADAPT] Window opened for %lu s\n",
+                       (unsigned long)VL53L5CX_DET_REFRESH_WINDOW_SECS);
+            }
+#else
             VL53L5CX_StartRanging();
+#endif
             g_sensor_state = SENSOR_STATE_RUNNING;
             g_capture_busy = 0;
-            cooldown = 30;
+            cooldown = 5;
 
             if (rc == 0) {
                 capture_count++;

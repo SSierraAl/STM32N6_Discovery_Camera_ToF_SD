@@ -414,11 +414,8 @@
        at different speeds, calibrating detection thresholds.
        NOTE: requires CAPTURE_MODE != 0 (ToF is disabled in mode 0).
    0 = PRODUCTION: normal capture + SD save on detection. */
-#define TEST_TOF_MODE                1
+#define TEST_TOF_MODE                0
 
-#if TEST_TOF_MODE && CAPTURE_MODE == 0
-#error "TEST_TOF_MODE requires CAPTURE_MODE != 0 (ToF is only active in modes 1/2/4)"
-#endif
 
 /** RED LED indication duration in TEST_TOF_MODE (ms). */
 #define TEST_TOF_LED_MS              300
@@ -455,7 +452,7 @@
 /** ToF grid resolution:
     - 4 = VL53L5CX_RESOLUTION_4X4  (16 zones, faster, lower granularity)
     - 8 = VL53L5CX_RESOLUTION_8X8  (64 zones, slower, higher granularity) */
-#define VL53L5CX_DET_RESOLUTION       4
+#define VL53L5CX_DET_RESOLUTION       8
 
 /** Ranging mode for the PRIMARY sensor (raw VL53L5CX ULD driver codes,
     see vl53l5cx_api.h — this ULD implements only these two modes):
@@ -478,7 +475,7 @@
     / long-range detection) but the requested frequency is only achievable
     while integration + processing < 1/frequency. */
 #if VL53L5CX_DET_RESOLUTION == 8
-#define VL53L5CX_DET_INTEGRATION_MS   800
+#define VL53L5CX_DET_INTEGRATION_MS   30
 #else
 #define VL53L5CX_DET_INTEGRATION_MS   30
 #endif
@@ -526,24 +523,24 @@
 /* Baseline refresh - pick ONE mode at a time:
    MODE 1 periodic:  PERIODIC_RESTART_ENABLED=1,  ADAPTIVE_REFRESH_ENABLED=0
    MODE 2 adaptive:  PERIODIC_RESTART_ENABLED=0,  ADAPTIVE_REFRESH_ENABLED=1
-   (adaptive uses a real-time sliding window via xTaskGetTickCount();
-    periodic uses a static frame counter in VL53L5CX_Update()) */
+   (adaptive counts consecutive camera activations after completed capture
+    pipelines; periodic uses a static frame counter in VL53L5CX_Update()) */
 
 /* MODE 1: Periodic restart (frame-based) - DISABLED by default */
 #define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   0
 #define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500  /* refresh every N Update() frames */
 
-/* MODE 2: Adaptive refresh (detection-based) - ENABLED by default */
-#define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   0
-#define VL53L5CX_DET_REFRESH_WINDOW_SECS        15   /* real-time sliding window (seconds) */
-#define VL53L5CX_DET_MAX_DETECTIONS             3    /* max detections per window before refresh */
+/* MODE 2: Adaptive refresh (consecutive camera activations) - ENABLED by default */
+#define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
+#define VL53L5CX_DET_REFRESH_WINDOW_SECS        2    /* seconds allowed after the previous capture pipeline */
+#define VL53L5CX_DET_MAX_DETECTIONS             3    /* consecutive camera activations before refresh */
 
 /* UART1 debug output
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
    DEBUG MODE 2: ALLPARAM - full per-zone parameters every N frames (datalogger.py)
    Both can be enabled simultaneously (bandwidth trade-off). */
-#define VL53L5CX_DET_DEBUG_ZFRAME       1
-#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1   /* emit ZFRAME every N Update() frames */
+#define VL53L5CX_DET_DEBUG_ZFRAME       0  //1 for debug and pthon itnerface
+#define VL53L5CX_DET_DEBUG_ZFRAME_INT   0  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 

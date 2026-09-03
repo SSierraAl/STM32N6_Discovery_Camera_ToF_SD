@@ -466,36 +466,6 @@ int VL53L5CX_Update(void)
     }
 #endif
 
-#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
-    {
-        static uint32_t window_start = 0;
-        static uint8_t  detection_count = 0;
-        if (window_start == 0)
-            window_start = xTaskGetTickCount();
-
-        if (s_last_insect_detected)
-            detection_count++;
-
-        if ((xTaskGetTickCount() - window_start) >= pdMS_TO_TICKS(VL53L5CX_DET_REFRESH_WINDOW_SECS * 1000)) {
-            window_start = xTaskGetTickCount();
-            if (detection_count > VL53L5CX_DET_MAX_DETECTIONS) {
-                printf("[ToF] Adaptive refresh: %d detections in %ds\n",
-                       detection_count, VL53L5CX_DET_REFRESH_WINDOW_SECS);
-                vl53l5cx_stop_ranging(&s_dev);
-                vTaskDelay(pdMS_TO_TICKS(50));
-                vl53l5cx_start_ranging(&s_dev);
-                vTaskDelay(pdMS_TO_TICKS(200));
-                VL53L5CX_LearnBaseline();
-                printf("[ToF] Adaptive refresh done.\n");
-            } else {
-                printf("[ToF] Window: %d detections in %ds — no refresh\n",
-                       detection_count, VL53L5CX_DET_REFRESH_WINDOW_SECS);
-            }
-            detection_count = 0;
-        }
-    }
-#endif
-
     /* Debug output */
 #if VL53L5CX_DET_DEBUG_ZFRAME > 0
     static uint32_t zframe_counter = 0;
@@ -1041,36 +1011,6 @@ int VL53L5CX_External_Update(void)
             vTaskDelay(pdMS_TO_TICKS(200));
             VL53L5CX_External_LearnBaseline();
             printf("[EXT] Periodic refresh done.\n");
-        }
-    }
-#endif
-
-#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
-    {
-        static uint32_t ext_window_start = 0;
-        static uint8_t  ext_detection_count = 0;
-        if (ext_window_start == 0)
-            ext_window_start = xTaskGetTickCount();
-
-        if (s_last_insect_detected_ext)
-            ext_detection_count++;
-
-        if ((xTaskGetTickCount() - ext_window_start) >= pdMS_TO_TICKS(VL53L5CX_DET_REFRESH_WINDOW_SECS * 1000)) {
-            ext_window_start = xTaskGetTickCount();
-            if (ext_detection_count > VL53L5CX_DET_MAX_DETECTIONS) {
-                printf("[EXT] Adaptive refresh: %d detections in %ds\n",
-                       ext_detection_count, VL53L5CX_DET_REFRESH_WINDOW_SECS);
-                vl53l5cx_stop_ranging(&s_dev_ext);
-                vTaskDelay(pdMS_TO_TICKS(50));
-                vl53l5cx_start_ranging(&s_dev_ext);
-                vTaskDelay(pdMS_TO_TICKS(200));
-                VL53L5CX_External_LearnBaseline();
-                printf("[EXT] Adaptive refresh done.\n");
-            } else {
-                printf("[EXT] Window: %d detections in %ds — no refresh\n",
-                       ext_detection_count, VL53L5CX_DET_REFRESH_WINDOW_SECS);
-            }
-            ext_detection_count = 0;
         }
     }
 #endif
