@@ -30,7 +30,10 @@ static const ISP_IQParamTypeDef ISP_IQParamCacheInit_IMX335 = {
         .exposure = 0,
     },
     .AECAlgo = {
-        .enable = 1,
+        /* Keep the ISP AE state consistent with the application mode from the
+         * first frame. Runtime mode changes are handled by
+         * CMW_IMX335_SetExposureMode(). */
+        .enable = (CAM_EXPOSURE_MODE == 0),
         .exposureCompensation = EXPOSURE_TARGET_0_0_EV,
         .antiFlickerFreq = ANTIFLICKER_NONE,
     },
