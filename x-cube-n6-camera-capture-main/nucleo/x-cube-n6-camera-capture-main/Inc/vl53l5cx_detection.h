@@ -120,9 +120,10 @@ void VL53L5CX_ResetBaseline(void);
     Refreshes the primary (camera ToF) baseline with the same procedure
     as the periodic/adaptive auto-refresh (stop-ranging -> 50 ms ->
     start-ranging -> 200 ms -> re-learn). In dual mode the primary is
-    woken first if parked in ST sleep, refreshed, then parked back to
-    sleep (external state machine reset to MONITORING). The external
-    guardian baseline is refreshed too when it is running.
+    woken first if parked in ST sleep (the wake may re-learn on its own
+    depending on VL53L5CX_DUAL_BASELINE_MODE, app_config.h) and then
+    parked back to sleep (external state machine reset to MONITORING).
+    The external guardian baseline is refreshed too when it is running.
     Blocks for a few seconds — call only from sensor_task. */
 void VL53L5CX_RefreshBaseline_Manual(void);
 
@@ -190,7 +191,16 @@ void VL53L5CX_Primary_SleepAtStartup(void);
 
 /** Wake primary sensor from ST sleep mode.
     Enters VL53L5CX_POWER_MODE_WAKEUP, restarts ranging.
-    Firmware and configuration retained — no re-init needed. */
+    Firmware and configuration retained — no re-init needed.
+    Baseline refresh on wake follows VL53L5CX_DUAL_BASELINE_MODE
+    (app_config.h): QUICK_WAKE re-learns immediately (the internal
+    baseline engine is cold again after ST sleep); PRE_SLEEP does
+    not learn on wake (the baseline is refreshed before sleep
+    instead, see VL53L5CX_Primary_CheckWakeTimeout); NO_REFRESH
+    learns nothing on wake (fastest wake). In QUICK_WAKE the
+    VL53L5CX_DUAL_WAKE_DURATION_MS active window starts only once
+    the re-learn is done. Blocks for a few seconds — call only from
+    sensor_task. */
 void VL53L5CX_Primary_Wake(void);
 
 /** Get current primary sensor state. */
@@ -249,7 +259,10 @@ void VL53L5CX_External_PrintAllZoneParams(void);
 
 /** Handle primary sensor wake timer.
     Called each loop iteration. When the wake duration expires,
-    puts the primary sensor back to sleep. */
+    puts the primary sensor back to sleep. With
+    VL53L5CX_DUAL_BASELINE_MODE = PRE_SLEEP the baseline is re-learned
+    just before parking (engine fully warm at the end of the active
+    window), so the next wake starts with a fresh reference. */
 void VL53L5CX_Primary_CheckWakeTimeout(void);
 
 #endif /* VL53L5CX_DETECTION_H */

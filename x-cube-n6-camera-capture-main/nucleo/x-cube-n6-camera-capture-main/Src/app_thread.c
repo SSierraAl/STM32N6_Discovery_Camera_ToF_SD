@@ -367,6 +367,16 @@ void sensor_task(void *arg)
        the state machine still holds its initial SLEEP value while the sensor
        is physically ranging. */
     VL53L5CX_Primary_SleepAtStartup();
+
+    /* Announce the selected sleep/wake baseline refresh strategy so
+       the console makes it obvious when the cycle refresh is off. */
+#if VL53L5CX_DUAL_BASELINE_MODE == VL53L5CX_BASELINE_NO_REFRESH
+    printf("[PRIMARY] Baseline mode: NO_REFRESH - cycle refresh DISABLED\n");
+#elif VL53L5CX_DUAL_BASELINE_MODE == VL53L5CX_BASELINE_PRE_SLEEP
+    printf("[PRIMARY] Baseline mode: PRE_SLEEP - re-learn before sleep\n");
+#else
+    printf("[PRIMARY] Baseline mode: QUICK_WAKE - re-learn on wake\n");
+#endif
 #endif
 
     /* Only fail if PRIMARY sensor baseline is not ready (external is optional) */

@@ -120,6 +120,7 @@ All tunables live in the **ToF Detection (VL53L5CX)** section of `Inc/app_config
 
 ```c
 #define VL53L5CX_DUAL_WAKE_DURATION_MS    5000  // primary stays awake after wake (ms)
+#define VL53L5CX_DUAL_BASELINE_MODE        1    // primary baseline refresh: 1 quick-wake / 2 pre-sleep / 3 no refresh
 #define VL53L5CX_DUAL_CONFIRM_FRAMES       2    // consecutive external detection frames before waking primary
 #define VL53L5CX_SENSOR2_BASELINE_SAMPLES  15   // external sensor baseline samples (fewer → faster init)
 ```
@@ -198,7 +199,7 @@ With `TEST_TOF_MODE = 1` the build is **ToF-only** — nothing camera- or SD-rel
 
 - **at boot** (`main_thread`, `main.c`): the SD card initialization and the camera pre-init are skipped, and `camera_task` / `storage_task` are never created — only the ToF driver, console, board LEDs and WS2812 hardware are initialized;
 - **on detection**: only the RED board LED is lit for `TEST_TOF_LED_MS` (the WS2812 strip stays OFF), then GREEN is restored; the console prints how many zones are affected and each **zone number with its drop value** — the zone indices (0–15 on the default 4×4 grid) show *where* in the FOV the target was, which validates sensor position/orientation;
-- **on button press** (USER button PC13, polled in `sensor_task`): the baseline(s) are re-learned on demand via `VL53L5CX_RefreshBaseline_Manual()` — the same procedure as the documented periodic/adaptive refresh (stop-ranging → 50 ms → start-ranging → 200 ms → re-learn). In dual mode the camera ToF is woken first if parked in ST sleep, refreshed, then parked back to sleep (guardian state machine reset to MONITORING), and the external guardian's baseline is re-learned as well. The RED LED stays on for the whole refresh (a few seconds) and GREEN returns when it is done;
+- **on button press** (USER button PC13, polled in `sensor_task`): the baseline(s) are re-learned on demand via `VL53L5CX_RefreshBaseline_Manual()` — the same procedure as the documented periodic/adaptive refresh (stop-ranging → 50 ms → start-ranging → 200 ms → re-learn). In dual mode the camera ToF is woken first if parked in ST sleep, refreshed, then parked back to sleep (guardian state machine reset to MONITORING), and the external guardian's baseline is re-learned as well. A wake of the parked primary follows `VL53L5CX_DUAL_BASELINE_MODE`: in `QUICK_WAKE` it re-learns on wake (the internal baseline engine is cold again after ST sleep; the first pass right after wake leaves a biased baseline, field observation) and the button's own procedure is the final re-learn, while `PRE_SLEEP` / `NO_REFRESH` wake without learning so the button's procedure is the only re-learn of the press. The RED LED stays on for the whole refresh (in dual mode with the 8×8 grid / 60 samples: ≈ 12 s in `QUICK_WAKE` mode — the wake adds its own learn pass — and ≈ 6 s in `PRE_SLEEP` / `NO_REFRESH` mode) and GREEN returns when it is done;
 - the ToF pipeline itself is otherwise unchanged (init, configure, baseline learning, periodic refresh, the same signal + motion trigger rules, the normal 30-frame cooldown).
 
 Use it on-site to position the sensor, watch insects at different speeds, and calibrate the `app_config.h` §9 detection thresholds without touching the camera or the SD card. **Set it back to `0` for production builds** (manual button capture only exists in `CAPTURE_MODE = 0` builds — in test builds the same button is repurposed for the baseline refresh above; `TEST_TOF_MODE = 1` + `CAPTURE_MODE = 0` is a compile error, so the button can never have two jobs at once).
@@ -345,7 +346,7 @@ while (1) {
 ### Wake logic (inside `VL53L5CX_External_Update`)
 - Each external detection while the primary is sleeping increments a confirm counter; any non-detecting frame resets it to 0.
 - When the count reaches `VL53L5CX_DUAL_CONFIRM_FRAMES` (2), the external state goes to `EXTERNAL_STATE_DETECTED` and `VL53L5CX_Primary_Wake()` is called.
-- `VL53L5CX_Primary_CheckWakeTimeout()` returns the primary to sleep once `VL53L5CX_DUAL_WAKE_DURATION_MS` (5000 ms) has elapsed since wake, and resets the external state to `EXTERNAL_STATE_MONITORING`.
+- `VL53L5CX_Primary_CheckWakeTimeout()` returns the primary to sleep once `VL53L5CX_DUAL_WAKE_DURATION_MS` (5000 ms) has elapsed since wake, and resets the external state to `EXTERNAL_STATE_MONITORING`. In `PRE_SLEEP` mode it first re-learns the primary baseline, right before parking (the engine is fully warm at the end of the active window).
 
 ### Independent EXT (guardian) configuration
 
@@ -406,7 +407,7 @@ All defaults equal the previous effective values (hardcoded timing + shared DET 
 ```
 
 - `VL53L5CX_Primary_Sleep()` only acts from `ACTIVE`/`RETURNING`: stop ranging → 50 ms → `vl53l5cx_set_power_mode(POWER_MODE_SLEEP)`. The sensor keeps its firmware and configuration in sleep, so waking is fast.
-- `VL53L5CX_Primary_Wake()` skips if already active: set `POWER_MODE_WAKEUP` → 200 ms → `StartRanging` → 200 ms → `ACTIVE`, recording `HAL_GetTick()` for the timeout.
+- `VL53L5CX_Primary_Wake()` skips if already active: set `POWER_MODE_WAKEUP` → 200 ms → `StartRanging` → 200 ms → **optional post-wake re-learn** → `ACTIVE`, recording `HAL_GetTick()` for the timeout (so the full `VL53L5CX_DUAL_WAKE_DURATION_MS` window is spent detecting against a fresh baseline). The re-learn follows `VL53L5CX_DUAL_BASELINE_MODE` (§4.2): `QUICK_WAKE` learns immediately — the internal baseline engine is cold again after ST sleep and the first frames after wake are biased, so the full window is spent detecting against a fresh reference; `PRE_SLEEP` learns nothing on wake, the baseline is refreshed in `VL53L5CX_Primary_CheckWakeTimeout()` just before parking instead (risk: a target still present at timeout gets baked into the reference); `NO_REFRESH` (3) disables the cycle refresh entirely — the baseline then comes only from boot init, periodic/adaptive refresh, and the manual button (fastest wake).
 - `VL53L5CX_Primary_IsActive()` returns non-zero **only** in `ACTIVE` (not in `WAKING`/`RETURNING`); use `VL53L5CX_Primary_GetState()` for the full `PrimaryState_t`.
 
 ---

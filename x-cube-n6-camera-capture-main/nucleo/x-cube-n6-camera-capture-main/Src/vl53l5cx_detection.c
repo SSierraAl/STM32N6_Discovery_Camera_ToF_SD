@@ -677,6 +677,10 @@ void VL53L5CX_MotionTest(void)
      3. Primary stays active for VL53L5CX_DUAL_WAKE_DURATION_MS
      4. Primary returns to sleep after timeout
      5. External continues monitoring throughout
+     Baseline refresh across the cycle is selected by
+     VL53L5CX_DUAL_BASELINE_MODE (app_config.h): QUICK_WAKE
+     re-learns on wake, PRE_SLEEP just before sleep,
+     NO_REFRESH disables the cycle refresh entirely
    ================================================================ */
 
 #if VL53L5CX_DUAL_SENSOR
@@ -723,6 +727,25 @@ void VL53L5CX_Primary_Wake(void)
     /* Restart ranging (no re-init needed - config retained) */
     vl53l5cx_start_ranging(&s_dev);
     vTaskDelay(pdMS_TO_TICKS(200));
+
+    /* Baseline refresh on wake (VL53L5CX_DUAL_BASELINE_MODE, app_config.h):
+       after ST sleep the sensor's internal baseline engine is cold again
+       and the first frames can be biased (field observation). QUICK_WAKE
+       re-learns BEFORE entering ACTIVE, so the full
+       VL53L5CX_DUAL_WAKE_DURATION_MS window is spent detecting against a
+       fresh reference; PRE_SLEEP defers the learn to just before sleep
+       instead; NO_REFRESH learns nothing on wake (fastest wake) — the
+       baseline then comes from boot init, periodic/adaptive refresh and
+       the manual button only. The state stays WAKING meanwhile, which
+       every state-machine consumer already treats as "not active":
+       CheckWakeTimeout() acts on ACTIVE only, Primary_Sleep() on
+       ACTIVE/RETURNING only, and the guardian wake condition requires
+       SLEEP — so nothing can race. */
+#if VL53L5CX_DUAL_BASELINE_MODE == VL53L5CX_BASELINE_QUICK_WAKE
+    printf("[PRIMARY] Post-wake re-learn (quick)\n");
+    VL53L5CX_LearnBaseline();
+    s_last_insect_detected = 0;  /* drop any stale pre-wake detection */
+#endif
 
     s_primary_state = PRIMARY_STATE_ACTIVE;
     s_primary_wake_time = HAL_GetTick();
@@ -1118,8 +1141,12 @@ void VL53L5CX_External_PrintAllZoneParams(void)
    Same procedure as the documented periodic/adaptive refresh:
    stop-ranging -> 50 ms -> start-ranging -> 200 ms -> re-learn.
    In dual mode the camera ToF (primary) is parked in ST sleep by
-   default, so it is woken first and put back to sleep afterwards;
-   the external (guardian) baseline is refreshed in place.
+   default, so it is woken first and put back to sleep afterwards.
+   The wake follows VL53L5CX_DUAL_BASELINE_MODE: with QUICK_WAKE it
+   already re-learns on wake, so the documented procedure below is
+   the final re-learn; with PRE_SLEEP / NO_REFRESH the wake does
+   not learn, so this procedure is the only re-learn of the press.
+   The external (guardian) baseline is refreshed in place.
    Blocking for a few seconds — only call from sensor_task.
    ================================================================ */
 
@@ -1128,7 +1155,8 @@ void VL53L5CX_RefreshBaseline_Manual(void)
 #if VL53L5CX_DUAL_SENSOR
     printf("[BTN] Refreshing PRIMARY baseline (waking from sleep)...\n");
     /* Wake the camera ToF if it is parked in ST sleep. Already-active
-       states (mid detection cycle) simply skip the wake sequence. */
+       states (mid detection cycle) simply skip the wake sequence (and
+       any on-wake re-learn inside VL53L5CX_Primary_Wake). */
     if (!VL53L5CX_Primary_IsActive())
         VL53L5CX_Primary_Wake();
 #else

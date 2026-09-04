@@ -449,6 +449,29 @@
     and remains active for this duration before returning to sleep mode. */
 #define VL53L5CX_DUAL_WAKE_DURATION_MS    5000
 
+/** PRIMARY baseline refresh strategy across the sleep/wake cycle
+    (dual mode only). Pick ONE of the VL53L5CX_BASELINE_* values below:
+    - QUICK_WAKE (1): wake -> learn immediately -> ACTIVE. The internal
+        baseline engine is cold again after ST sleep and the first frames
+        after wake are biased (field observation), so a fresh reference
+        is learned before the active window starts.
+    - PRE_SLEEP (2): no learn on wake (fastest wake, ~0.4 s); the
+        baseline is learned at the end of the active window, right
+        before parking, when the engine is fully warm. The next wake
+        then starts detecting immediately against that reference.
+        Risk: a target still present at timeout gets baked into the
+        baseline. The first cycle after boot uses the init-time learn.
+    - NO_REFRESH (3): no learn on wake or before sleep — the sleep/wake
+        cycle never refreshes the primary baseline (fastest wake); it
+        comes only from boot init, periodic/adaptive refresh, and the
+        manual button.
+    The manual button refresh (VL53L5CX_RefreshBaseline_Manual) always
+    runs its own learn procedure, independent of this mode. */
+#define VL53L5CX_BASELINE_QUICK_WAKE      1
+#define VL53L5CX_BASELINE_PRE_SLEEP       2
+#define VL53L5CX_BASELINE_NO_REFRESH      3
+#define VL53L5CX_DUAL_BASELINE_MODE       1   /* 1 = QUICK_WAKE, 2 = PRE_SLEEP, 3 = NO_REFRESH */
+
 /** ToF grid resolution:
     - 4 = VL53L5CX_RESOLUTION_4X4  (16 zones, faster, lower granularity)
     - 8 = VL53L5CX_RESOLUTION_8X8  (64 zones, slower, higher granularity) */
@@ -492,7 +515,7 @@
    (8x8 zones are smaller and noisier, so they need higher thresholds) */
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_THRESHOLD_PCT      15      /* 8x8: higher signal drop threshold */
-#define VL53L5CX_DET_MOTION_THRESH      100     /* 8x8: higher motion threshold */
+#define VL53L5CX_DET_MOTION_THRESH      200     /* 8x8: higher motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
 #else
 #define VL53L5CX_DET_THRESHOLD_PCT      6       /* 4x4: lower signal drop threshold */
@@ -576,13 +599,13 @@
 #define VL53L5CX_DUAL_CONFIRM_FRAMES      2
 
 /** Secondary sensor baseline samples (can be fewer for faster init). */
-#define VL53L5CX_EXT_BASELINE_SAMPLES 60
+#define VL53L5CX_EXT_BASELINE_SAMPLES 30
 
-/* ---- timing / ranging configuration (was hardcoded: 800 ms / 15 Hz /
+/* ---- timing / ranging configuration (was hardcoded: 30 ms / 15 Hz /
    CONTINUOUS) ---- */
 /** EXT integration time (ms), driver limit 2..1000. Ignored in
     CONTINUOUS mode (integration forced to the sensor maximum). */
-#define VL53L5CX_EXT_INTEGRATION_MS       800
+#define VL53L5CX_EXT_INTEGRATION_MS       30
 
 /** EXT ranging frequency (Hz). The effective rate is limited by the
     integration time (integration + processing < 1/frequency). */
@@ -599,7 +622,7 @@
    so an untouched block keeps the previous (shared) behavior. ---- */
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_EXT_THRESHOLD_PCT        15    /* signal drop % strictly greater than baseline */
-#define VL53L5CX_EXT_MOTION_THRESH        100   /* per-zone motion value >= this */
+#define VL53L5CX_EXT_MOTION_THRESH        200   /* per-zone motion value >= this */
 #define VL53L5CX_EXT_MIN_AFFECTED_ZONES   2     /* zones needed for a frame trigger */
 #else
 #define VL53L5CX_EXT_THRESHOLD_PCT        6     /* signal drop % strictly greater than baseline */

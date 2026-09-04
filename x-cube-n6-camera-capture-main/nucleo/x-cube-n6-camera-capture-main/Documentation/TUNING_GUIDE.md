@@ -510,10 +510,21 @@ triggered_frame = (number of zones with motion >= T) >= M
 #define VL53L5CX_PRIMARY_ADDRESS          0x29 /* camera ToF (7-bit) */
 #define VL53L5CX_EXTERNAL_ADDRESS         0x62 /* external ToF (8-bit; 7-bit 0x31) */
 #define VL53L5CX_DUAL_WAKE_DURATION_MS    5000 /* primary active window after wake (ms) */
+#define VL53L5CX_DUAL_BASELINE_MODE        1   /* 1 quick-wake / 2 pre-sleep / 3 no refresh */
 #define VL53L5CX_DUAL_CONFIRM_FRAMES      2    /* consecutive external detections needed */
 #define VL53L5CX_SENSOR2_BASELINE_SAMPLES 60
 ```
 When `DUAL_SENSOR = 1`, the external "guardian" sensor runs continuously and the camera ToF stays in ST sleep to save power. The guardian must see `CONFIRM_FRAMES` consecutive detections before waking the primary, which then runs for `WAKE_DURATION_MS` and returns to sleep.
+
+**Primary baseline refresh across the sleep/wake cycle** — `VL53L5CX_DUAL_BASELINE_MODE` (app_config.h) picks the strategy; the reason for refreshing at all is that after ST sleep the internal baseline engine is cold again and the first frames right after wake are biased (field observation). One learn pass lasts `VL53L5CX_DET_BASELINE_SAMPLES` frames (≈ 4.3 s with 60 samples at 15 Hz):
+
+| Mode | Value | Where the primary re-learns | Wake→detection cost |
+|------|-------|------------------------------|---------------------|
+| `QUICK_WAKE` | 1 | on wake, immediately after ranging resumes | one learn pass ≈ 4.3 s |
+| `PRE_SLEEP` | 2 | at the end of the active window, just before parking (engine fully warm) | ~0.4 s, no wake-time learn |
+| `NO_REFRESH` | 3 | never across the sleep/wake cycle | ~0.4 s, no wake-time learn |
+
+`PRE_SLEEP` trade-off: a target still in the FOV at the timeout gets baked into the reference and will not be detected on the next cycle, whereas `QUICK_WAKE` bakes the reference in right after wake (when the target that caused the wake may still be present). `NO_REFRESH` (3) disables the cycle refresh entirely: the baseline then comes only from boot init, periodic/adaptive refresh, and the manual button — wake is fastest, but a drifting reference after ST sleep can cause false or missed detections until one of those paths re-learns. If wake response must be faster in mode 1, lower `VL53L5CX_DET_BASELINE_SAMPLES`. The manual button refresh always runs its own learn procedure on top of whatever the mode does.
 
 | Parameter | What it does | Tuning |
 |-----------|-------------|--------|
@@ -557,7 +568,7 @@ With `DUAL_SENSOR = 1`, the guardian's configuration is **fully independent** of
 #define TEST_TOF_LED_MS  300  /* RED LED indication duration (ms) */
 ```
 With `TEST_TOF_MODE = 1` the build is **ToF-only**: at boot the SD card and the camera are **never initialized** (and `camera_task` / `storage_task` are not created), so no photo can be taken and the card is never touched. A detection only lights the RED board LED for `TEST_TOF_LED_MS` (the WS2812 strip stays OFF) and the console prints the **affected zone numbers** with their drop values. Everything else (baseline learning, periodic refresh, signal + motion trigger rules, 30-frame cooldown) is unchanged.
-The USER button (PC13) re-learns the baseline(s) **on demand**: one press runs the same refresh procedure as the auto-refresh (stop-ranging → 50 ms → start-ranging → 200 ms → re-learn) on the primary, and — with `DUAL_SENSOR = 1` — on the external guardian as well (the primary is woken first if parked in ST sleep, then parked back to sleep; the RED LED stays on for the whole refresh). Use it to re-baseline after repositioning the sensor or after a lighting change without a power cycle — and if you disable `ADAPTIVE_REFRESH` / `PERIODIC_RESTART` for a clean validation, it becomes the *only* baseline-refresh path.
+The USER button (PC13) re-learns the baseline(s) **on demand**: one press runs the same refresh procedure as the auto-refresh (stop-ranging → 50 ms → start-ranging → 200 ms → re-learn) on the primary, and — with `DUAL_SENSOR = 1` — on the external guardian as well (the primary is woken first if parked in ST sleep, then parked back to sleep; the RED LED stays on for the whole refresh). A wake of the parked primary follows `VL53L5CX_DUAL_BASELINE_MODE` (see the dual-mode section above): in `QUICK_WAKE` it re-learns on wake (the internal baseline engine is cold again after ST sleep) and the button's procedure is the final re-learn; in `PRE_SLEEP` / `NO_REFRESH` the wake adds no learn, so the button's procedure is the only re-learn of the press. Use it to re-baseline after repositioning the sensor or after a lighting change without a power cycle — and if you disable `ADAPTIVE_REFRESH` / `PERIODIC_RESTART` for a clean validation, it becomes the *only* baseline-refresh path.
 Use it on-site to validate sensor position/orientation and to calibrate the detection thresholds in this section. **revert to 0 for production**
 
 ---
