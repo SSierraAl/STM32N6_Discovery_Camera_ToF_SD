@@ -205,7 +205,7 @@
 
     SD card needs time between batches for internal flash programming.
     Use smaller batches + longer waits = more reliable. */
-#define SD_BATCH_WRITE_BLOCKS 128 //128 in but mode - 64 in batch mode is  more safe
+#define SD_BATCH_WRITE_BLOCKS 1024 //128 in but mode - 64 in batch mode is  more safe
 
 /** Minimum inter-batch recovery gap (milliseconds).
     After the SD card reports TRANSFER-ready (via CMD13 poll), we wait this
@@ -220,13 +220,13 @@
     - 20ms: more reliable for slower/failing cards
     -  0ms: fastest but may cause CRC errors on some cards
     - 30ms+: only if you still see CRC failures at 20ms */
-#define SD_BATCH_RECOVERY_GAP_MS  15 //5 but version - 30 batch mode  is more safe together with 64
+#define SD_BATCH_RECOVERY_GAP_MS  0 //5 but version - 30 batch mode  is more safe together with 64
 
 /** Maximum snapshots that can be stored before SD card overflow.
     For a 32 GB SDHC card (64,000,000 blocks):
     (64,000,000 - 3072) / 19,643 ≈ 3,257 snapshots max.
     This is a safety constant; the actual limit depends on card size. */
-#define SD_MAX_SNAPSHOTS       3000
+#define SD_MAX_SNAPSHOTS       15000
 
 /* ================================================================
    SECTION 4: CAPTURE MODE SELECTION

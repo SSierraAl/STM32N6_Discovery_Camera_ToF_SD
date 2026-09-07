@@ -385,6 +385,20 @@ int VL53L5CX_Update(void)
     uint8_t frame_trig_motion = 0;
 
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
+
+
+        // IT IS POSSIBLE TO DELETE THE FOLLOWING BLOCK OF CODE IF YOU WANT TO TRIGGER ON ALL ZONES, NOT JUST THE MIDDLE ROWS
+        //Test to explore the trigger based only on the middle rows
+        const int zone_row = z / VL53L5CX_DET_RESOLUTION;
+        const int center_row_1 = (VL53L5CX_DET_RESOLUTION / 2) - 1;
+        const int center_row_2 =  VL53L5CX_DET_RESOLUTION / 2;
+
+        if ((zone_row != center_row_1) &&
+            (zone_row != center_row_2)) {
+            continue;
+        }
+        // End of snippet
+
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         uint8_t status = s_results.target_status[idx];
 
