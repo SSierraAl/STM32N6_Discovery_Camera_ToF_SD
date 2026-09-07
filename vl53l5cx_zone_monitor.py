@@ -26,14 +26,14 @@ from collections import deque
 # ================================================================
 # CONFIGURATION
 # ================================================================
-SERIAL_PORT      = 'COM6'
+SERIAL_PORT      = 'COM9'
 BAUD_RATE        = 115200
 MAX_POINTS       = 100
 GRID_SIZE        = 4       # MUST match VL53L5CX_DET_RESOLUTION in app_config.h (4 or 8)
 NUM_ZONES        = GRID_SIZE * GRID_SIZE  # 16
 PLOT_ZONES       = 16       # zones to show on line charts
 COMPACT_FIELDS   = 5       # sig, dist, base_sig, base_dist, motion
-DUAL_SENSOR      = False    # match VL53L5CX_DUAL_SENSOR in app_config.h
+DUAL_SENSOR      = True    # match VL53L5CX_DUAL_SENSOR in app_config.h
 
 # ==================================================================
 # Zone-grid orientation (display layout)

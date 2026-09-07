@@ -205,7 +205,7 @@
 
     SD card needs time between batches for internal flash programming.
     Use smaller batches + longer waits = more reliable. */
-#define SD_BATCH_WRITE_BLOCKS 64 //128 in but mode - 64 in batch mode is  more safe
+#define SD_BATCH_WRITE_BLOCKS 128 //128 in but mode - 64 in batch mode is  more safe
 
 /** Minimum inter-batch recovery gap (milliseconds).
     After the SD card reports TRANSFER-ready (via CMD13 poll), we wait this
@@ -220,7 +220,7 @@
     - 20ms: more reliable for slower/failing cards
     -  0ms: fastest but may cause CRC errors on some cards
     - 30ms+: only if you still see CRC failures at 20ms */
-#define SD_BATCH_RECOVERY_GAP_MS  30 //5 but version - 30 batch mode  is more safe together with 64
+#define SD_BATCH_RECOVERY_GAP_MS  15 //5 but version - 30 batch mode  is more safe together with 64
 
 /** Maximum snapshots that can be stored before SD card overflow.
     For a 32 GB SDHC card (64,000,000 blocks):
@@ -366,7 +366,7 @@
     is NOT used. LEDs stay on for the exact duration of the capture cycle
     (determined by semaphores, not timers).
     Kept here for backward compatibility with WS2812_Illuminate(). */
-#define WS2812_ILLUMINATION_MS     500
+#define WS2812_ILLUMINATION_MS     800
 
 /** Illumination brightness (0-100%).
     During capture: LEDs run at this brightness.
@@ -381,7 +381,7 @@
     brighter here has negligible power/thermal impact. Brightness is applied as
     RGB value scaling (not time-based PWM), so it stays perfectly in sync with
     even very short camera exposures - safe to raise further if still too dark. */
-#define WS2812_ILLUMINATION_BRIGHTNESS  50
+#define WS2812_ILLUMINATION_BRIGHTNESS  90
 
 /** Illumination color new update 0xGGRRBB!!!
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
@@ -475,7 +475,7 @@
 /** ToF grid resolution:
     - 4 = VL53L5CX_RESOLUTION_4X4  (16 zones, faster, lower granularity)
     - 8 = VL53L5CX_RESOLUTION_8X8  (64 zones, slower, higher granularity) */
-#define VL53L5CX_DET_RESOLUTION       8
+#define VL53L5CX_DET_RESOLUTION       4
 
 /** Ranging mode for the PRIMARY sensor (raw VL53L5CX ULD driver codes,
     see vl53l5cx_api.h — this ULD implements only these two modes):
@@ -518,7 +518,7 @@
 #define VL53L5CX_DET_MOTION_THRESH      200     /* 8x8: higher motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
 #else
-#define VL53L5CX_DET_THRESHOLD_PCT      6       /* 4x4: lower signal drop threshold */
+#define VL53L5CX_DET_THRESHOLD_PCT      4       /* 4x4: lower signal drop threshold */
 #define VL53L5CX_DET_MOTION_THRESH      60      /* 4x4: lower motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 1       /* 4x4: single zone triggers */
 #endif
@@ -535,7 +535,7 @@
    them, re-datalog and re-check the ZFRAME motion column.
    See Documentation/TUNING_GUIDE.md, section 4. */
 #define VL53L5CX_DET_MOTION_MIN_ZONES       1   /* min_nb_for_global_detection: zones required for the plugin's GLOBAL motion flag (datalog MOTION lines; not part of the firmware trigger) */
-#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  16  /* nb_of_temporal_accumulations: sensor-side temporal accumulation of the per-zone motion value (higher = smoother, slower reaction) */
+#define VL53L5CX_DET_MOTION_PERSIST_FRAMES  10 //  /* nb_of_temporal_accumulations: sensor-side temporal accumulation of the per-zone motion value (higher = smoother, slower reaction) */
 #define VL53L5CX_DET_MOTION_EXTRA_NOISE     0   /* extra_noise_sigma: noise margin added to the plugin's estimate (higher = less sensitive) */
 
 /* Minimum signal threshold:
@@ -555,8 +555,8 @@
 
 /* MODE 2: Adaptive refresh (consecutive camera activations) - ENABLED by default */
 #define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
-#define VL53L5CX_DET_REFRESH_WINDOW_SECS        2    /* seconds allowed after the previous capture pipeline */
-#define VL53L5CX_DET_MAX_DETECTIONS             3    /* consecutive camera activations before refresh */
+#define VL53L5CX_DET_REFRESH_WINDOW_SECS        5    /* seconds allowed after the previous capture pipeline */
+#define VL53L5CX_DET_MAX_DETECTIONS             2    /* consecutive camera activations before refresh */
 
 /* UART1 debug output
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
