@@ -65,6 +65,8 @@ C_SOURCES += Src/freertos_bsp.c
 C_SOURCES += Src/app_filex.c
 C_SOURCES += Src/app_sdcard.c
 C_SOURCES += Src/i2c_arbiter.c
+C_SOURCES += Src/ds3231.c
+C_SOURCES += Src/ds3231_calendar.c
 
 # ASM sources
 ASM_SOURCES =

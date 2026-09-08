@@ -21,6 +21,7 @@
 #define APP_THREAD_H
 
 #include <stdint.h>
+#include "ds3231.h"
 #include "FreeRTOS.h"
 #include "task.h"
 #include "queue.h"
@@ -99,6 +100,7 @@ typedef struct {
     uint32_t         height;
     uint32_t         pixel_format;
     uint32_t         snap_id;
+    RTC_Stamp        stamp;
 } StorageCmd_t;
 
 /* ================================================================

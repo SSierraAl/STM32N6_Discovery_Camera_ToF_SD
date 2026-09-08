@@ -167,6 +167,12 @@ static void DCMIPP_PipeInitCapture(CAM_conf_t *cam_conf, int sw, int sh, CAM_con
   dc.enable_swap   = cam_conf->is_rgb_swap;
   dc.enable_gamma_conversion = 0;
   CAM_InitCropConfig(&dc.manual_conf, sw, sh, conf);
+#if PERF_DEBUG_LEVEL >= 1
+  printf("[CAM] Full field=%lux%lu+%lu+%lu output=%dx%d\n",
+         (unsigned long)dc.manual_conf.width, (unsigned long)dc.manual_conf.height,
+         (unsigned long)dc.manual_conf.offset_x, (unsigned long)dc.manual_conf.offset_y,
+         conf->capture_width, conf->capture_height);
+#endif
   assert(CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &dc, &hw_pitch) == HAL_OK);
   assert(hw_pitch == dc.output_width * dc.output_bpp);
   if (cam_conf->dcmipp_output_format == DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1)
@@ -261,7 +267,16 @@ void CAM_Deinit(void)
   assert(CMW_CAMERA_DeInit() == HAL_OK);
 }
 
-void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe) { (void)pipe; }
+#if CAPTURE_MODE == 0
+static volatile uint32_t g_single_capture_errors;
+#endif
+void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe) {
+#if CAPTURE_MODE == 0
+  if (pipe == DCMIPP_PIPE1) ++g_single_capture_errors;
+#else
+  (void)pipe;
+#endif
+}
 
 static volatile uint32_t g_frame_count = 0;
 static volatile int g_wait_frames = 0;
@@ -358,34 +373,43 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
 
   DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
   PERF_MARK(g_perf_timer, CAM_WARMUP);
-  CAM_ResetFrameCounter(warmup_frames + 1);
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Start continuous (warmup=%d+1)...\n", warmup_frames);
+  printf("[CAM] Full-field single: %dx%d, %d warmups reuse one buffer\n", width, height, warmup_frames);
 #endif
-  CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
-
+#if CAPTURE_MODE == 0
+  g_single_capture_errors = 0;
+#endif
+  if (CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS) != CMW_ERROR_NONE) {
+    CAM_Deinit();
+    return -1;
+  }
   if (CAM_EXPOSURE_MODE == 1) {
     CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
     CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
   }
-
-  uint32_t t0 = HAL_GetTick();
-  while (g_wait_frames != 0) {
-    CAM_IspUpdate();
-    vTaskDelay(pdMS_TO_TICKS(5));
-    if (HAL_GetTick() - t0 > 5000) {
-#if PERF_DEBUG_LEVEL >= 1
-      printf("[CAM] TIMEOUT %lu/%d\n", (unsigned long)g_frame_count, warmup_frames+1);
-#endif
+  /* Frame completion, not VSYNC: full-size writes must finish before stop.
+     No extra warmup buffers are allocated. Mode 4 uses its unchanged path. */
+  for (int frame = 0; frame <= warmup_frames; ++frame) {
+    if (frame == warmup_frames) PERF_MARK(g_perf_timer, CAM_SNAP);
+    if (CAM_WaitNextFrameReady(SNAP_TIMEOUT_MS, NULL) != 0) {
       HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
       CAM_Deinit();
       return -1;
     }
   }
 
-  PERF_MARK(g_perf_timer, CAM_SNAP);
   PERF_MARK(g_perf_timer, CAM_STOP);
-  HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
+  HAL_StatusTypeDef stop_rc = HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
+#if CAPTURE_MODE == 0
+  if (g_single_capture_errors || stop_rc != HAL_OK) {
+    printf("[CAM] Single rejected: pipe errors=%lu stop=%d\n",
+           (unsigned long)g_single_capture_errors, (int)stop_rc);
+    CAM_Deinit();
+    return -1;
+  }
+#else
+  if (stop_rc != HAL_OK) { CAM_Deinit(); return -1; }
+#endif
   HAL_Delay(5);
   SCB_InvalidateDCache_by_Addr((uint32_t*)buf, min_size);
   PERF_MARK(g_perf_timer, CAM_DEINIT);

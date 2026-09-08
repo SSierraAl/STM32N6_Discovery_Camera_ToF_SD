@@ -1,3 +1,4 @@
+#include "raw_image.h"
 /**
  * @file    app_thread.c
  * @brief   Multi-threaded Camera + Sensor + Storage
@@ -34,18 +35,14 @@ volatile SensorState_t g_sensor_state = SENSOR_STATE_IDLE;
 static volatile int g_capture_busy = 0;
 static volatile int g_last_storage_rc = 0;
 static volatile int g_last_batch_frames = 0;
-static uint32_t g_snap_count = 0;
+/* Camera task reserves IDs before dispatch; failed writes leave an ID gap. */
+static uint32_t g_next_snap_id = 0;
 static uint32_t g_sd_img_base_block;
 #define SD_IMG_HEADER_SIZE  64
 #define SD_BLOCK_SIZE       512
 static uint32_t g_debug_frame_count = 0;
 
-typedef struct {
-    uint32_t magic; uint32_t width; uint32_t height;
-    uint32_t pixel_format; uint32_t data_size; uint32_t timestamp;
-    uint32_t checksum; uint32_t snap_id; uint8_t reserved[28];
-} sd_image_header_t;
-#define SD_HEADER_TAG  0x49444745U
+
 
 extern SD_HandleTypeDef hsd1;
 extern uint8_t sd_batch_buf[];
@@ -159,7 +156,7 @@ static int SD_WaitForReady(void)
     return 0;
 }
 
-static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t w, uint32_t h, uint32_t pixel_format, uint32_t snap_id)
+static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t w, uint32_t h, uint32_t pixel_format, uint32_t snap_id, RTC_Stamp stamp)
 {
     uint32_t base = g_sd_img_base_block;
     uint32_t batch_blocks = SD_BATCH_WRITE_BLOCKS;
@@ -177,12 +174,14 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         }
     }
 
+    uint32_t checksum_start = HAL_GetTick();
     for (i = 0; i < img_size; i++) checksum ^= img_buf[i];
+    g_perf_timer.sd_checksum_ms += HAL_GetTick() - checksum_start;
 
-    sd_image_header_t hdr;
+    sd_image_header_t hdr = {0};
     hdr.magic = SD_HEADER_TAG; hdr.width = w; hdr.height = h;
     hdr.pixel_format = pixel_format; hdr.data_size = img_size;
-    hdr.timestamp = HAL_GetTick(); hdr.checksum = checksum;
+    RawImage_SetStamp(&hdr, stamp); hdr.checksum = checksum;
     hdr.snap_id = snap_id; memset(hdr.reserved, 0, sizeof(hdr.reserved));
 
 #if PERF_DEBUG_LEVEL >= 1
@@ -725,7 +724,8 @@ void camera_task(void *arg)
                 StorageCmd_t sc = {0};
                 sc.type = STORAGE_CMD_SAVE; sc.image_buf = save_buf;
                 sc.image_size = frame_size; sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
-                sc.pixel_format = 0; sc.snap_id = g_snap_count;
+                sc.pixel_format = 0; sc.snap_id = g_next_snap_id++;
+                sc.stamp = RTC_CaptureStamp();
                 xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000));
             } else {
 #if PERF_DEBUG_LEVEL >= 1
@@ -753,13 +753,17 @@ void camera_task(void *arg)
 #endif
 #endif
                 xSemaphoreGive(camera_ready_sem);
+                RTC_Stamp stamp = RTC_CaptureStamp();
+                uint32_t first_id = g_next_snap_id;
+                g_next_snap_id += (uint32_t)rc;
                 for (int f = 0; f < rc; f++) {
                     StorageCmd_t sc = {0};
                     sc.type = STORAGE_CMD_SAVE;
                     sc.image_buf = batch_buf + (f * frame_size);
                     sc.image_size = frame_size;
                     sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
-                    sc.pixel_format = 0; sc.snap_id = g_snap_count + (uint32_t)f;
+                    sc.pixel_format = 0; sc.snap_id = first_id + (uint32_t)f;
+                    sc.stamp = stamp;
                     if (xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000)) != pdTRUE) {
 #if PERF_DEBUG_LEVEL >= 1
                         printf("[CAM] Storage queue full, dropping frame %d\n", f);
@@ -787,7 +791,8 @@ void camera_task(void *arg)
                 StorageCmd_t sc = {0};
                 sc.type = STORAGE_CMD_SAVE; sc.image_buf = capture_buf;
                 sc.image_size = frame_size; sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
-                sc.pixel_format = 0; sc.snap_id = g_snap_count;
+                sc.pixel_format = 0; sc.snap_id = g_next_snap_id++;
+                sc.stamp = RTC_CaptureStamp();
                 xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000));
             } else {
 #if PERF_DEBUG_LEVEL >= 1
@@ -813,7 +818,7 @@ void storage_task(void *arg)
         if (cmd.type == STORAGE_CMD_SAVE) {
             PERF_MARK(g_perf_timer, STORAGE);
             uint32_t storage_start = HAL_GetTick();
-            int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
+            int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp);
             if (rc != 0) {
                 /* A single transient card hiccup (timeout / CRC) previously meant this
                    image was silently lost. Reinit the peripheral and retry the SAME
@@ -823,7 +828,7 @@ void storage_task(void *arg)
                 printf("[SD] FAIL — attempting recovery + retry...\n");
 #endif
                 if (SD_Reinit() == 0) {
-                    rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
+                    rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp);
                 }
             }
             if (rc != 0) g_last_storage_rc = rc;
@@ -831,7 +836,6 @@ void storage_task(void *arg)
             uint32_t storage_elapsed = HAL_GetTick() - storage_start;
 #endif
             if (rc == 0) {
-                g_snap_count++;
 #if PERF_DEBUG_LEVEL >= 1
                 printf("[SD] OK %lu ms\n", (unsigned long)storage_elapsed);
 #endif

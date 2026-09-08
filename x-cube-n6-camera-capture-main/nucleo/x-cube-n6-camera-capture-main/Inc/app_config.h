@@ -50,10 +50,33 @@
      0 = 2592x1944 output; 1 = 1296x972 output via DCMIPP scaling.
      The IMX335 still reads full resolution: this is not sensor binning
      and does not shorten rolling-shutter readout. */
+#ifndef CAM_BINNING
 #if CAPTURE_MODE == 1 || CAPTURE_MODE == 2 || CAPTURE_MODE == 4
 #define CAM_BINNING          1
 #else
 #define CAM_BINNING          0
+#endif
+#endif
+
+/* Mode 4 keeps its validated six half-size buffers. Full-resolution testing
+   uses CAPTURE_MODE=0 (USER button): one reused frame buffer, no burst. */
+#if CAPTURE_MODE == 4 && CAM_BINNING != 1
+#error "Full-resolution testing requires CAPTURE_MODE=0; Mode 4 keeps half-size buffers"
+#endif
+
+#ifndef RTC_ENABLE
+#define RTC_ENABLE 1
+#endif
+#ifndef RTC_PRINT_TIME
+#define RTC_PRINT_TIME 1
+#endif
+/* Provision once with the intended UTC time, then disable and reflash.
+   No automatic build-time setting: normal boots preserve battery-backed time. */
+#ifndef RTC_SET_ON_BOOT
+#define RTC_SET_ON_BOOT 0
+#endif
+#ifndef RTC_SET_UTC
+#define RTC_SET_UTC "SET-UTC-BEFORE-ENABLING"
 #endif
 
 /** Snapshot resolution (auto-calculated from CAM_BINNING).
@@ -93,13 +116,9 @@
     Mode 4 IMX335: AUTO uses ISP AEC; MANUAL disables ISP AEC in
     imx335_isp_param_conf.h and applies the values below after start/wake.
     FREEZE is unsupported by the IMX335 middleware; do not use it here.
-    Other capture modes retain their previous exposure policy. */
+    Shared exposure/gain defaults apply to all capture modes. */
 #ifndef CAM_EXPOSURE_MODE
-#if CAPTURE_MODE == 4
-#define CAM_EXPOSURE_MODE    1  /* Controlled 5 ms motion-detail comparison */
-#else
 #define CAM_EXPOSURE_MODE    1
-#endif
 #endif
 
 /** Physical register diagnostics, only compiled into Mode 4.
@@ -115,24 +134,16 @@
     less light. Select it from measured motion and field of view.
     CMW_CAMERA_GetExposure returns a cache, not physical register readback. */
 #ifndef CAM_EXPOSURE_VALUE
-#if CAPTURE_MODE == 4
 #define CAM_EXPOSURE_VALUE   5000
-#else
-#define CAM_EXPOSURE_VALUE   8
-#endif
 #endif
 
 /** Manual sensor gain in millidecibels, quantized down in 300 mdB steps.
     6000 = 6 dB (approximately 2x signal); 12000 = 12 dB (~4x).
     8 rounds to 0 dB, NOT 8x. Range 0..72000; analog range ends at 30000.
-    Mode 4 uses 14.4 dB to approximately compensate the 26 ms to 5 ms
-    reduction. Brightness/noise require a bench comparison; unused in AUTO. */
+    Current user setting: 12000 mdB = 12 dB (register 40).
+    Shared across modes; brightness/noise require bench comparison. */
 #ifndef CAM_GAIN_VALUE
-#if CAPTURE_MODE == 4
 #define CAM_GAIN_VALUE       12000
-#else
-#define CAM_GAIN_VALUE       8
-#endif
 #endif
 
 #if CAPTURE_MODE == 4
@@ -338,7 +349,24 @@
 
 /** Print a performance summary after each complete capture cycle.
     Shows: phase breakdown, bottleneck identification, throughput MB/s. */
-#define PERF_PRINT_SUMMARY         1
+#ifndef PERF_PRINT_SUMMARY
+#define PERF_PRINT_SUMMARY         1  /* TABLE ON=1, OFF=0 */
+#endif
+
+/** TABLE CONTENT: 0=one line, 1=basic table, 2=full table with SD details.
+    Independent of PERF_DEBUG_LEVEL (application log verbosity). */
+#ifndef PERF_REPORT_DETAIL
+#define PERF_REPORT_DETAIL         2
+#endif
+#if PERF_REPORT_DETAIL < 0 || PERF_REPORT_DETAIL > 2
+#error "PERF_REPORT_DETAIL must be 0, 1 or 2"
+#endif
+#ifndef PERF_CAMERA_FRAME_LOG
+#define PERF_CAMERA_FRAME_LOG      0
+#endif
+#ifndef PERF_PRINT_STATS
+#define PERF_PRINT_STATS           0
+#endif
 
 /** Maximum number of snapshots to track for running statistics.
     Set to 0 for no stats, 10 for average over last 10 captures. */

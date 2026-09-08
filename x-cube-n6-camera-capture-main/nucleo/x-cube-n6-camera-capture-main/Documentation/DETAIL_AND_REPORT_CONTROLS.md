@@ -1,97 +1,173 @@
-# Shared exposure, fine detail and report controls
+# Camera, RTC and report controls
 
-## Current baseline
+Edit `Inc/app_config.h`, rebuild and flash using the existing CubeIDE project.
+The default remains **Mode 4**, four 1296x972 frames, exposure **5000 us**,
+gain **12000 mdB**. No optional centre crop remains.
 
-The user's board run confirmed that motion blur improved at 5000 us exposure.
-Keep `CAM_EXPOSURE_MODE=1`, `CAM_EXPOSURE_VALUE=5000` and the user's adjusted
-`CAM_GAIN_VALUE=10000`. The driver quantizes the last value to 9900 mdB (gain
-register 33), exactly as in the supplied readback.
+## One full-resolution photograph
 
-These settings now apply to capture modes 0, 1, 2 and 4. IMX335 ISP automatic
-exposure is disabled whenever this shared manual policy is selected. AUTO
-re-enables it in every mode. The legacy one-init batch helper also obeys AUTO
-instead of unconditionally writing manual values. Frame sizes, frame counts,
-warmup, DMA destinations, ToF, illumination and storage algorithms are unchanged.
-Only Mode 4 has the post-standby physical register diagnostic; cross-mode
-compilation is not cross-mode hardware validation.
+Change only:
 
-## Fine detail: what to compare next
+```c
+#define CAPTURE_MODE 0
+```
 
-No new smoothing or sharpening filter was introduced. The existing pipeline
-includes Bayer demosaicing followed by output scaling. In Mode 4 the camera
-reads 2592x1944 and DCMIPP outputs 1296x972. Fine features can be lost during
-that size reduction. The log cannot prove that this is the cause of the
-reported slightly smooth appearance; focus and residual motion are alternatives.
+Leave `CAM_BINNING` on its automatic mode-dependent default. Mode 0 selects
+2592x1944; Mode 4 selects 1296x972. Remove any separate compiler override of
+CAM_BINNING when switching modes. After boot, press USER (PC13) once to save
+one full-field 2592x1944 YUV422 photo. Return CAPTURE_MODE to 4 for normal
+ToF-triggered callback batches. Mode 0 is a button test, not a ToF single-shot mode.
 
-1. Put a stationary fine-detail target at the insect flight plane. Examine
-   exported images at 100% pixel scale, avoiding an enlarged/interpolated preview.
-   Keep exposure, gain, illumination and decoder unchanged.
-2. Check lens focus at that exact working distance and across the intended
-   flight depth. If stationary features are also soft, do not attribute all
-   softness to motion or shorten exposure without evidence.
-3. Compare an existing full-resolution Mode 0 single shot with Mode 4. With
-   the shared exposure/gain this is a more useful resolution comparison. Mode 0
-   also differs in capture timing, so use a stationary target and stable light.
-   Compare the same physical feature, not just the apparent sharpness of two
-   differently magnified previews. If more detail exists at full resolution,
-   downsizing is a contributor.
-4. Do not simply switch the four-frame burst to full resolution: each frame
-   would require four times the payload and corresponding PSRAM/SD capacity.
-   A full-resolution burst or unscaled crop needs a separate buffer/field-of-view
-   review. Current burst dimensions are retained.
-5. Keep the successful 5 ms setting for now. Reducing gain only helps noise if
-   brightness remains usable; it does not restore detail lost to scaling or
-   focus. Leave demosaic coefficients unchanged until a repeatable target
-   comparison is available. Aggressive sharpening can exaggerate noise and
-   outlines rather than reveal actual insect features.
+The legacy name CAM_BINNING selects DCMIPP output scaling; it does not enable
+physical IMX335 binning. Both settings retain the full field of view.
 
-ST's [ISP tuning guide](https://wiki.st.com/stm32mcu/wiki/ISP%3AHow_to_tune_ISP_using_the_STM32_ISP_IQTune)
-and [IQTune tool](https://www.st.com/en/development-tools/stm32-isp-iqtune.html)
-describe controlled sensor/lens ISP tuning. A stationary and moving image crop
-would allow a more specific next change than guessing new filter coefficients.
+| Configuration | Camera buffers plus SD staging | Saved payload per trigger |
+| --- | ---: | ---: |
+| Mode 0: one full-resolution photo | 10,601,984 bytes (10.11 MiB) | 10,077,696 bytes |
+| Mode 4: four half-resolution photos | 15,640,832 bytes (14.92 MiB) | 10,077,696 bytes |
 
-## Report switches in Inc/app_config.h
+Mode 0 reuses one buffer for all warmups. Mode 4 uses two scratch buffers and
+four final slots. The IDE linker `Gcc/STM32N657xx.ld` provides 16 MiB of PSRAM;
+these figures cover the camera/SD arrays, not every possible linker allocation.
+Full-size Mode 4 remains rejected: six full-size buffers would exceed 16 MiB.
 
-| Setting | Default | Meaning |
-| --- | --- | --- |
-| `PERF_PRINT_SUMMARY` | 1 | Master report switch. 0 suppresses the report and summary fallback; timing measurements remain available. |
-| `PERF_REPORT_DETAIL` | 2 | 0: one-line result; 1: camera phases, group totals and rates table; 2: additionally show SD subphases and counters. |
-| `PERF_DEBUG_LEVEL` | 1 | Application camera/storage verbosity, independent of table detail. |
-| `PERF_CAMERA_FRAME_LOG` | 0 | Mode 4 per-frame warmup/capture logs. If enabled, still prints only after DMA stops. |
-| `CAM_SENSOR_REG_DEBUG` | 1 | Physical IMX335 register diagnostic after standby. Independent of the table. |
-| `PERF_TRACK_SD_WAIT_TIME` | 1 | Record detailed SD wait/write/gap durations; disabling does not disable storage wall time. |
-| `PERF_PRINT_STATS` | 0 | Enable running statistics when the summary is enabled and the window is nonzero. |
-| `PERF_STATS_WINDOW` | 10 | Running statistics window size; zero disables statistics. |
+The single path now waits for frame-complete events instead of VSYNC, checks
+start/stop results, and rejects reported Pipe 1 errors. The Mode 4 acquisition
+loop is unchanged. Full-size output increases instantaneous DMA traffic: a
+board run is still required to validate bandwidth, clean frame edges and fine
+detail. Equal total SD bytes does not guarantee equal storage or capture time.
+Keep the same 5 ms exposure, gain and lighting for the first comparison.
 
-For a detailed table with fewer camera/storage messages, use summary=1,
-detail=2, debug=0, frame-log=0. Set sensor-reg-debug=0 too when physical
-readback is no longer needed. These settings do not mute independent ToF
-operational messages. To disable the table alone, set summary=0. The table
-describes the instrumented task capture path; this change does not add that
-report to the separate legacy button-only main.c storage path.
+## Show or hide the performance table
 
-The ASCII table is 71 columns wide for serial terminals. Camera phase rows
-are components of the camera total; SD detail rows are components of storage
-wall time. Do not add those sections to the group totals a second time.
-Percentages are rounded independently and can sum to 100.1%.
+```c
+#define PERF_PRINT_SUMMARY 1  /* 0 = hide the report */
+#define PERF_REPORT_DETAIL 2 /* 0 = one line, 1 = basic table, 2 = full table */
+```
 
-## Supplied board report and tests
+These apply to the task-based capture report (including Mode 4). The legacy
+Mode 0 button path prints its separate capture/SD/total timing line.
 
-The latest run reconciles: 634 ms camera + 3997 ms storage + 12 ms other =
-4643 ms. Storage contains 893 ms in HAL calls plus 3104 ms remaining work.
-That remainder is not evidence that the SD card itself takes 3104 ms; it
-includes copying, checksum, cache, logging, recovery and untracked waits.
-The measured payload rates are 2.40 MiB/s for storage and 2.07 MiB/s for the
-cycle. Per-frame log suppression should reduce part of the 55 ms camera tail,
-but the amount requires another board measurement.
+Other switches are independent:
 
-`python tests/run_perf_tests.py` runs production accounting/printing code with
-a fake HAL clock. It includes the latest board numbers, four-frame payloads,
-retries, rollover, zero/missing/invalid timings, fixed table widths, compact
-output, report-off behavior, statistics and independent verbosity controls.
-Generated text and executables go under ignored `.validation/`.
+- PERF_DEBUG_LEVEL: general application verbosity.
+- PERF_CAMERA_FRAME_LOG=0: suppress per-frame waits.
+- CAM_SENSOR_REG_DEBUG=0: suppress post-batch sensor register reads.
+- PERF_PRINT_STATS=0: suppress rolling statistics.
+- PERF_TRACK_SD_WAIT_TIME=0: suppress detailed SD counters, retain storage wall time.
+- RTC_PRINT_TIME=0: suppress per-capture clock logs; still save timestamps.
 
-ARM syntax checks cover camera, task and report sources plus IMX335 middleware
-for all four modes; preprocessing checks AUTO/MANUAL AEC policy and shared
-exposure/gain values. No board was flashed in this change, and fine-detail
-improvement has not been claimed without image comparison.
+RTC reads/logs occur after the camera-end marker and before storage dispatch.
+Their small cost therefore appears in other/IPC, not camera acquisition or
+blocking SD writes. No RTC transaction is added to the Mode 4 frame callback.
+
+## DS3231 clock on the external ToF bus
+
+The driver uses `hi2c1` and the existing `g_i2c1_mutex`. HAL uses address 0xD0
+(the 7-bit address 0x68 shifted left once). The AT24C32 at 0x57 is unused.
+Clock initialization runs after I2C/ToF power-up and before capture tasks start.
+The RTC keeps time independently while ToF ranging is stopped. It needs a
+working backup supply to retain time when the module's main power is removed.
+
+The driver reads the calendar and status in one coherent 16-byte transaction.
+An oscillator-stop flag, disabled battery oscillator, invalid calendar or I2C
+failure makes the timestamp unavailable. Reading an unset clock does not clear
+its validity flag or pretend uptime is UTC. Reads and mutex waits are bounded.
+The software supports 2000 through 2099 and stores UTC in 24-hour format.
+
+### If the log says UNTIMED
+
+Read the startup diagnostic first. I2C transfer failure (including HAL error
+0x00000004, NACK) is different from a responding clock with its oscillator-stop
+flag set. Only the latter is fixed by provisioning the time. A mutex-unavailable
+message means the read could not obtain the shared bus within its timeout.
+
+The supplied board log lists 0x57 and 0x69, but not 0x68. A DS3231 has fixed
+7-bit address 0x68 (HAL 0xD0); do not substitute 0x69 based only on this scan.
+Check the chip marking, module power/common ground, and SDA/SCL connections to
+the shared bus (the firmware reports PC1 SDA / PH9 SCL). The WS2812 OFF log is
+from the illumination driver, not an RTC acknowledgement. An illuminated module
+LED also cannot establish successful communication with the RTC chip.
+
+After reconnecting/rebooting, check that the scan includes 0x68 and review the
+new RTC HAL/error diagnostic. Once the device responds, provision UTC below if
+it reports oscillator-stop/invalid calendar. The firmware does not change the
+camera pipeline or probe/write an unknown device at 0x69 to work around this.
+
+### Set your currently unset clock
+
+1. Set RTC_SET_UTC to the intended UTC date/time, for example
+   `"2026-09-08T14:30:00Z"` (replace this example with your actual UTC time).
+2. Set RTC_SET_ON_BOOT to 1, rebuild and flash. On boot, look for
+   `[RTC] Time set explicitly` followed by `[RTC] DS3231 UTC ...`.
+3. Set RTC_SET_ON_BOOT back to 0, rebuild and flash again. Later boots preserve
+   the battery-backed clock. Leaving the flag at 1 resets time on every boot.
+4. Verify printed UTC against a known clock, then power-cycle and verify it
+   advances. The compile/flash delay limits this provisioning method's accuracy;
+   `RTC_Set()` is also available for a future interactive synchronization command.
+
+Default configuration does **not** write a date. RTC_SET_UTC deliberately starts
+with an invalid placeholder. With the unset clock, images are saved as UNTIMED
+until you provision it. RTC_ENABLE=0 disables application RTC access entirely.
+
+Reference: [Analog Devices DS3231 datasheet](https://www.analog.com/media/en/technical-documentation/data-sheets/ds3231.pdf),
+calendar buffering, control EOSC and status OSF descriptions.
+
+## Photo timestamps and direct raw SD storage
+
+No FileX, filesystem formatting, EEPROM writes or pixel overlays were added.
+The existing raw layout stays at 64 header bytes followed by the YUV payload.
+The old header structure was only 60 bytes despite a 64-byte copy; it is now
+exactly 64 bytes, enforced by a compile-time assertion.
+
+The first eight uint32 fields retain their offsets. New fields use the reserved
+header space (little endian):
+
+| Byte offset | Meaning |
+| --- | --- |
+| 20 | Unix UTC seconds when valid; zero when unavailable |
+| 32 | RTC1 marker, 0x31435452 |
+| 36 | Flags: bit 0 UTC valid; bit 1 timestamp is post-capture completion |
+| 40 | MCU uptime in ms sampled immediately before the clock read |
+| 44..63 | Reserved, zero |
+
+One RTC read occurs **after each successful capture/batch**, before queueing
+storage. All four images in a batch share that second-resolution completion
+time and carry different image IDs. This is not a per-frame exposure timestamp.
+Retries reuse the same metadata. Camera-side ID reservation avoids a race with
+the storage task, and failed writes may leave ID gaps.
+
+Run the updated root `SD_Image_Viewer.py` with `raw_image_metadata.py` beside it.
+New exports use names such as `IMG_20260908_143000Z_000007_0002.png` (image ID,
+then scan index). The index also distinguishes old firmware records with ID 0.
+The viewer displays old timestamps as legacy uptime, not a date in 1970.
+Invalid-clock records display RTC unavailable and export with UNTIMED names.
+
+The existing SD allocation policy is retained: boot restarts at
+SD_SNAP_BASE_BLOCK, so this change does not add append-after-reboot retention.
+Export captures before rebooting if you need to retain them. The timestamp
+header is metadata, not a filesystem filename or an append journal.
+
+## Why the SD log changed from about 800 ms to 1050 ms
+
+The newer per-image timer begins before the full-image checksum. The older
+marker was after it, so those numbers do not measure the same scope. Retries
+also contribute to wall time. This does not establish how much of your measured
+difference comes from accounting versus card/build/cache variation.
+
+The full table reports `Of remaining: checksum` within remaining storage work;
+it is a subtotal, not an extra group. Compare storage wall, checksum and HAL
+write times on repeated captures. Table printing happens after storage and is
+excluded from the measured storage duration. The SD write algorithm, staging
+size and recovery gap have not been tuned in this change.
+
+## Validation
+
+Host tests: run `python tests/run_perf_tests.py`,
+`python tests/run_camera_view_tests.py` and `python tests/run_rtc_tests.py`.
+Set HOST_CC to a host GCC executable if necessary. Tests cover table controls,
+timing arithmetic, UTC/BCD conversion, leap dates, OSF and transport failures,
+shared-bus locking, metadata layout and viewer naming/legacy compatibility.
+ARM syntax checks cover the modified C files in modes 0, 1, 2 and 4.
+These are software checks; firmware has not been flashed and full-resolution
+image quality, DMA bandwidth and RTC battery retention remain board checks.

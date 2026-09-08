@@ -5,6 +5,7 @@ STM32 SD Card Snapshot Visualizer - Modern PySide6 Edition
 import sys
 import os
 import struct
+from raw_image_metadata import parse_header, time_label, image_filename
 import time
 import subprocess
 import threading
@@ -339,13 +340,7 @@ def rbulk(path, start_blk, num_blks):
     return data
 
 def parse_hdr(b):
-    if len(b) < HEADER_SIZE: return None
-    head = struct.unpack('<8I', b[:32])
-    return {
-        'magic': head[0], 'width': head[1], 'height': head[2],
-        'pixel_format': head[3], 'data_size': head[4],
-        'timestamp': head[5], 'checksum': head[6], 'snap_id': head[7],
-    }
+    return parse_header(b)
 
 # One PowerShell call lists every disk with number, size and friendly name.
 # Unlike brute-force opening \\.\PhysicalDriveN, this does NOT open the
@@ -759,8 +754,7 @@ class ExtractThread(QThread):
                     self.failed.emit(f"Cannot decode #{snap.idx+1:03d} (pixel format {h['pixel_format']}).")
                     return
 
-                ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(h.get('timestamp', 0)))
-                path = os.path.join(self.out_dir, f"snapshot_{snap.idx:03d}_{w}x{hh}_{ts}.png")
+                path = os.path.join(self.out_dir, image_filename(h, snap.idx))
                 if not qimg.save(path):
                     self.failed.emit(f"Failed to save:\n{path}")
                     return
@@ -1417,7 +1411,7 @@ class SDVisualizer(QMainWindow):
         self.current_snap = None
         for s in self.snapshots:
             fmt = FMT_NAME.get(s.header['pixel_format'], "?")
-            ts = time.strftime("%Y-%m-%d %H:%M", time.localtime(s.header.get('timestamp', 0)))
+            ts = time_label(s.header)
             self.listbox.addItem(f"#{s.idx+1:03d} | {s.header['width']}x{s.header['height']} | {fmt} | {ts}")
 
         self.statusBar().showMessage(f"Scan complete. Found {len(self.snapshots)} snapshots.")
@@ -1488,7 +1482,7 @@ class SDVisualizer(QMainWindow):
         if not out_dir: return
 
         try:
-            filename = f"snapshot_{self.current_snap.idx:03d}_{scale_mode}.png"
+            filename = image_filename(self.current_snap.header, self.current_snap.idx, scale_mode)
             path = os.path.join(out_dir, filename)
             
             img_to_save = self.current_snap.qimage

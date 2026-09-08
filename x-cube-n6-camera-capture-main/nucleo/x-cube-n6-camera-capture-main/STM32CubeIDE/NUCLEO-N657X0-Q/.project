@@ -3606,5 +3606,9 @@
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Source/Templates/gcc/startup_stm32n657xx.s</locationURI>
 		</link>
-	</linkedResources>
+	<link><name>Src/ds3231.c</name><type>1</type><locationURI>PARENT-2-PROJECT_LOC/Src/ds3231.c</locationURI></link>
+<link><name>Src/ds3231_calendar.c</name><type>1</type><locationURI>PARENT-2-PROJECT_LOC/Src/ds3231_calendar.c</locationURI></link>
+<link><name>Inc/ds3231.h</name><type>1</type><locationURI>PARENT-2-PROJECT_LOC/Inc/ds3231.h</locationURI></link>
+<link><name>Inc/raw_image.h</name><type>1</type><locationURI>PARENT-2-PROJECT_LOC/Inc/raw_image.h</locationURI></link>
+</linkedResources>
 </projectDescription>

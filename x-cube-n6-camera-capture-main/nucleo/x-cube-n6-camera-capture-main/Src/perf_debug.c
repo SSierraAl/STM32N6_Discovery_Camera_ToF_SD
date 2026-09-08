@@ -71,7 +71,7 @@ PerfTotals_t Perf_GetTotals(const PerfTimer_t *t)
     r.storage_ms = t->storage_wall_ms;
     uint64_t accounted = (uint64_t)r.camera_ms + r.storage_ms;
     uint64_t detail = (uint64_t)t->sd_total_wait_ms + t->sd_total_write_ms + t->sd_total_gap_ms;
-    if (accounted > r.total_ms || detail > r.storage_ms) r.valid = 0;
+    if (accounted > r.total_ms || detail + t->sd_checksum_ms > r.storage_ms) r.valid = 0;
     if (accounted <= r.total_ms) r.other_ms = r.total_ms - (uint32_t)accounted;
     if (detail <= r.storage_ms) {
         r.sd_detail_ms = (uint32_t)detail;
@@ -155,6 +155,7 @@ uint32_t Perf_PrintSummary(PerfTimer_t *t, uint32_t snap_id)
     snprintf(value, sizeof(value), "%lu saved / %lu failed", (unsigned long)t->storage_frames,
              (unsigned long)t->storage_failures);
     Perf_Row("Images", value);
+    Perf_Row("Camera view", CAM_BINNING ? "FULL FIELD / HALF SIZE" : "FULL FIELD / FULL SIZE");
     printf("%s", table_border);
     Perf_Row("CAMERA PHASES (included in camera)", "ms / % of cycle");
     Perf_PhaseRow(t, PERF_PHASE_CAM_INIT, PERF_PHASE_CAM_EXPO, "Sensor init/wake + pipe start", r.total_ms);
@@ -178,6 +179,7 @@ uint32_t Perf_PrintSummary(PerfTimer_t *t, uint32_t snap_id)
     Perf_TimeRow("Blocking HAL writes (not DMA)", t->sd_total_write_ms, r.storage_ms);
     Perf_TimeRow("Inter-batch gaps", t->sd_total_gap_ms, r.storage_ms);
     Perf_TimeRow("Remaining storage work", r.storage_other_ms, r.storage_ms);
+    Perf_TimeRow("  Of remaining: checksum", t->sd_checksum_ms, r.storage_ms);
 #else
     Perf_Row("SD subphase tracking", "DISABLED");
 #endif

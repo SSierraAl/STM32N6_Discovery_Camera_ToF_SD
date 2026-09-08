@@ -1,3 +1,4 @@
+#include "raw_image.h"
 /**
  * *****************************************************************************
  * @file    main.c
@@ -177,6 +178,8 @@ volatile int system_ready = 0;
 /* Snapshot counter and base block tracking */
 static uint32_t snap_count = 0;
 static uint32_t snap_base_block = SD_SNAP_BASE_BLOCK;
+static RTC_Stamp button_stamp;
+void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
 /** Camera frame buffer — allocated in PSRAM for DMA access.
     NOTE: Not static — referenced via extern by app_cam.c (CAM_ContinuousSnap). */
@@ -237,19 +240,7 @@ static volatile int capture_in_progress = 0;
    SD CARD IMAGE HEADER FORMAT
    ================================================================ */
 
-typedef struct {
-    uint32_t magic;
-    uint32_t width;
-    uint32_t height;
-    uint32_t pixel_format;
-    uint32_t data_size;
-    uint32_t timestamp;
-    uint32_t checksum;
-    uint32_t snap_id;
-    uint8_t  reserved[28];
-} sd_image_header_t;
 
-#define SD_HEADER_TAG       0x49444745U
 
 static uint32_t SD_IMG_BASE_BLOCK = 1000;
 
@@ -634,15 +625,15 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
         checksum ^= img_buf[i];
 
     /* Build image header */
-    sd_image_header_t hdr;
+    sd_image_header_t hdr = {0};
     hdr.magic        = SD_HEADER_TAG;
     hdr.width        = w;
     hdr.height       = h;
     hdr.pixel_format = pixel_format;
     hdr.data_size    = img_size;
-    hdr.timestamp    = HAL_GetTick();
+    RawImage_SetStamp(&hdr, button_stamp);
     hdr.checksum     = checksum;
-    hdr.snap_id      = 0;
+    hdr.snap_id      = snap_count;
     memset(hdr.reserved, 0, sizeof(hdr.reserved));
 
     /* ---- Use the PSRAM batch buffer (sd_batch_buf) for all writes ---- */
@@ -826,11 +817,12 @@ static void btn_thread_fct(void *arg)
                 continue;
             }
 
+            button_stamp = RTC_CaptureStamp();
+
             /* Calculate SD block offsets for this snapshot */
             uint32_t frame_size   = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
             uint32_t total_blocks = (SD_IMG_HEADER_SIZE + frame_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
             uint32_t target_block = snap_base_block + (snap_count * total_blocks);
-            uint32_t saved_base   = SD_IMG_BASE_BLOCK;
             SD_IMG_BASE_BLOCK     = target_block;
 
             printf("[CAM] Captured in %lu ms!\n", (unsigned long)capture_elapsed);
@@ -1233,6 +1225,7 @@ static void main_thread_fct(void *arg)
     /* ---- I2C1 for VL53L5CX ToF (MUST be before tasks start) ---- */
     VL53L5CX_I2C_Init();
     VL53L5CX_PowerUp();
+    RTC_Init();
     system_ready = 1;
     vTaskDelete(NULL);
 }
@@ -1395,7 +1388,7 @@ static void VL53L5CX_I2C_Init(void)
     hi2c1.Init.GeneralCallMode = I2C_GENERALCALL_DISABLE;
     hi2c1.Init.NoStretchMode = I2C_NOSTRETCH_DISABLE;
 
-    /* CRITICAL: MSP init configures GPIO pins (PC1=SCL, PH9=SDA) as I2C AF.
+    /* CRITICAL: MSP init configures GPIO pins (PC1=SDA, PH9=SCL) as I2C AF.
        Without this, the I2C peripheral has no electrical connection to the sensor. */
     HAL_I2C_MspInit(&hi2c1);
 

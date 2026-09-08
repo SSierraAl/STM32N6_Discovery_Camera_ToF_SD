@@ -26,6 +26,7 @@ int main(void)
         Perf_StorageComplete(&t, durations[f], 2519424, 1);
     }
     now = 4839; Perf_Stop(&t);
+    t.sd_checksum_ms = 2000; /* Subset of remainder, not an additional group. */
     PerfTotals_t r = Perf_GetTotals(&t);
     assert(r.valid && r.total_ms == 4839 && r.camera_ms == 580);
     assert(r.storage_ms == 3616 && r.other_ms == 643);
@@ -91,6 +92,8 @@ int main(void)
     t.storage_wall_ms = 10; t.sd_total_write_ms = 11;
     assert(!Perf_GetTotals(&t).valid);
     t.sd_total_write_ms = 0; t.phase_hit[PERF_PHASE_CAM_END] = 0;
+    assert(!Perf_GetTotals(&t).valid);
+    t.phase_hit[PERF_PHASE_CAM_END] = 1; t.sd_checksum_ms = 11;
     assert(!Perf_GetTotals(&t).valid);
 
     now = 0; Perf_Start(&t); Perf_Mark(&t, PERF_PHASE_CAM_INIT);

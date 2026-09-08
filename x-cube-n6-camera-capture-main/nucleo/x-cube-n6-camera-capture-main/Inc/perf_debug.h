@@ -36,6 +36,10 @@
 #include "stm32n6xx_hal.h"
 #include "app_config.h"
 
+#if !defined(PERF_REPORT_DETAIL) || !defined(PERF_PRINT_SUMMARY)
+#error "Restore PERF_PRINT_SUMMARY and PERF_REPORT_DETAIL in app_config.h"
+#endif
+
 /* ================================================================
    Phase Markers — ordered by typical execution flow
    ================================================================ */
@@ -84,6 +88,7 @@ typedef struct {
     uint32_t storage_wall_ms;                     /* all storage commands, including retries */
     uint32_t storage_frames;                      /* successfully saved frames */
     uint32_t storage_failures;                    /* commands that failed after recovery */
+    uint32_t sd_checksum_ms; /* subset of storage remaining work */
     uint64_t payload_bytes;                       /* successful image payloads only */
 
 } PerfTimer_t;
