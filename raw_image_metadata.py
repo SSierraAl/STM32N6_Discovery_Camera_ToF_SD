@@ -23,7 +23,8 @@ def utc_datetime(header):
 def time_label(header):
     dt = utc_datetime(header)
     if dt is not None:
-        return dt.strftime('%Y-%m-%d %H:%M:%SZ') + ' (capture completion)'
+        return (dt.strftime('%Y-%m-%d %H:%M:%SZ') +
+                f" | frame tick {header.get('capture_tick', 0)} ms")
     if header.get('time_tag') == RTC_TAG:
         return 'RTC unavailable'
     return f"Legacy uptime {header.get('timestamp', 0)} ms"
@@ -31,6 +32,6 @@ def time_label(header):
 def image_filename(header, index, suffix=''):
     dt = utc_datetime(header)
     stamp = dt.strftime('%Y%m%d_%H%M%SZ') if dt else 'UNTIMED'
-    # Index also disambiguates old records whose firmware always stored ID=0.
+    # snap_id uniquely separates burst frames even when DS3231 UTC is the same second.
     tail = f'_{suffix}' if suffix else ''
     return f"IMG_{stamp}_{header.get('snap_id', 0):06d}_{index:04d}{tail}.png"
