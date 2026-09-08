@@ -39,6 +39,7 @@
 #define IMX335_MODE_STREAMING   0x00
 #define IMX335_MODE_STANDBY     0x01
 
+/** Helper: Write a single byte to an IMX335 register via I2C1 (16-bit addr). */
 static int CAM_WriteSensorReg(uint16_t reg, uint8_t value)
 {
   return CMW_I2C_WRITEREG16(CAMERA_IMX335_ADDRESS, reg, &value, 1);
@@ -68,14 +69,15 @@ static const char *sensor_names[] = {
 static CMW_Sensor_Name_t sensor;
 static int is_sensor_valid = 0;
 static int g_cam_ready = 0;
+/* Separate ready flag for CALLBACK-BATCH mode (CAPTURE_MODE = 4). */
 static int g_callback_ready = 0;
 #if CAPTURE_MODE == 4
-/* Timing metadata only: one HAL tick per kept frame. No I2C is performed in
-   the callback capture loop. */
 static uint32_t g_callback_capture_ticks[CALLBACK_FRAMES] = {0};
 #endif
 
 #if CAM_SENSOR_REG_DEBUG && (CAPTURE_MODE == 4)
+/* Call only after pipe stop + standby, from the capture task. No ISP update
+   runs between these reads. Do not insert I2C/UART work in the DMA loop. */
 static void CAM_DumpImx335AeState(const char *tag)
 {
   uint8_t v[3] = {0}, s[3] = {0}, g[2] = {0};
@@ -92,6 +94,9 @@ static void CAM_DumpImx335AeState(const char *tag)
   uint32_t shs1 = s[0] | ((uint32_t)s[1] << 8) | (((uint32_t)s[2] & 0x0FU) << 16);
   uint32_t gain = g[0] | (((uint32_t)g[1] & 0x07U) << 8);
   uint32_t lines = vmax > shs1 ? vmax - shs1 : 0U;
+  /* Same nominal line period as the current driver: 1e6/(4500*30).
+     Deliberately do not infer line timing from requested SNAP_FPS.
+     This is an estimate, not a timing measurement or per-frame metadata. */
   uint32_t exposure_est_us = (uint32_t)(((uint64_t)lines * 1000000U + 67500U) / 135000U);
   printf("[IMX335][AE][%s] policy=%d VMAX=%lu SHS1=%lu lines=%lu "
          "exposure_est_us=%lu (nominal 135000 lines/s) gain_reg=%lu gain_mdB=%lu\n",
@@ -182,6 +187,9 @@ int CAM_Init(CAM_conf_t *conf)
   CMW_CameraInit_t cam_conf;
   int ret;
 
+  /* Camera I2C can become corrupted if the board was power-cycled or the
+     program was interrupted while the camera was active. Retry up to 3 times
+     with I2C bus reset between attempts instead of asserting. */
   if (!is_sensor_valid) {
     is_sensor_valid = 1;
     for (int attempt = 1; attempt <= 3; attempt++) {
@@ -237,11 +245,18 @@ int CAM_CapturePipe_Start(uint8_t *dst, uint32_t mode)
 static int CAM_CapturePipe_StartRetry(uint8_t *dst, uint32_t mode, uint8_t retries)
 {
   DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
+
   for (uint8_t attempt = 0; attempt <= retries; attempt++) {
-    if (CAM_CapturePipe_Start(dst, mode) == CMW_ERROR_NONE) return 0;
-    if (h) HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
+    if (CAM_CapturePipe_Start(dst, mode) == CMW_ERROR_NONE) {
+      return 0;
+    }
+
+    if (h) {
+      HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
+    }
     HAL_Delay(2);
   }
+
   return -1;
 }
 
@@ -258,8 +273,7 @@ void CAM_Deinit(void)
 #if CAPTURE_MODE == 0
 static volatile uint32_t g_single_capture_errors;
 #endif
-void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe)
-{
+void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe) {
 #if CAPTURE_MODE == 0
   if (pipe == DCMIPP_PIPE1) ++g_single_capture_errors;
 #else
@@ -277,10 +291,23 @@ void CAM_NotifyFrameEvent(void)
   g_frame_event_count++;
 }
 
+/**
+ * @brief  Block until DCMIPP confirms a full frame has been DMA'd into
+ *         capture_buf (CMW_CAMERA_PIPE_FrameEventCallback -> CAM_NotifyFrameEvent).
+ *
+ *   IMPORTANT: This must gate ONLY on the frame-complete event, not VSYNC.
+ *   VSYNC marks the START of the next frame (sensor row-sync) and can fire
+ *   slightly before DCMIPP finishes writing the previous frame to PSRAM.
+ *   Gating on "vsync OR frame_event" (as before) could let the caller stop
+ *   the pipe and memcpy a frame that is still being written -> partial/black
+ *   or torn images, worse for a moving subject.
+ * @return 0 on success, -1 on timeout (elapsed_ms optionally reports actual wait)
+ */
 static int CAM_WaitNextFrameReady(uint32_t timeout_ms, uint32_t *elapsed_ms)
 {
   uint32_t start_evt = g_frame_event_count;
   uint32_t t0 = HAL_GetTick();
+
   while (g_frame_event_count == start_evt) {
     CAM_IspUpdate();
     vTaskDelay(pdMS_TO_TICKS(1));
@@ -298,7 +325,8 @@ void CAM_CountVsyncFrame(void)
   g_vsync_count++;
   if (g_wait_frames > 0) {
     g_frame_count++;
-    if (g_frame_count >= (uint32_t)g_wait_frames) g_wait_frames = 0;
+    if (g_frame_count >= (uint32_t)g_wait_frames)
+      g_wait_frames = 0;
   }
 }
 
@@ -310,6 +338,9 @@ void CAM_ResetFrameCounter(int wait_frames)
 
 uint32_t CAM_GetFrameCount(void) { return g_frame_count; }
 
+/* ================================================================
+   ON-DEMAND SINGLE FRAME
+   ================================================================ */
 int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, int fps, int warmup_frames)
 {
   int min_size = width * height * 2;
@@ -320,6 +351,7 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Init camera %dx%d@%d YUV422 ...\n", width, height, fps);
 #endif
+
   CAM_conf_t conf = {0};
   conf.capture_width = width;
   conf.capture_height = height;
@@ -358,6 +390,8 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
     CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
     CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
   }
+  /* Frame completion, not VSYNC: full-size writes must finish before stop.
+     No extra warmup buffers are allocated. Mode 4 uses its unchanged path. */
   for (int frame = 0; frame <= warmup_frames; ++frame) {
     if (frame == warmup_frames) PERF_MARK(g_perf_timer, CAM_SNAP);
     if (CAM_WaitNextFrameReady(SNAP_TIMEOUT_MS, NULL) != 0) {
@@ -391,10 +425,14 @@ int CAM_CaptureSingleFrame_DefaultWarmup(uint8_t *buf, int bs, int w, int h, int
   return CAM_CaptureSingleFrame(buf, bs, w, h, fps, 8);
 }
 
+/* ================================================================
+   BATCH (ONE INIT, N FRAMES, ONE DEINIT)
+   ================================================================ */
 int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count, int width, int height, int fps)
 {
   int min_size = width * height * 2;
   if (!batch_buf || frame_size < min_size || frame_count < 1) return -1;
+
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Batch init %dx%d@%d (%d frames)...\n", width, height, fps, frame_count);
 #endif
@@ -419,6 +457,7 @@ int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count, 
     CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
   }
   CAM_IspUpdate();
+
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Warmup %d frames...\n", SNAP_WARMUP_FRAMES);
 #endif
@@ -427,11 +466,7 @@ int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count, 
   while (g_wait_frames != 0) {
     CAM_IspUpdate();
     vTaskDelay(pdMS_TO_TICKS(5));
-    if (HAL_GetTick() - t0 > 5000) {
-      HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
-      CAM_Deinit();
-      return -1;
-    }
+    if (HAL_GetTick() - t0 > 5000) { HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0); CAM_Deinit(); return -1; }
   }
 
   int captured = 0;
@@ -457,11 +492,15 @@ int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count, 
   return captured;
 }
 
+/* ================================================================
+   CONTINUOUS MODE INTERNAL HELPER
+   ================================================================ */
 static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size, int width, int height, int fps, int warmup_frames)
 {
   int min_size = width * height * 2;
   if (!buf || buf_size <= 0 || buf_size < min_size) return -1;
   if (warmup_frames < 0) warmup_frames = 0;
+
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Init %dx%d@%d YUV422...\n", width, height, fps);
 #endif
@@ -489,6 +528,7 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size, int width, int
   printf("[CAM] Start continuous...\n");
 #endif
   CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
+
   if (CAM_EXPOSURE_MODE == 1) {
     CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
     CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
@@ -509,9 +549,7 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size, int width, int
       CAM_IspUpdate();
       vTaskDelay(pdMS_TO_TICKS(5));
       if (HAL_GetTick() - t0 > 5000) {
-        HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
-        CAM_Deinit();
-        return -1;
+        HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0); CAM_Deinit(); return -1;
       }
     }
 #if PERF_DEBUG_LEVEL >= 1
@@ -551,6 +589,9 @@ int CAM_ContinuousStop(void)
   return 0;
 }
 
+/* ================================================================
+   BATCH MODE (CAPTURE_MODE = 2)
+   ================================================================ */
 int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 {
 #if CAPTURE_MODE != 2
@@ -565,6 +606,7 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] BatchSnap: %d frames...\n", BATCH_FRAMES);
 #endif
+
   for (uint8_t i = 0; i < BATCH_FRAMES; i++) {
     uint8_t *dest = batch_buf + (i * frame_size);
     HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
@@ -592,12 +634,23 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   return (int)captured;
 }
 
+/* ================================================================
+   CALLBACK-BATCH MODE (CAPTURE_MODE = 4)
+   Callback-driven continuous batch capture — NO Stop/Restart between frames.
+
+   Uses g_frame_event_count (incremented by DCMIPP frame event ISR callback)
+   to know EXACTLY when each frame DMA is complete. The pipe runs continuously
+   through the entire batch, eliminating Stop/Restart tearing.
+   ================================================================ */
+
 int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
 {
   uint32_t t0 = HAL_GetTick();
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Callback-Batch init: full init + warmup + standby...\n");
 #endif
+
+  /* Reuse the proven standby init path. */
   int rc = CAM_InitAndStartContinuous(buf, buf_size, width, height, fps, SNAP_WARMUP_FRAMES);
   if (rc != 0) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -606,20 +659,51 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
     return -1;
   }
 
+  /* Stop pipe and put sensor in standby (same as standby mode). */
   DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
   HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
   CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
+
 #if CAM_SENSOR_REG_DEBUG && (CAPTURE_MODE == 4)
   CAM_DumpImx335AeState("INIT_STANDBY");
 #endif
+
+  /* Reset frame event counter so captures start from a known state. */
   g_frame_event_count = 0;
   g_callback_ready = 1;
+
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Callback-Batch init done in %lu ms.\n", (unsigned long)(HAL_GetTick() - t0));
 #endif
   return 0;
 }
 
+/**
+ * @brief  Wake from standby, capture CALLBACK_FRAMES continuously, return to standby.
+ *
+ *   TRUE zero-copy, no-restart capture. The DCMIPP pipe is Started exactly
+ *   ONCE for the whole batch and never stopped/restarted. Instead of
+ *   memcpy-ing each frame out of a scratch buffer (which was measured to
+ *   cost hundreds of ms per 2.4MB frame — PSRAM-to-PSRAM CPU copies are
+ *   slow), we reprogram the DCMIPP's own ping-pong destination registers
+ *   (HAL_DCMIPP_PIPE_SetMemoryAddress) 2 FRAMES AHEAD so the hardware DMAs
+ *   each wanted frame DIRECTLY into its final batch_buf[] slot. No CPU
+ *   copy, no race: an address is only ever reprogrammed right after the
+ *   frame that was using it completes, and that same physical address
+ *   isn't touched again for a full 2-frame period (~66 ms @30fps) — far
+ *   longer than a register write takes.
+ *
+ *   Sequencing (k = frame index since Start, 0-based):
+ *     k = 0 .. CALLBACK_WARMUP_FRAMES-1        -> warmup, discarded (lands in
+ *                                                 capture_buf/save_buf scratch)
+ *     k = CALLBACK_WARMUP_FRAMES .. (W+N-1)    -> the N=CALLBACK_FRAMES frames
+ *                                                 we keep, DMA'd straight into
+ *                                                 batch_buf[k-W]
+ *   Two frames before each kept frame is due, we redirect whichever
+ *   physical address is about to free up to point at that frame's final
+ *   batch_buf slot — so by the time the hardware actually captures it, the
+ *   destination is already correct.
+ */
 int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 {
 #if PERF_CAMERA_FRAME_LOG
@@ -630,11 +714,11 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   (void)batch_buf; (void)frame_size; return -1;
 #endif
   if (!batch_buf || !g_callback_ready) return -1;
-
 #if CAPTURE_MODE == 4
   memset(g_callback_capture_ticks, 0, sizeof(g_callback_capture_ticks));
 #endif
-  extern uint8_t save_buf[];
+
+  extern uint8_t save_buf[]; /* unused in mode 4 otherwise — reused as scratch warmup buffer */
   uint8_t *const raw_buf[2] = { capture_buf, save_buf };
 
   PERF_MARK(g_perf_timer, CAM_INIT);
@@ -646,9 +730,18 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Callback-Batch: wakeup + %d frames (zero-copy DMA, no restart)...\n", CALLBACK_FRAMES);
 #endif
+
+  /* ---------------------------------------------------------------
+     Step 1: Wake sensor from standby.
+     --------------------------------------------------------------- */
   CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STREAMING);
   HAL_Delay(35);
 
+  /* ---------------------------------------------------------------
+     Step 2: Start continuous pipe ONCE with HARDWARE double buffering.
+     Addresses start out pointing at scratch raw_buf[0]/raw_buf[1]; they
+     get reprogrammed to batch_buf slots as the warmup tail approaches.
+     --------------------------------------------------------------- */
   if (CMW_CAMERA_DoubleBufferStart(DCMIPP_PIPE1, raw_buf[0], raw_buf[1], CMW_MODE_CONTINUOUS) != CMW_ERROR_NONE) {
 #if PERF_DEBUG_LEVEL >= 1
     printf("[CAM] Double-buffer start failed after callback wake\n");
@@ -656,6 +749,9 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
     goto callback_exit;
   }
 
+  /* ---------------------------------------------------------------
+     Step 3: Re-apply exposure/gain after wake.
+     --------------------------------------------------------------- */
   PERF_MARK(g_perf_timer, CAM_EXPO);
   CMW_CAMERA_SetExposureMode(CAM_EXPOSURE_MODE == 1 ? CMW_EXPOSUREMODE_MANUAL :
                              CAM_EXPOSURE_MODE == 2 ? CMW_EXPOSUREMODE_AUTOFREEZE : CMW_EXPOSUREMODE_AUTO);
@@ -665,6 +761,13 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
     CAM_IspUpdate();
   }
 
+  /* ---------------------------------------------------------------
+     Step 4 + 5 unified: walk through warmup AND capture frames in one
+     loop so the "arm 2 frames ahead" bookkeeping is simple/uniform.
+     k in [0, CALLBACK_WARMUP_FRAMES) are discarded; k in
+     [CALLBACK_WARMUP_FRAMES, CALLBACK_WARMUP_FRAMES+CALLBACK_FRAMES) are
+     the frames we keep (out_idx = k - CALLBACK_WARMUP_FRAMES).
+     --------------------------------------------------------------- */
   PERF_MARK(g_perf_timer, CAM_WARMUP);
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Callback warmup %d + capture %d frames...\n", CALLBACK_WARMUP_FRAMES, CALLBACK_FRAMES);
@@ -675,7 +778,10 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 
     for (uint32_t k = 0; k < total; k++) {
       uint32_t frame_ms = 0;
-      if (k == CALLBACK_WARMUP_FRAMES) PERF_MARK(g_perf_timer, CAM_SNAP);
+
+      if (k == CALLBACK_WARMUP_FRAMES) {
+        PERF_MARK(g_perf_timer, CAM_SNAP);
+      }
 
       if (CAM_WaitNextFrameReady(120, &frame_ms) != 0) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -690,26 +796,32 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 
       int32_t out_idx = (int32_t)k - (int32_t)CALLBACK_WARMUP_FRAMES;
       if (out_idx >= 0) {
+        /* This frame was DMA'd directly into batch_buf[out_idx] — no copy
+           needed, just drop any stale CPU cache lines before storage reads it. */
         uint8_t *dest = batch_buf + ((uint32_t)out_idx * frame_size);
         SCB_InvalidateDCache_by_Addr((uint32_t*)dest, frame_size);
-        /* The frame-complete event already fired; record the task-visible
-           completion tick now. This is metadata only and adds no I2C/UART
-           traffic to the critical DMA loop. */
         g_callback_capture_ticks[(uint32_t)out_idx] = HAL_GetTick();
         captured++;
       }
 
+      /* Arm the address that JUST freed (used by the frame that just
+         completed) for reuse 2 frames from now, if that future frame is
+         one we want to keep. */
       int32_t arm_idx = out_idx + 2;
       if (arm_idx >= 0 && arm_idx < CALLBACK_FRAMES) {
         uint32_t parity = (frame_seq - 1U) % 2U;
         HAL_DCMIPP_PIPE_SetMemoryAddress(h, DCMIPP_PIPE1,
-                                        parity == 0U ? DCMIPP_MEMORY_ADDRESS_0 : DCMIPP_MEMORY_ADDRESS_1,
-                                        (uint32_t)(batch_buf + ((uint32_t)arm_idx * frame_size)));
+                                          parity == 0U ? DCMIPP_MEMORY_ADDRESS_0 : DCMIPP_MEMORY_ADDRESS_1,
+                                          (uint32_t)(batch_buf + ((uint32_t)arm_idx * frame_size)));
       }
     }
   }
 
+  /* ---------------------------------------------------------------
+     Step 6: Stop pipe ONCE after ALL frames captured.
+     --------------------------------------------------------------- */
 callback_exit:
+  /* Return to standby. */
   PERF_MARK(g_perf_timer, CAM_STOP);
   HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
   CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
@@ -718,6 +830,7 @@ callback_exit:
   uint32_t capture_elapsed_ms = HAL_GetTick() - t0;
 #endif
 #if PERF_CAMERA_FRAME_LOG
+  /* UART output must not delay rearming or stopping the DMA pipe. */
   for (uint32_t k = 0; k < completed_frames; k++) {
     printf("[CAM] %s[%lu] wait=%lu ms\n",
            k < CALLBACK_WARMUP_FRAMES ? "warmup" : "capture",
