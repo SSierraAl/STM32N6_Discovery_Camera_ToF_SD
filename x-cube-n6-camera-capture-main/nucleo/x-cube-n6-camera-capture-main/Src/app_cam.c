@@ -72,6 +72,37 @@ static int g_cam_ready = 0;
 /* Separate ready flag for CALLBACK-BATCH mode (CAPTURE_MODE = 4). */
 static int g_callback_ready = 0;
 
+#if CAM_SENSOR_REG_DEBUG && (CAPTURE_MODE == 4)
+/* Call only after pipe stop + standby, from the capture task. No ISP update
+   runs between these reads. Do not insert I2C/UART work in the DMA loop. */
+static void CAM_DumpImx335AeState(const char *tag)
+{
+  uint8_t v[3] = {0}, s[3] = {0}, g[2] = {0};
+  if (sensor != CMW_IMX335_Sensor) return;
+
+  int rv = CMW_I2C_READREG16(CAMERA_IMX335_ADDRESS, 0x3030U, v, sizeof(v));
+  int rs = CMW_I2C_READREG16(CAMERA_IMX335_ADDRESS, 0x3058U, s, sizeof(s));
+  int rg = CMW_I2C_READREG16(CAMERA_IMX335_ADDRESS, 0x30E8U, g, sizeof(g));
+  if (rv || rs || rg) {
+    printf("[IMX335][AE][%s] read failed: VMAX=%d SHS1=%d GAIN=%d\n", tag, rv, rs, rg);
+    return;
+  }
+  uint32_t vmax = v[0] | ((uint32_t)v[1] << 8) | (((uint32_t)v[2] & 0x0FU) << 16);
+  uint32_t shs1 = s[0] | ((uint32_t)s[1] << 8) | (((uint32_t)s[2] & 0x0FU) << 16);
+  uint32_t gain = g[0] | (((uint32_t)g[1] & 0x07U) << 8);
+  uint32_t lines = vmax > shs1 ? vmax - shs1 : 0U;
+  /* Same nominal line period as the current driver: 1e6/(4500*30).
+     Deliberately do not infer line timing from requested SNAP_FPS.
+     This is an estimate, not a timing measurement or per-frame metadata. */
+  uint32_t exposure_est_us = (uint32_t)(((uint64_t)lines * 1000000U + 67500U) / 135000U);
+  printf("[IMX335][AE][%s] policy=%d VMAX=%lu SHS1=%lu lines=%lu "
+         "exposure_est_us=%lu (nominal 135000 lines/s) gain_reg=%lu gain_mdB=%lu\n",
+         tag, CAM_EXPOSURE_MODE, (unsigned long)vmax, (unsigned long)shs1,
+         (unsigned long)lines, (unsigned long)exposure_est_us,
+         (unsigned long)gain, (unsigned long)(gain * 300U));
+}
+#endif
+
 static int CAM_getFlipMode(CMW_Sensor_Name_t s)
 {
   int mode = CMW_MIRRORFLIP_NONE;
@@ -386,14 +417,18 @@ int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count, 
   conf.is_rgb_swap = 0;
   CAM_Init(&conf);
 
-  CMW_CAMERA_SetExposureMode(CMW_EXPOSUREMODE_MANUAL);
-  CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
-  CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+  CMW_CAMERA_SetExposureMode(CAM_EXPOSURE_MODE == 1 ? CMW_EXPOSUREMODE_MANUAL : CMW_EXPOSUREMODE_AUTO);
+  if (CAM_EXPOSURE_MODE == 1) {
+    CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+    CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+  }
 
   DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
   CAM_CapturePipe_Start(capture_buf, CMW_MODE_CONTINUOUS);
-  CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
-  CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+  if (CAM_EXPOSURE_MODE == 1) {
+    CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+    CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+  }
   CAM_IspUpdate();
 
 #if PERF_DEBUG_LEVEL >= 1
@@ -567,7 +602,7 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 
   uint32_t elapsed = HAL_GetTick() - t0;
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] BatchSnap: %d frames in %lu ms\n", (unsigned long)captured, (unsigned long)elapsed);
+  printf("[CAM] BatchSnap: %lu frames in %lu ms\n", (unsigned long)captured, (unsigned long)elapsed);
 #endif
   return (int)captured;
 }
@@ -601,6 +636,10 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
   DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
   HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
   CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
+
+#if CAM_SENSOR_REG_DEBUG && (CAPTURE_MODE == 4)
+  CAM_DumpImx335AeState("INIT_STANDBY");
+#endif
 
   /* Reset frame event counter so captures start from a known state. */
   g_frame_event_count = 0;
@@ -640,6 +679,10 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
  */
 int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 {
+#if PERF_CAMERA_FRAME_LOG
+  uint32_t frame_times[CALLBACK_WARMUP_FRAMES + CALLBACK_FRAMES];
+  uint32_t completed_frames = 0;
+#endif
 #if CAPTURE_MODE != 4
   (void)batch_buf; (void)frame_size; return -1;
 #endif
@@ -717,6 +760,9 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
         break;
       }
       frame_seq++;
+#if PERF_CAMERA_FRAME_LOG
+      frame_times[completed_frames++] = frame_ms;
+#endif
 
       int32_t out_idx = (int32_t)k - (int32_t)CALLBACK_WARMUP_FRAMES;
       if (out_idx >= 0) {
@@ -725,15 +771,7 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
         uint8_t *dest = batch_buf + ((uint32_t)out_idx * frame_size);
         SCB_InvalidateDCache_by_Addr((uint32_t*)dest, frame_size);
         captured++;
-#if PERF_DEBUG_LEVEL >= 2
-        printf("[CAM] capture[%d] frame in %lu ms (zero-copy)\n", out_idx, (unsigned long)frame_ms);
-#endif
       }
-#if PERF_DEBUG_LEVEL >= 2
-      else {
-        printf("[CAM] warmup[%lu] frame in %lu ms\n", (unsigned long)k, (unsigned long)frame_ms);
-      }
-#endif
 
       /* Arm the address that JUST freed (used by the frame that just
          completed) for reuse 2 frames from now, if that future frame is
@@ -751,17 +789,31 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   /* ---------------------------------------------------------------
      Step 6: Stop pipe ONCE after ALL frames captured.
      --------------------------------------------------------------- */
-#if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Callback-Batch: %d/%d frames in %lu ms (continuous, zero-copy)\n",
-         (unsigned)captured, CALLBACK_FRAMES, (unsigned long)(HAL_GetTick() - t0));
-#endif
-
 callback_exit:
   /* Return to standby. */
   PERF_MARK(g_perf_timer, CAM_STOP);
   HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
   CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
   PERF_MARK(g_perf_timer, CAM_DEINIT);
+#if PERF_DEBUG_LEVEL >= 1
+  uint32_t capture_elapsed_ms = HAL_GetTick() - t0;
+#endif
+#if PERF_CAMERA_FRAME_LOG
+  /* UART output must not delay rearming or stopping the DMA pipe. */
+  for (uint32_t k = 0; k < completed_frames; k++) {
+    printf("[CAM] %s[%lu] wait=%lu ms\n",
+           k < CALLBACK_WARMUP_FRAMES ? "warmup" : "capture",
+           (unsigned long)(k < CALLBACK_WARMUP_FRAMES ? k : k - CALLBACK_WARMUP_FRAMES),
+           (unsigned long)frame_times[k]);
+  }
+#endif
+#if PERF_DEBUG_LEVEL >= 1
+  printf("[CAM] Callback-Batch: %d/%d frames in %lu ms (continuous, zero-copy)\n",
+         (unsigned)captured, CALLBACK_FRAMES, (unsigned long)capture_elapsed_ms);
+#endif
+#if CAM_SENSOR_REG_DEBUG && (CAPTURE_MODE == 4)
+  if (captured > 0U) CAM_DumpImx335AeState("AFTER_BATCH_STANDBY");
+#endif
   return (int)captured;
 }
 

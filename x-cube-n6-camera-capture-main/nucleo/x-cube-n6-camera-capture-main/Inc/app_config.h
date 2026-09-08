@@ -40,15 +40,16 @@
                      (g_frame_event_count incremented by DCMIPP ISR) → capture N frames WITHOUT
                      stopping the pipe between them → memcpy each frame as callback fires →
                      stop pipe once at end → return to standby.
-                     ALL frames are sharp because the pipe never restarts mid-batch.
+                     Continuous capture avoids restart tearing; motion blur still depends on exposure.
                      Uses the SAME callback infrastructure as STANDBY-BATCH but eliminates
                      the Stop/Restart tearing that causes blurry frames.
      Snapshot mode is the same as ON-DEMAND (CAPTURE_MODE = 0). */
 
 
-/** Camera binning mode — simple toggle to switch resolutions.
-     0 = FULL RESOLUTION (2592x1944, 5MPX) — Use this for snapshot mode
-     1 = 2x2 BINNING (1296x972, 1.3MPX) — Faster readout, less rolling shutter */
+/** Camera output size (legacy CAM_BINNING name).
+     0 = 2592x1944 output; 1 = 1296x972 output via DCMIPP scaling.
+     The IMX335 still reads full resolution: this is not sensor binning
+     and does not shorten rolling-shutter readout. */
 #if CAPTURE_MODE == 1 || CAPTURE_MODE == 2 || CAPTURE_MODE == 4
 #define CAM_BINNING          1
 #else
@@ -58,8 +59,8 @@
 /** Snapshot resolution (auto-calculated from CAM_BINNING).
     YUV422 format = 2 bytes per pixel */
 #if CAM_BINNING == 1
-    #define SNAP_WIDTH       1296   /* 2x2 binned: 2592/2 */
-    #define SNAP_HEIGHT      972    /* 2x2 binned: 1944/2 */
+    #define SNAP_WIDTH       1296   /* Half-size output: 2592/2 */
+    #define SNAP_HEIGHT      972    /* Half-size output: 1944/2 */
 #else
     #define SNAP_WIDTH       2592   /* Full resolution */
     #define SNAP_HEIGHT      1944   /* Full resolution */
@@ -88,69 +89,60 @@
    Tune these to match your lighting conditions.
    ================================================================ */
 
-/** Exposure mode:
-    0 = AUTO (sensor decides, can be slow in low light = motion blur)
-    1 = MANUAL (fixed exposure, faster = less motion blur)
-    2 = FREEZE  (use last auto value, good for consistent lighting)
-
-    IMPORTANT: For burst capture across standby wake (CAPTURE_MODE 4),
-    MANUAL (1) is strongly recommended over AUTO/FREEZE. In AUTO or
-    FREEZE the software 3A (AE/AWB) library keeps re-converging (or freezes
-    onto whatever value it happened to be at, which is not deterministic
-    across standby/wake cycles), which is what was causing shot-to-shot
-    brightness/color drift and inconsistent sharpness. MANUAL pins exposure
-    and gain to fixed values every single capture, giving repeatable
-    brightness/color and a guaranteed-fast shutter to freeze motion. */
+/** Exposure policy: 0 = AUTO, 1 = MANUAL, 2 = FREEZE.
+    Mode 4 IMX335: AUTO uses ISP AEC; MANUAL disables ISP AEC in
+    imx335_isp_param_conf.h and applies the values below after start/wake.
+    FREEZE is unsupported by the IMX335 middleware; do not use it here.
+    Other capture modes retain their previous exposure policy. */
+#ifndef CAM_EXPOSURE_MODE
+#if CAPTURE_MODE == 4
+#define CAM_EXPOSURE_MODE    1  /* Controlled 5 ms motion-detail comparison */
+#else
 #define CAM_EXPOSURE_MODE    1
+#endif
+#endif
 
-/** Exposure time in MICROSECONDS (only used in MANUAL mode).
-      The IMX335 sensor expects exposure in µs.
-      Valid range: 8-33266 µs (IMX335_EXPOSURE_MIN to IMX335_EXPOSURE_MAX).
+/** Physical register diagnostics, only compiled into Mode 4.
+    Reads use the shared I2C arbiter, after pipe stop and sensor standby.
+    Disable for final timing measurements. These are end-state readings,
+    not exposure metadata for each saved frame. */
+#ifndef CAM_SENSOR_REG_DEBUG
+#define CAM_SENSOR_REG_DEBUG  1
+#endif
 
-      NOTE: At 30 FPS, one frame period = 33,333 µs. Exposure cannot exceed this.
-      At 8 µs: Shutter = VMAX - 1 line = FASTEST POSSIBLE (freezes vibration blur).
-
-      IMPORTANT: Check console output for "[CAM] Readback: exposure=XXX"
-      If readback differs from configured value, sensor driver is clamping.
-
-      CRITICAL BUG FIX: The ISP library overwrites exposure during startup.
-      app_cam.c now re-applies exposure AFTER CAM_CapturePipe_Start().
-      Check console for "[CAM] Post-start exposure=XXX" to verify.
-
-      For FAST SHUTTER (freeze vibrating objects): use minimum exposure 8 µs
-      with moderate GAIN (2000-4000). Good lighting required.
-
-      TUNING NOTE (2026-07-16): confirmed via readback that 8 µs was genuinely
-      applied, yet images were still soft/blurry. At 8 µs the sensor collects
-      ~25x less light than at 200 µs, and 200 µs is still >150x faster than a
-      typical 1/1000s "frozen motion" shutter speed - more than fast enough
-      for an insect, which moves a negligible sub-pixel distance in 200 µs.
-      Going shorter than necessary only starves the sensor of light, forcing
-      more analog gain and more visible noise, which looks like blur/softness.
-      Raised to 200 µs paired with brighter illumination (see WS2812_ILLUMINATION_BRIGHTNESS)
-      and reduced gain below, for a much better signal-to-noise ratio while still
-      easily freezing motion. Tune down toward 8 if you confirm actual motion blur
-      (not noise) at 200 µs; tune up if still too dark. */
+/** Manual exposure in microseconds. Mode 4 uses a 5 ms comparison, NOT a
+    recommended optimum. Shorter exposure reduces motion blur but collects
+    less light. Select it from measured motion and field of view.
+    CMW_CAMERA_GetExposure returns a cache, not physical register readback. */
+#ifndef CAM_EXPOSURE_VALUE
+#if CAPTURE_MODE == 4
+#define CAM_EXPOSURE_VALUE   5000
+#else
 #define CAM_EXPOSURE_VALUE   8
+#endif
+#endif
 
-/** Analog gain (only used in MANUAL mode).
-      Range: 0-72000 (IMX335_GAIN_MIN to IMX335_GAIN_MAX).
-      Gain is internally represented as value * 1000 (e.g., 2000 = 2.0x gain).
-      Higher = brighter image but more noise/grain.
-
-      With 8µs exposure (fastest shutter), the sensor collects very little light,
-      so gain MUST be high enough to produce a usable image.
-      Good starting points:
-        - 8µs exposure + bright light:    2000-4000 (2x-4x gain)
-        - 8µs exposure + medium light:    4000-8000 (4x-8x gain)
-        - 1000µs exposure:                200-600
-
-      TUNING NOTE (2026-07-16): lowered alongside the CAM_EXPOSURE_VALUE and
-      WS2812_ILLUMINATION_BRIGHTNESS increase - with ~25x more exposure time
-      and ~8x more LED brightness, far less analog gain is needed to reach the
-      same brightness, and less gain means less sensor noise (sharper-looking
-      images). Raise back toward 4000 if images come out too dark. */
+/** Manual sensor gain in millidecibels, quantized down in 300 mdB steps.
+    6000 = 6 dB (approximately 2x signal); 12000 = 12 dB (~4x).
+    8 rounds to 0 dB, NOT 8x. Range 0..72000; analog range ends at 30000.
+    Mode 4 uses 14.4 dB to approximately compensate the 26 ms to 5 ms
+    reduction. Brightness/noise require a bench comparison; unused in AUTO. */
+#ifndef CAM_GAIN_VALUE
+#if CAPTURE_MODE == 4
+#define CAM_GAIN_VALUE       12000
+#else
 #define CAM_GAIN_VALUE       8
+#endif
+#endif
+
+#if CAPTURE_MODE == 4
+#if (CAM_EXPOSURE_MODE != 0) && (CAM_EXPOSURE_MODE != 1)
+#error "Mode 4 supports AUTO (0) or MANUAL (1); IMX335 FREEZE is unsupported"
+#endif
+#if (CAM_EXPOSURE_MODE == 1) && ((CAM_EXPOSURE_VALUE < 8) || (CAM_EXPOSURE_VALUE > 33266) || (CAM_GAIN_VALUE < 0) || (CAM_GAIN_VALUE > 72000))
+#error "IMX335 manual exposure/gain outside the supported tuning range"
+#endif
+#endif
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
@@ -329,7 +321,9 @@
 
     For bottleneck analysis, use level 2 or 3.
     For production deployment, use level 0. */
+#ifndef PERF_DEBUG_LEVEL
 #define PERF_DEBUG_LEVEL         2
+#endif
 
 /** When PERF_DEBUG_LEVEL >= 2, print SD batch timing every N batches.
     Set to 1 for every batch (very verbose), 4 for every 4th batch. */
@@ -337,8 +331,10 @@
 
 /** Track cumulative waiting time for SD card ready states.
     When enabled, the final summary will show total time spent waiting
-    for the card to be ready vs actual DMA transfer time. */
+    for the card to be ready vs blocking HAL write time. */
+#ifndef PERF_TRACK_SD_WAIT_TIME
 #define PERF_TRACK_SD_WAIT_TIME    1
+#endif
 
 /** Print a performance summary after each complete capture cycle.
     Shows: phase breakdown, bottleneck identification, throughput MB/s. */
@@ -346,7 +342,9 @@
 
 /** Maximum number of snapshots to track for running statistics.
     Set to 0 for no stats, 10 for average over last 10 captures. */
+#ifndef PERF_STATS_WINDOW
 #define PERF_STATS_WINDOW          10
+#endif
 
 /* ================================================================
    SECTION 8: WS2812 ILLUMINATION CONFIGURATION
@@ -381,7 +379,7 @@
     brighter here has negligible power/thermal impact. Brightness is applied as
     RGB value scaling (not time-based PWM), so it stays perfectly in sync with
     even very short camera exposures - safe to raise further if still too dark. */
-#define WS2812_ILLUMINATION_BRIGHTNESS  90
+#define WS2812_ILLUMINATION_BRIGHTNESS  100
 
 /** Illumination color new update 0xGGRRBB!!!
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED

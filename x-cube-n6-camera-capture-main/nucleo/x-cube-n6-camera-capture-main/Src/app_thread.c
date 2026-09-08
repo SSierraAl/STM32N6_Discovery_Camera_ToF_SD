@@ -190,8 +190,6 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
            snap_id, (unsigned long)w, (unsigned long)h, img_size, img_size / 1048576.0f);
 #endif
 
-    PERF_MARK(g_perf_timer, STORAGE);
-
     uint32_t t_wait = HAL_GetTick();
     if (SD_WaitForReady() != 0) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -227,6 +225,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
     HAL_StatusTypeDef st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, base, batch_blk, HAL_MAX_DELAY);
     uint32_t write_ms = HAL_GetTick() - t0;
 
+    Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, 0, st == HAL_OK ? batch_blk : 0);
     if (st != HAL_OK) {
 #if PERF_DEBUG_LEVEL >= 1
         printf("[SD] header FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
@@ -235,7 +234,6 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         return -1;
     }
 
-    Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, 0);
     local_batch_count++;
     uint32_t current_block = base + batch_blk;
 
@@ -286,6 +284,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
         write_ms = HAL_GetTick() - t0;
 
+        Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, gap_ms, st == HAL_OK ? blocks_in_batch : 0);
         if (st != HAL_OK) {
 #if PERF_DEBUG_LEVEL >= 1
             printf("[SD] FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
@@ -294,7 +293,6 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
             return -1;
         }
 
-        Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, gap_ms);
         local_batch_count++;
 #if PERF_DEBUG_LEVEL >= 2
         if (PERF_SD_BATCH_PRINT_EVERY > 0 && (local_batch_count % PERF_SD_BATCH_PRINT_EVERY) == 0) {
@@ -315,7 +313,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
     }
 
     g_sd_img_base_block = current_block;
-    PERF_MARK(g_perf_timer, DONE);
+    /* Cycle completion belongs to Capture_RequestSnapshot, after all frames. */
 #if PERF_DEBUG_LEVEL >= 1
     printf("[SD] OK blocks %lu..%lu (%lu batches)\n",
            (unsigned long)base, (unsigned long)(current_block - 1), (unsigned long)local_batch_count);
@@ -549,8 +547,6 @@ void sensor_task(void *arg)
 #if PERF_PRINT_SUMMARY
                     Perf_PrintSummary(&g_perf_timer, capture_count);
                     Perf_UpdateStats(&g_perf_timer);
-#else
-                    printf("Snapshot #%lu SAVED (%lu ms)\n", (unsigned long)capture_count, (unsigned long)Perf_TotalElapsed(&t));
 #endif
                 } else {
 #if PERF_DEBUG_LEVEL >= 1
@@ -673,8 +669,6 @@ void sensor_task(void *arg)
 #if PERF_PRINT_SUMMARY
                 Perf_PrintSummary(&g_perf_timer, capture_count);
                 Perf_UpdateStats(&g_perf_timer);
-#else
-                printf("Snapshot #%lu SAVED (%lu ms)\n", (unsigned long)capture_count, (unsigned long)Perf_TotalElapsed(&t));
 #endif
             } else {
 #if PERF_DEBUG_LEVEL >= 1
@@ -715,19 +709,14 @@ void camera_task(void *arg)
         if (xQueueReceive(camera_cmd_queue, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) continue;
 
         if (cmd.type == CAM_CMD_SNAP) {
-            Perf_Start(&g_perf_timer);
-            g_perf_timer.sd_total_wait_ms = 0;
-            g_perf_timer.sd_total_write_ms = 0;
-            g_perf_timer.sd_total_gap_ms = 0;
-            g_perf_timer.sd_batch_count = 0;
-            g_perf_timer.sd_max_batch_ms = 0;
-            g_perf_timer.sd_max_wait_ms = 0;
+            PERF_MARK(g_perf_timer, CAM_INIT);
             int rc = -1;
             g_last_batch_frames = 0;
 
 #if CAPTURE_MODE == 1
             extern uint8_t save_buf[];
             rc = CAM_ContinuousSnap(save_buf, frame_size);
+            PERF_MARK(g_perf_timer, CAM_END);
             if (rc == 0) {
 #if PERF_DEBUG_LEVEL >= 1
                 printf("[CAM] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
@@ -748,9 +737,11 @@ void camera_task(void *arg)
             extern uint8_t batch_buf[];
 #if CAPTURE_MODE == 2
             rc = CAM_ContinuousBatchSnap(batch_buf, frame_size);
+            PERF_MARK(g_perf_timer, CAM_END);
 #else
             /* CAPTURE_MODE == 4: Callback-Batch (continuous, NO stop/restart) */
             rc = CAM_CallbackBatchSnap(batch_buf, frame_size);
+            PERF_MARK(g_perf_timer, CAM_END);
 #endif
             if (rc > 0) {
                 g_last_batch_frames = rc;
@@ -787,6 +778,7 @@ void camera_task(void *arg)
             }
 #else
             rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS, SNAP_WARMUP_FRAMES);
+            PERF_MARK(g_perf_timer, CAM_END);
             if (rc == 0) {
 #if PERF_DEBUG_LEVEL >= 1
                 printf("[CAM] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
@@ -820,6 +812,7 @@ void storage_task(void *arg)
         if (xQueueReceive(storage_cmd_queue, &cmd, portMAX_DELAY) != pdTRUE) continue;
         if (cmd.type == STORAGE_CMD_SAVE) {
             PERF_MARK(g_perf_timer, STORAGE);
+            uint32_t storage_start = HAL_GetTick();
             int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
             if (rc != 0) {
                 /* A single transient card hiccup (timeout / CRC) previously meant this
@@ -833,19 +826,22 @@ void storage_task(void *arg)
                     rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id);
                 }
             }
-            g_last_storage_rc = rc;
-            PERF_MARK(g_perf_timer, DONE);
+            if (rc != 0) g_last_storage_rc = rc;
+#if PERF_DEBUG_LEVEL >= 1
+            uint32_t storage_elapsed = HAL_GetTick() - storage_start;
+#endif
             if (rc == 0) {
                 g_snap_count++;
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[SD] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
+                printf("[SD] OK %lu ms\n", (unsigned long)storage_elapsed);
 #endif
             } else {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[SD] FAIL %lu ms — image LOST after retry\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_STORAGE, PERF_PHASE_DONE));
+                printf("[SD] FAIL %lu ms — image LOST after retry\n", (unsigned long)storage_elapsed);
 #endif
                 SD_Reinit();
             }
+            Perf_StorageComplete(&g_perf_timer, HAL_GetTick() - storage_start, cmd.image_size, rc == 0);
             xSemaphoreGive(storage_done_sem);
         }
     }
@@ -854,7 +850,8 @@ void storage_task(void *arg)
 /* ==================== PIPELINE ==================== */
 int Capture_RequestSnapshot(uint32_t timeout_ms)
 {
-    uint32_t t_start = HAL_GetTick();
+    Perf_Start(&g_perf_timer);
+    uint32_t t_start = g_perf_timer.start_tick;
     CameraCmd_t cmd = {0}; cmd.type = CAM_CMD_SNAP;
     g_last_storage_rc = 0;
     while (xSemaphoreTake(storage_done_sem, 0) == pdTRUE) {
@@ -890,6 +887,7 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
     } else { ticks = portMAX_DELAY; }
     if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE) return -1;
 #endif
+    Perf_Stop(&g_perf_timer);
     if (g_last_storage_rc != 0) return -1;
     return 0;
 }

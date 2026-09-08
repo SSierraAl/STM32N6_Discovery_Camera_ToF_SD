@@ -12,29 +12,10 @@
  *       - SD storage (card ready wait, batch writes, inter-batch gaps)
  *     Then print a clear summary with bottleneck identification.
  *
- *   USAGE:
- *     #include "perf_debug.h"
- *     #include "app_config.h"
- *
- *     PerfTimer_t t;
- *     PERF_START(t);
- *     PERF_MARK(t, PERF_CAM_INIT);
- *     ... camera init code ...
- *     PERF_MARK(t, PERF_CAM_EXPOSURE);
- *     ... exposure config ...
- *     PERF_MARK(t, PERF_CAM_WARMUP);
- *     ... warmup frames ...
- *     PERF_MARK(t, PERF_CAM_CAPTURE);
- *     ... frame captured ...
- *     PERF_MARK(t, PERF_CAM_DEINIT);
- *     ... deinit ...
- *     PERF_MARK(t, PERF_SD_WAIT);
- *     ... wait for card ...
- *     PERF_MARK(t, PERF_SD_WRITE);
- *     ... SD write ...
- *     PERF_MARK(t, PERF_DONE);
- *     PERF_STOP(t);
- *     PERF_PRINT_SUMMARY(t, snap_id);
+ *   Timer ownership: Capture_RequestSnapshot starts/stops the cycle timer.
+ *   Camera and storage tasks add markers/counters before giving completion
+ *   semaphores. Markers retain their FIRST occurrence; phase_count records
+ *   repeated hits. SD wall time is accumulated separately for every command.
  *
  *   DEBUG LEVELS (controlled by PERF_DEBUG_LEVEL in app_config.h):
  *     0 = Production: only final total time
@@ -71,11 +52,12 @@ typedef enum {
     PERF_PHASE_CAM_RESTART= 8,   /* DCMIPP pipe restart (continuous mode) */
     PERF_PHASE_CACHE_CLEAN= 9,   /* D-Cache clean/invalidate ops */
     PERF_PHASE_SD_READY   = 10,  /* Wait for SD card ready */
-    PERF_PHASE_SD_WRITE   = 11,  /* SD batch write (DMA transfer) */
+    PERF_PHASE_SD_WRITE   = 11,  /* First blocking HAL SD write */
     PERF_PHASE_SD_GAP     = 12,  /* Inter-batch gap (min 20ms delay) */
-    PERF_PHASE_STORAGE    = 13,  /* Full storage task (camera_ready -> storage_done) */
+    PERF_PHASE_STORAGE    = 13,  /* First storage command begins */
     PERF_PHASE_DONE       = 14,  /* Capture cycle complete */
-    PERF_PHASE_COUNT      = 15   /* Total number of phases */
+    PERF_PHASE_CAM_END    = 15,  /* Camera function returned, before storage queueing */
+    PERF_PHASE_COUNT      = 16
 } PerfPhase_t;
 
 /* Human-readable phase names */
@@ -98,6 +80,11 @@ typedef struct {
     uint32_t sd_batch_count;                      /* number of SD batches written */
     uint32_t sd_max_batch_ms;                     /* slowest single batch write */
     uint32_t sd_max_wait_ms;                      /* longest single card-ready wait */
+    uint32_t sd_blocks_written;                   /* successful HAL calls, includes retry traffic */
+    uint32_t storage_wall_ms;                     /* all storage commands, including retries */
+    uint32_t storage_frames;                      /* successfully saved frames */
+    uint32_t storage_failures;                    /* commands that failed after recovery */
+    uint64_t payload_bytes;                       /* successful image payloads only */
 
 } PerfTimer_t;
 
@@ -106,9 +93,9 @@ typedef struct {
    ================================================================ */
 
 typedef struct {
-    uint32_t total_times[PERF_STATS_WINDOW];
-    uint32_t cam_times[PERF_STATS_WINDOW];
-    uint32_t sd_times[PERF_STATS_WINDOW];
+    uint32_t total_times[PERF_STATS_WINDOW > 0 ? PERF_STATS_WINDOW : 1];
+    uint32_t cam_times[PERF_STATS_WINDOW > 0 ? PERF_STATS_WINDOW : 1];
+    uint32_t sd_times[PERF_STATS_WINDOW > 0 ? PERF_STATS_WINDOW : 1];
     uint32_t count;
     uint32_t index;
 } PerfStats_t;
@@ -128,11 +115,11 @@ static inline void Perf_Start(PerfTimer_t *t)
     t->phase_hit[PERF_PHASE_START] = 1;
 }
 
-/** Mark a phase (call at key points in the capture pipeline) */
+/** Retain the first timestamp; count every hit (including repeated SD writes). */
 static inline void Perf_Mark(PerfTimer_t *t, PerfPhase_t phase)
 {
-    if (phase >= PERF_PHASE_COUNT) return;
-    t->phase_ticks[phase] = HAL_GetTick();
+    if ((unsigned)phase >= PERF_PHASE_COUNT) return;
+    if (!t->phase_hit[phase]) t->phase_ticks[phase] = HAL_GetTick();
     t->phase_hit[phase] = 1;
     t->phase_count[phase]++;
 }
@@ -147,6 +134,7 @@ static inline void Perf_Stop(PerfTimer_t *t)
 /** Get elapsed time between two phases */
 static inline uint32_t Perf_PhaseElapsed(const PerfTimer_t *t, PerfPhase_t from, PerfPhase_t to)
 {
+    if ((unsigned)from >= PERF_PHASE_COUNT || (unsigned)to >= PERF_PHASE_COUNT) return 0;
     if (!t->phase_hit[from] || !t->phase_hit[to]) return 0;
     return t->phase_ticks[to] - t->phase_ticks[from];
 }
@@ -166,17 +154,41 @@ static inline uint32_t Perf_TotalElapsed(const PerfTimer_t *t)
 static inline void Perf_SD_RecordBatch(PerfTimer_t *t,
                                         uint32_t wait_ms,
                                         uint32_t write_ms,
-                                        uint32_t gap_ms)
+                                        uint32_t gap_ms, uint32_t blocks_written)
 {
+    t->sd_blocks_written += blocks_written;
+    t->sd_batch_count++;
 #if PERF_TRACK_SD_WAIT_TIME
     t->sd_total_wait_ms  += wait_ms;
     t->sd_total_write_ms += write_ms;
     t->sd_total_gap_ms   += gap_ms;
-    t->sd_batch_count++;
     if (write_ms > t->sd_max_batch_ms) t->sd_max_batch_ms = write_ms;
     if (wait_ms  > t->sd_max_wait_ms)  t->sd_max_wait_ms  = wait_ms;
+#else
+    (void)wait_ms; (void)write_ms; (void)gap_ms;
 #endif
 }
+
+/* Single storage-task writer; the requester reads after completion semaphore. */
+static inline void Perf_StorageComplete(PerfTimer_t *t, uint32_t elapsed_ms,
+                                        uint32_t payload_bytes, int success)
+{
+    t->storage_wall_ms += elapsed_ms;
+    if (success) {
+        t->storage_frames++;
+        t->payload_bytes += payload_bytes;
+    } else {
+        t->storage_failures++;
+    }
+}
+
+typedef struct {
+    uint32_t total_ms, camera_ms, storage_ms, other_ms;
+    uint32_t sd_detail_ms, storage_other_ms;
+    int valid;
+} PerfTotals_t;
+
+PerfTotals_t Perf_GetTotals(const PerfTimer_t *t);
 
 /* ================================================================
    API — Summary Printing
@@ -200,18 +212,10 @@ void Perf_UpdateStats(PerfTimer_t *t);
    Convenience Macros
    ================================================================ */
 
-#if PERF_DEBUG_LEVEL >= 1
-    #define PERF_START(t)          Perf_Start(&(t))
-    #define PERF_MARK(t, phase)    Perf_Mark(&(t), PERF_PHASE_##phase)
-    #define PERF_STOP(t)           Perf_Stop(&(t))
-    #define PERF_PRINT(t, id)      Perf_PrintSummary(&(t), id)
-    #define PERF_STATS(t)          Perf_UpdateStats(&(t))
-#else
-    #define PERF_START(t)          Perf_Start(&(t))
-    #define PERF_MARK(t, phase)    Perf_Mark(&(t), PERF_PHASE_##phase)
-    #define PERF_STOP(t)           Perf_Stop(&(t))
-    #define PERF_PRINT(t, id)      ((void)0)
-    #define PERF_STATS(t)          ((void)0)
-#endif
+#define PERF_START(t)          Perf_Start(&(t))
+#define PERF_MARK(t, phase)    Perf_Mark(&(t), PERF_PHASE_##phase)
+#define PERF_STOP(t)           Perf_Stop(&(t))
+#define PERF_PRINT(t, id)      Perf_PrintSummary(&(t), id)
+#define PERF_STATS(t)          Perf_UpdateStats(&(t))
 
 #endif /* PERF_DEBUG_H */

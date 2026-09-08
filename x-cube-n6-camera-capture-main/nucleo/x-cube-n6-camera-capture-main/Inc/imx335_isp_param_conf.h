@@ -21,6 +21,8 @@
 #ifndef __IMX335_ISP_PARAM_CONF__H
 #define __IMX335_ISP_PARAM_CONF__H
 
+#include "app_config.h"
+
 /* DCMIPP ISP configuration for IMX335 sensor */
 static const ISP_IQParamTypeDef ISP_IQParamCacheInit_IMX335 = {
     .sensorGainStatic = {
@@ -30,7 +32,13 @@ static const ISP_IQParamTypeDef ISP_IQParamCacheInit_IMX335 = {
         .exposure = 0,
     },
     .AECAlgo = {
+#if CAM_EXPOSURE_MODE == 1
+        /* IMX335 has no SetExposureMode hook. Stop software AE from
+           overwriting the application's manual exposure/gain writes. */
+        .enable = 0,
+#else
         .enable = 1,
+#endif
         .exposureCompensation = EXPOSURE_TARGET_0_0_EV,
         .antiFlickerFreq = ANTIFLICKER_NONE,
     },

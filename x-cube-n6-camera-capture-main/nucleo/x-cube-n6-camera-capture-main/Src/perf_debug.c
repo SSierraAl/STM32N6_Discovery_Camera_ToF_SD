@@ -10,20 +10,17 @@
  *     3. Bottleneck identification (what's consuming the most time)
  *     4. Running statistics (average over last N captures)
  *
- *   All output is gated by PERF_DEBUG_LEVEL in app_config.h:
- *     Level 0: Only total time (1 line)
- *     Level 1: Phase breakdown table
- *     Level 2: + SD sub-analysis + bottleneck label
- *     Level 3: + raw counters + per-batch history
+ *   PERF_PRINT_SUMMARY gates reports; PERF_REPORT_DETAIL selects compact,
+ *   phases or detailed tables, independently of application log verbosity.
+ *   PERF_PRINT_STATS separately enables running statistics.
  * ******************************************************************************
  */
 
 #include "perf_debug.h"
 #include <string.h>
 #include <math.h>
-#include "main.h"
 
-extern SD_HandleTypeDef hsd1;
+
 
 /* ================================================================
    Phase Name Strings
@@ -44,14 +41,15 @@ const char* perf_phase_names[PERF_PHASE_COUNT] = {
     [PERF_PHASE_SD_WRITE]    = "SD_WRITE",
     [PERF_PHASE_SD_GAP]      = "SD_GAP",
     [PERF_PHASE_STORAGE]     = "STORAGE",
-    [PERF_PHASE_DONE]        = "DONE"
+    [PERF_PHASE_DONE]        = "DONE",
+    [PERF_PHASE_CAM_END]     = "CAM_END"
 };
 
 /* ================================================================
    Running Statistics Buffer
    ================================================================ */
 
-#if PERF_STATS_WINDOW > 0
+#if PERF_STATS_WINDOW > 0 && PERF_PRINT_STATS && PERF_PRINT_SUMMARY
 PerfStats_t g_perf_stats = {0};
 #else
 PerfStats_t g_perf_stats = {0}; /* dummy — stats are disabled */
@@ -61,270 +59,173 @@ PerfStats_t g_perf_stats = {0}; /* dummy — stats are disabled */
    Helper: Compute camera total and SD total from phase ticks
    ================================================================ */
 
-static void Perf_SplitTotals(const PerfTimer_t *t,
-                              uint32_t *cam_ms, uint32_t *sd_ms, uint32_t *other_ms)
+/* All intervals use uint32_t subtraction so a single tick rollover is safe.
+   This report describes the serialized request -> camera -> storage path. */
+PerfTotals_t Perf_GetTotals(const PerfTimer_t *t)
 {
-    *cam_ms = 0; *sd_ms = 0; *other_ms = 0;
-
-    /* Camera phases: INIT -> DEINIT (or COPY/RESTART in continuous mode) */
-    if (t->phase_hit[PERF_PHASE_CAM_INIT]) {
-        uint32_t end_phase = PERF_PHASE_CAM_DEINIT;
-        if (t->phase_hit[PERF_PHASE_CAM_RESTART])
-            end_phase = PERF_PHASE_CAM_RESTART;
-        else if (t->phase_hit[PERF_PHASE_CAM_SNAP])
-            end_phase = PERF_PHASE_CAM_SNAP;
-
-        if (t->phase_hit[end_phase])
-            *cam_ms = t->phase_ticks[end_phase] - t->phase_ticks[PERF_PHASE_CAM_INIT];
+    PerfTotals_t r = {0};
+    r.total_ms = Perf_TotalElapsed(t);
+    r.valid = t->phase_hit[PERF_PHASE_START] && t->phase_hit[PERF_PHASE_DONE] &&
+              t->phase_hit[PERF_PHASE_CAM_INIT] && t->phase_hit[PERF_PHASE_CAM_END];
+    r.camera_ms = Perf_PhaseElapsed(t, PERF_PHASE_CAM_INIT, PERF_PHASE_CAM_END);
+    r.storage_ms = t->storage_wall_ms;
+    uint64_t accounted = (uint64_t)r.camera_ms + r.storage_ms;
+    uint64_t detail = (uint64_t)t->sd_total_wait_ms + t->sd_total_write_ms + t->sd_total_gap_ms;
+    if (accounted > r.total_ms || detail > r.storage_ms) r.valid = 0;
+    if (accounted <= r.total_ms) r.other_ms = r.total_ms - (uint32_t)accounted;
+    if (detail <= r.storage_ms) {
+        r.sd_detail_ms = (uint32_t)detail;
+        r.storage_other_ms = r.storage_ms - (uint32_t)detail;
     }
-
-    /* SD phases: use accumulated counters if available */
-#if PERF_TRACK_SD_WAIT_TIME
-    if (t->sd_batch_count > 0) {
-        *sd_ms = t->sd_total_wait_ms + t->sd_total_write_ms + t->sd_total_gap_ms;
-    }
-#endif
-
-    /* Other = total - cam - sd */
-    uint32_t total = Perf_TotalElapsed(t);
-    if (total >= *cam_ms + *sd_ms)
-        *other_ms = total - *cam_ms - *sd_ms;
+    uint32_t camera_start = t->phase_ticks[PERF_PHASE_CAM_INIT] - t->start_tick;
+    uint32_t camera_end = t->phase_ticks[PERF_PHASE_CAM_END] - t->start_tick;
+    if (camera_start > camera_end || camera_end > r.total_ms) r.valid = 0;
+    if (t->phase_hit[PERF_PHASE_STORAGE]) {
+        uint32_t storage_start = t->phase_ticks[PERF_PHASE_STORAGE] - t->start_tick;
+        if (storage_start < camera_end || storage_start > r.total_ms ||
+            r.storage_ms > r.total_ms - storage_start) r.valid = 0;
+    } else if (r.storage_ms || t->storage_frames || t->storage_failures) r.valid = 0;
+    return r;
 }
 
-/* ================================================================
-   Helper: Identify the main bottleneck
-   ================================================================ */
-
-typedef enum {
-    BOTTLENECK_CAMERA_INIT,
-    BOTTLENECK_CAMERA_WARMUP,
-    BOTTLENECK_SD_WAIT_READY,
-    BOTTLENECK_SD_DMA_WRITE,
-    BOTTLENECK_SD_GAP_DELAY,
-    BOTTLENECK_BALANCED,
-    BOTTLENECK_UNKNOWN
-} Bottleneck_t;
-
-static const char* bottleneck_names[] = {
-    [BOTTLENECK_CAMERA_INIT]     = "CAMERA INIT/CONFIG",
-    [BOTTLENECK_CAMERA_WARMUP]   = "CAMERA WARMUP FRAMES",
-    [BOTTLENECK_SD_WAIT_READY]   = "SD CARD WAIT-READY",
-    [BOTTLENECK_SD_DMA_WRITE]    = "SD DMA TRANSFER",
-    [BOTTLENECK_SD_GAP_DELAY]    = "SD INTER-BATCH GAP",
-    [BOTTLENECK_BALANCED]        = "BALANCED (no single bottleneck)",
-    [BOTTLENECK_UNKNOWN]         = "UNKNOWN"
-};
-
-static Bottleneck_t Perf_FindBottleneck(const PerfTimer_t *t, uint32_t total_ms)
+#if PERF_STATS_WINDOW > 0 && PERF_PRINT_STATS && PERF_PRINT_SUMMARY
+static void Perf_SplitTotals(const PerfTimer_t *t, uint32_t *cam, uint32_t *sd, uint32_t *other)
 {
-    if (total_ms == 0) return BOTTLENECK_UNKNOWN;
-
-    uint32_t cam_init_ms  = Perf_PhaseElapsed(t, PERF_PHASE_CAM_INIT, PERF_PHASE_CAM_EXPO);
-    uint32_t cam_warmup_ms = Perf_PhaseElapsed(t, PERF_PHASE_CAM_WARMUP, PERF_PHASE_CAM_SNAP);
-    float pct;
-
-    /* Check SD wait time (largest contributor) */
-#if PERF_TRACK_SD_WAIT_TIME
-    if (t->sd_total_wait_ms > 0) {
-        pct = (100.0f * t->sd_total_wait_ms) / total_ms;
-        if (pct > 40) return BOTTLENECK_SD_WAIT_READY;
-    }
-
-    if (t->sd_total_gap_ms > 0) {
-        pct = (100.0f * t->sd_total_gap_ms) / total_ms;
-        if (pct > 40) return BOTTLENECK_SD_GAP_DELAY;
-    }
-
-    if (t->sd_total_write_ms > 0) {
-        pct = (100.0f * t->sd_total_write_ms) / total_ms;
-        if (pct > 40) return BOTTLENECK_SD_DMA_WRITE;
-    }
-#endif
-
-    /* Check camera warmup */
-    pct = (100.0f * cam_warmup_ms) / total_ms;
-    if (pct > 30) return BOTTLENECK_CAMERA_WARMUP;
-
-    /* Check camera init */
-    pct = (100.0f * cam_init_ms) / total_ms;
-    if (pct > 30) return BOTTLENECK_CAMERA_INIT;
-
-    return BOTTLENECK_BALANCED;
+    PerfTotals_t r = Perf_GetTotals(t);
+    *cam = r.camera_ms; *sd = r.storage_ms; *other = r.other_ms;
 }
 
-/* ================================================================
-   Main Summary Printer
-   ================================================================ */
+#endif
+
+#if PERF_PRINT_SUMMARY && PERF_REPORT_DETAIL > 0
+static const char *table_border = "+------------------------------------------+--------------------------+\n";
+static void Perf_Row(const char *label, const char *value)
+{
+    printf("| %-40.40s | %24.24s |\n", label, value);
+}
+static void Perf_TimeRow(const char *label, uint32_t ms, uint32_t total)
+{
+    char value[48];
+    snprintf(value, sizeof(value), "%lu ms / %.1f%%", (unsigned long)ms,
+             total ? 100.0 * ms / total : 0.0);
+    Perf_Row(label, value);
+}
+#if PERF_REPORT_DETAIL >= 2
+static void Perf_CountRow(const char *label, uint32_t value)
+{
+    char text[32];
+    snprintf(text, sizeof(text), "%lu", (unsigned long)value);
+    Perf_Row(label, text);
+}
+#endif
+static void Perf_RateRow(const char *label, uint64_t bytes, uint32_t ms)
+{
+    char value[48];
+    if (ms) snprintf(value, sizeof(value), "%.2f MiB/s", (double)bytes * 1000.0 / 1048576.0 / ms);
+    else snprintf(value, sizeof(value), "N/A (0 ms)");
+    Perf_Row(label, value);
+}
+static void Perf_PhaseRow(const PerfTimer_t *t, PerfPhase_t from, PerfPhase_t to,
+                          const char *label, uint32_t total)
+{
+    if (t->phase_hit[from] && t->phase_hit[to]) {
+        uint32_t start = t->phase_ticks[from] - t->start_tick;
+        uint32_t end = t->phase_ticks[to] - t->start_tick;
+        if (end >= start) Perf_TimeRow(label, end - start, total);
+    }
+}
+#endif
 
 uint32_t Perf_PrintSummary(PerfTimer_t *t, uint32_t snap_id)
 {
-    uint32_t total_ms = Perf_TotalElapsed(t);
-    if (total_ms == 0) return 0;
-
-#if PERF_DEBUG_LEVEL == 0
-    /* Production: one line only */
-    printf("[PERF] Snap #%lu: %lu ms total\n", (unsigned long)snap_id, (unsigned long)total_ms);
-    return total_ms;
-#endif
-
-    uint32_t cam_ms, sd_ms, other_ms;
-    Perf_SplitTotals(t, &cam_ms, &sd_ms, &other_ms);
-
-    /* ---- Header ---- */
-    printf("\n"
-           "╔══════════════════════════════════════════════════════════╗\n");
-    printf("║           PERFECT CAPTURE #%" PRIu32 " — TIMING REPORT             ║\n", snap_id);
-    printf("╠══════════════════════════════════════════════════════════╣\n");
-
-#if PERF_DEBUG_LEVEL >= 1
-    /* ---- Phase Breakdown Table ---- */
-    printf("║  PHASE BREAKDOWN                                         ║\n");
-    printf("╠──────────────────────────────────────────────────────────╣\n");
-
-    /* Build list of relevant phase transitions */
-    typedef struct { PerfPhase_t from; PerfPhase_t to; const char* label; } PhaseDelta_t;
-
-    const PhaseDelta_t deltas[] = {
-        {PERF_PHASE_START,    PERF_PHASE_CAM_INIT,   "Boot → Camera init"},
-        {PERF_PHASE_CAM_INIT, PERF_PHASE_CAM_EXPO,   "  Sensor + DCMIPP"},
-        {PERF_PHASE_CAM_EXPO, PERF_PHASE_CAM_WARMUP, "  Exposure/Gain cfg"},
-        {PERF_PHASE_CAM_WARMUP,PERF_PHASE_CAM_SNAP,  "  Warmup frames"},
-        {PERF_PHASE_CAM_SNAP, PERF_PHASE_CAM_STOP,   "  Final frame grab"},
-        {PERF_PHASE_CAM_STOP, PERF_PHASE_CAM_DEINIT, "  Pipe stop"},
-        {PERF_PHASE_CAM_DEINIT,PERF_PHASE_SD_WRITE,  "  Camera → Storage"},
-    };
-    const int delta_count = sizeof(deltas) / sizeof(deltas[0]);
-
-    for (int i = 0; i < delta_count; i++) {
-        uint32_t elapsed = Perf_PhaseElapsed(t, deltas[i].from, deltas[i].to);
-        if (elapsed == 0 && !(t->phase_hit[deltas[i].from] && t->phase_hit[deltas[i].to]))
-            continue;
-        float pct = total_ms > 0 ? (100.0f * elapsed) / total_ms : 0;
-        printf("║  %-38s %4" PRIu32 "ms  %5.1f%%  ║\n",
-               deltas[i].label, elapsed, pct);
-    }
-
-    /* Continuous-mode extra phases */
-    if (t->phase_hit[PERF_PHASE_CAM_COPY]) {
-        uint32_t copy_ms = Perf_PhaseElapsed(t, PERF_PHASE_CAM_STOP, PERF_PHASE_CAM_COPY);
-        float pct = (100.0f * copy_ms) / total_ms;
-        printf("║  %-38s %4" PRIu32 "ms  %5.1f%%  ║\n", "  memcpy (stop→copy)", copy_ms, pct);
-    }
-    if (t->phase_hit[PERF_PHASE_CAM_RESTART]) {
-        uint32_t restart_ms = Perf_PhaseElapsed(t, PERF_PHASE_CAM_COPY, PERF_PHASE_CAM_RESTART);
-        float pct = (100.0f * restart_ms) / total_ms;
-        printf("║  %-38s %4" PRIu32 "ms  %5.1f%%  ║\n", "  Pipe restart", restart_ms, pct);
-    }
-
-    printf("╠──────────────────────────────────────────────────────────╣\n");
-
-    /* ---- Group Totals ---- */
-    float cam_pct  = total_ms > 0 ? (100.0f * cam_ms)  / total_ms : 0;
-    float sd_pct   = total_ms > 0 ? (100.0f * sd_ms)   / total_ms : 0;
-    float other_pct = total_ms > 0 ? (100.0f * other_ms) / total_ms : 0;
-
-    printf("║  GROUP TOTALS                                            ║\n");
-    printf("║  Camera (init+capture):    %6" PRIu32 "ms  %5.1f%%  ║\n", cam_ms, cam_pct);
-    printf("║  Storage (SD card):        %6" PRIu32 "ms  %5.1f%%  ║\n", sd_ms, sd_pct);
-    printf("║  Other (IPC, overhead):    %6" PRIu32 "ms  %5.1f%%  ║\n", other_ms, other_pct);
-    printf("╠──────────────────────────────────────────────────────────╣\n");
-#endif
-
-#if PERF_DEBUG_LEVEL >= 2
-    /* ---- SD Card Sub-Analysis ---- */
+#if !PERF_PRINT_SUMMARY
+    (void)snap_id;
+    return Perf_TotalElapsed(t);
+#else
+    PerfTotals_t r = Perf_GetTotals(t);
+#if PERF_REPORT_DETAIL == 0
+    printf("[PERF] #%lu mode=%d saved=%lu failed=%lu total=%lu ms accounting=%s\n",
+           (unsigned long)snap_id, CAPTURE_MODE, (unsigned long)t->storage_frames,
+           (unsigned long)t->storage_failures, (unsigned long)r.total_ms, r.valid ? "OK" : "INVALID");
+#else
+    char value[48];
+    printf("\n%s", table_border);
+    snprintf(value, sizeof(value), "#%lu / mode %d", (unsigned long)snap_id, CAPTURE_MODE);
+    Perf_Row("CAPTURE TIMING", value);
+    snprintf(value, sizeof(value), "%lu saved / %lu failed", (unsigned long)t->storage_frames,
+             (unsigned long)t->storage_failures);
+    Perf_Row("Images", value);
+    printf("%s", table_border);
+    Perf_Row("CAMERA PHASES (included in camera)", "ms / % of cycle");
+    Perf_PhaseRow(t, PERF_PHASE_CAM_INIT, PERF_PHASE_CAM_EXPO, "Sensor init/wake + pipe start", r.total_ms);
+    Perf_PhaseRow(t, PERF_PHASE_CAM_EXPO, PERF_PHASE_CAM_WARMUP, "Exposure/gain configuration", r.total_ms);
+    Perf_PhaseRow(t, PERF_PHASE_CAM_WARMUP, PERF_PHASE_CAM_SNAP, "Warmup", r.total_ms);
+    Perf_PhaseRow(t, PERF_PHASE_CAM_SNAP, PERF_PHASE_CAM_STOP, "Frame acquisition", r.total_ms);
+    Perf_PhaseRow(t, PERF_PHASE_CAM_STOP, PERF_PHASE_CAM_DEINIT, "Pipe stop/standby", r.total_ms);
+    Perf_PhaseRow(t, PERF_PHASE_CAM_DEINIT, PERF_PHASE_CAM_END, "Camera tail/diagnostics", r.total_ms);
+    printf("%s", table_border);
+    Perf_Row("GROUP TOTALS (add to cycle total)", "ms / % of cycle");
+    Perf_TimeRow("Camera", r.camera_ms, r.total_ms);
+    Perf_TimeRow("Storage wall (all images)", r.storage_ms, r.total_ms);
+    Perf_TimeRow("Other / IPC", r.other_ms, r.total_ms);
+    Perf_TimeRow("TOTAL CYCLE", r.total_ms, r.total_ms);
+    Perf_Row("Accounting", r.valid ? "OK" : "INVALID");
+    printf("%s", table_border);
+#if PERF_REPORT_DETAIL >= 2
+    Perf_Row("SD DETAIL (included in storage wall)", "ms / % of storage");
 #if PERF_TRACK_SD_WAIT_TIME
-    if (t->sd_batch_count > 0) {
-        float throughput = (SNAP_FRAME_SIZE / 1048576.0f) / (t->sd_total_write_ms / 1000.0f);
-        float effective_throughput = (SNAP_FRAME_SIZE / 1048576.0f) / (sd_ms / 1000.0f);
-
-        printf("║  SD CARD DETAIL                                          ║\n");
-        printf("║    Batches written:       %4" PRIu32 "                     ║\n", t->sd_batch_count);
-        printf("║    Blocks/batch:          %4" PRIu32 "  (%" PRIu32 " KB)         ║\n",
-               SD_BATCH_WRITE_BLOCKS,
-               SD_BATCH_WRITE_BLOCKS * (SD_BLOCK_SIZE / 1024));
-        printf("║    ┌───────────────────────────────────────────────────┐ ║\n");
-        printf("║    │ Wait (card ready):  %6" PRIu32 "ms  (%5.1f%%)  │ ║\n",
-               t->sd_total_wait_ms,
-               sd_ms > 0 ? (100.0f * t->sd_total_wait_ms) / sd_ms : 0);
-        printf("║    │ DMA transfer:       %6" PRIu32 "ms  (%5.1f%%)  │ ║\n",
-               t->sd_total_write_ms,
-               sd_ms > 0 ? (100.0f * t->sd_total_write_ms) / sd_ms : 0);
-        printf("║    │ Gap (inter-batch):  %6" PRIu32 "ms  (%5.1f%%)  │ ║\n",
-               t->sd_total_gap_ms,
-               sd_ms > 0 ? (100.0f * t->sd_total_gap_ms) / sd_ms : 0);
-        printf("║    └───────────────────────────────────────────────────┘ ║\n");
-        printf("║    Peak single batch:    %4" PRIu32 "ms                    ║\n", t->sd_max_batch_ms);
-        printf("║    Peak card-ready wait: %4" PRIu32 "ms                    ║\n", t->sd_max_wait_ms);
-        printf("║    DMA throughput:       %.2f MB/s                       ║\n", throughput);
-        printf("║    Effective throughput: %.2f MB/s (incl wait+gap)       ║\n", effective_throughput);
-        printf("╠──────────────────────────────────────────────────────────╣\n");
-    }
+    Perf_TimeRow("Recorded ready waits", t->sd_total_wait_ms, r.storage_ms);
+    Perf_TimeRow("Blocking HAL writes (not DMA)", t->sd_total_write_ms, r.storage_ms);
+    Perf_TimeRow("Inter-batch gaps", t->sd_total_gap_ms, r.storage_ms);
+    Perf_TimeRow("Remaining storage work", r.storage_other_ms, r.storage_ms);
+#else
+    Perf_Row("SD subphase tracking", "DISABLED");
 #endif
-
-    /* ---- Bottleneck Identification ---- */
-    Bottleneck_t bn = Perf_FindBottleneck(t, total_ms);
-    const char* bn_name = bottleneck_names[bn];
-
-    printf("║  BOTTLENECK ANALYSIS                                     ║\n");
-    printf("║  ⚡ Main bottleneck: %-34s║\n", bn_name);
-
-    /* Actionable suggestions */
-    printf("║  Suggestions:                                            ║\n");
-    switch (bn) {
-        case BOTTLENECK_SD_WAIT_READY:
-            printf("║    • Reduce SD_BATCH_WRITE_BLOCKS (32 instead of 64)    ║\n");
-            printf("║    • Try higher SD clock divisor                        ║\n");
-            printf("║    • Test with a faster SD card (U3/V30 rated)          ║\n");
-            printf("║    • Add CMD23 (SET_BLOCK_COUNT) for write prefetching  ║\n");
-            break;
-        case BOTTLENECK_SD_GAP_DELAY:
-            printf("║    • Reduce 20ms vTaskDelay between batches to 5ms      ║\n");
-            printf("║    • Use SD card write prefetching if supported         ║\n");
-            printf("║    • Pipeline: start next batch fill while card ready   ║\n");
-            break;
-        case BOTTLENECK_SD_DMA_WRITE:
-            printf("║    • DMA throughput limited by SDMMC clock + card speed ║\n");
-            printf("║    • Try larger batches (but risk CRC errors)           ║\n");
-            printf("║    • Check SD clock: current div=%" PRIu32 "                 ║\n",
-                   (uint32_t)hsd1.Init.ClockDiv);
-            break;
-        case BOTTLENECK_CAMERA_WARMUP:
-            printf("║    • Reduce SNAP_WARMUP_FRAMES (current: %d)            ║\n", SNAP_WARMUP_FRAMES);
-            printf("║    • Switch to CONTINUOUS mode (CAPTURE_MODE=1)         ║\n");
-            printf("║    • Each frame = ~%dms at %d FPS                       ║\n",
-                   1000 / SNAP_FPS, SNAP_FPS);
-            break;
-        case BOTTLENECK_CAMERA_INIT:
-            printf("║    • Camera init is I2C-bound (sensor config)           ║\n");
-            printf("║    • Switch to CONTINUOUS mode to init once at boot     ║\n");
-            printf("║    • Cache sensor config to skip redundant I2C writes   ║\n");
-            break;
-        default:
-            printf("║    • No single dominant bottleneck                      ║\n");
-            printf("║    • Consider CONTINUOUS mode for faster total cycle    ║\n");
-            break;
-    }
-    printf("╠──────────────────────────────────────────────────────────╣\n");
+    Perf_CountRow("HAL write calls", t->sd_batch_count);
+    Perf_CountRow("Successfully written blocks", t->sd_blocks_written);
+    snprintf(value, sizeof(value), "%lu blocks / %lu KiB", (unsigned long)SD_BATCH_WRITE_BLOCKS,
+             (unsigned long)(((uint64_t)SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE) / 1024U));
+    Perf_Row("Maximum per HAL call", value);
+#if PERF_TRACK_SD_WAIT_TIME
+    snprintf(value, sizeof(value), "%lu ms", (unsigned long)t->sd_max_batch_ms);
+    Perf_Row("Longest HAL write", value);
+    snprintf(value, sizeof(value), "%lu ms", (unsigned long)t->sd_max_wait_ms);
+    Perf_Row("Longest recorded ready wait", value);
+    if (r.valid) Perf_RateRow("HAL traffic rate (incl. retry blocks)",
+                             (uint64_t)t->sd_blocks_written * SD_BLOCK_SIZE, t->sd_total_write_ms);
 #endif
-
-    /* ---- Footer ---- */
-    float img_throughput = (SNAP_FRAME_SIZE / 1048576.0f) / (total_ms / 1000.0f);
-    printf("║  TOTAL: %6" PRIu32 "ms | Image: %.3f MB | Throughput: %.2f MB/s ║\n",
-           total_ms, SNAP_FRAME_SIZE / 1048576.0f, img_throughput);
-    printf("╚══════════════════════════════════════════════════════════╝\n");
-
-    return total_ms;
+    printf("%s", table_border);
+#endif
+    snprintf(value, sizeof(value), "%.3f MiB", (double)t->payload_bytes / 1048576.0);
+    Perf_Row("Saved image payload", value);
+    if (r.valid) {
+        Perf_RateRow("Storage payload rate", t->payload_bytes, r.storage_ms);
+        Perf_RateRow("Cycle payload rate", t->payload_bytes, r.total_ms);
+    }
+    const char *largest = "N/A";
+    if (!r.valid) largest = "UNKNOWN";
+    else if (r.total_ms) {
+        if (r.other_ms >= r.camera_ms && r.other_ms >= r.storage_ms) largest = "OTHER / IPC";
+        else largest = r.storage_ms >= r.camera_ms ? "STORAGE WALL" : "CAMERA";
+    }
+    Perf_Row("Largest group", largest);
+    printf("%s", table_border);
+    printf("Scope: request -> all storage completions. Later ToF refresh and this table excluded.\n");
+#if PERF_REPORT_DETAIL >= 2 && PERF_TRACK_SD_WAIT_TIME
+    printf("Storage remainder: checksum/copy/cache/logging/recovery/untracked waits.\n");
+#endif
+    if (!r.valid) printf("[PERF] Missing/overlapping markers or counters outside cycle; do not use rates.\n");
+#endif
+    return r.total_ms;
+#endif
 }
-
-/* ================================================================
-   Running Statistics
-   ================================================================ */
 
 void Perf_UpdateStats(PerfTimer_t *t)
 {
-#if PERF_STATS_WINDOW > 0
+    (void)t;
+#if PERF_STATS_WINDOW > 0 && PERF_PRINT_STATS && PERF_PRINT_SUMMARY
     uint32_t total_ms = Perf_TotalElapsed(t);
-    if (total_ms == 0) return;
+    if (total_ms == 0 || !Perf_GetTotals(t).valid) return;
 
     uint32_t cam_ms = 0, sd_ms = 0, other_ms = 0;
     Perf_SplitTotals(t, &cam_ms, &sd_ms, &other_ms);
@@ -377,4 +278,4 @@ void Perf_UpdateStats(PerfTimer_t *t)
    External reference to SD handle (for clock div display)
    ================================================================ */
 
-extern SD_HandleTypeDef hsd1;
+
