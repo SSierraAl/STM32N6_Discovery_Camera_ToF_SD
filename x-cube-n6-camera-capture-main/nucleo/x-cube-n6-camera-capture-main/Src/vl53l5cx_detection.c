@@ -106,9 +106,13 @@ int VL53L5CX_Init(I2C_HandleTypeDef *hi2c)
 
 void VL53L5CX_PowerUp(void)
 {
-    int i2cdevices = 0;
-    i2cdevices = VL53L5CX_ScanI2CBus();
 #if VL53L5CX_DUAL_SENSOR
+    /* Preserve the validated dual-sensor startup path exactly. The current
+       dual implementation still uses the scan result in its startup gate.
+       In single-sensor mode the scan was diagnostic-only, so skipping it
+       avoids probing unrelated/reserved addresses on shared I2C1 (camera,
+       ToF and RTC) without changing ToF power-up or detection behavior. */
+    int i2cdevices = VL53L5CX_ScanI2CBus();
     if(i2cdevices == 3) {
         GPIO_InitTypeDef GPIO_InitStruct = {0};
         __HAL_RCC_GPIOQ_CLK_ENABLE();
