@@ -42,27 +42,18 @@ static uint32_t g_sd_img_base_block;
 #define SD_BLOCK_SIZE       512
 static uint32_t g_debug_frame_count = 0;
 
+
+
 extern SD_HandleTypeDef hsd1;
 extern uint8_t sd_batch_buf[];
 PerfTimer_t g_perf_timer;
 
-/* Rebase a post-capture RTC sample onto the exact HAL tick at which a frame
-   completed. DS3231 resolution is one second, so capture_tick preserves the
-   sub-second ordering while unix_seconds remains second-resolution UTC. */
-static RTC_Stamp RTC_RebaseStampToFrame(RTC_Stamp anchor, uint32_t frame_tick)
+/* DS3231 gives UTC at one-second resolution. Mode 4 keeps that UTC anchor
+   and replaces only capture_tick with the exact completion tick of each frame. */
+static RTC_Stamp RTC_StampForFrame(RTC_Stamp stamp, uint32_t frame_tick)
 {
-    if (frame_tick == 0U) return anchor;
-
-    uint32_t age_ms = anchor.capture_tick - frame_tick;
-    anchor.capture_tick = frame_tick;
-
-    /* Normally Mode-4 kept frames are only tens of ms before the RTC read.
-       Handle longer/partial batches too without inventing sub-second UTC. */
-    if (anchor.valid && age_ms >= 1000U) {
-        uint32_t age_s = age_ms / 1000U;
-        if (anchor.unix_seconds >= age_s) anchor.unix_seconds -= age_s;
-    }
-    return anchor;
+    if (frame_tick != 0U) stamp.capture_tick = frame_tick;
+    return stamp;
 }
 
 /* ==================== IPC ==================== */
@@ -103,6 +94,7 @@ BaseType_t Capture_RequestSnapOnly(void)
 }
 
 /* ==================== SD AUTO-RECOVERY ==================== */
+/* NOTE: Not static — called from main.c (btn_thread) as well as storage_task. */
 int SD_Reinit(void)
 {
 #if PERF_DEBUG_LEVEL >= 1
@@ -139,14 +131,22 @@ int SD_Reinit(void)
         printf("[SD] Recovery OK! Next write from block %lu\n", (unsigned long)g_sd_img_base_block);
 #endif
         return 0;
-    }
+    } else {
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[SD] Recovery FAILED (HAL=0x%08lX)\n", (unsigned long)status);
+        printf("[SD] Recovery FAILED (HAL=0x%08lX)\n", (unsigned long)status);
 #endif
-    return -1;
+        return -1;
+    }
 }
 
 /* ==================== SD STORE ==================== */
+/** Wait for SD card to be ready for next write.
+    MUST use HAL_SD_GetCardState() (sends CMD13 to the card) to query the
+    ACTUAL card state. HAL_SD_GetState() only returns the HAL driver's
+    software flag, which is already READY after HAL_SD_WriteBlocks returns
+    (blocking call), even though the card's internal NAND flash is still
+    erasing/programming. Writing while the card is PROGRAMMING causes
+    STA=0x5000 (Data CRC timeout) errors. */
 static int SD_WaitForReady(void)
 {
     uint32_t wait_ms = 0;
@@ -164,8 +164,7 @@ static int SD_WaitForReady(void)
     return 0;
 }
 
-static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t w, uint32_t h,
-                            uint32_t pixel_format, uint32_t snap_id, RTC_Stamp stamp)
+static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t w, uint32_t h, uint32_t pixel_format, uint32_t snap_id, RTC_Stamp stamp)
 {
     uint32_t base = g_sd_img_base_block;
     uint32_t batch_blocks = SD_BATCH_WRITE_BLOCKS;
@@ -264,6 +263,16 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
 
         SCB_CleanDCache_by_Addr((uint32_t *)sd_batch_buf, blocks_in_batch * SD_BLOCK_SIZE);
 
+        /* HYBRID WAIT (adaptive + minimum gap):
+           1. Poll HAL_SD_GetCardState until the card reports TRANSFER ready
+              (may take 0-5000ms depending on card speed and internal flash state)
+           2. THEN wait 20ms for the card's internal NAND flash erase/program
+              cycles to complete. The CMD13 "ready" status is optimistic — the
+              card's host controller reports ready before the NAND flash is
+              actually done. Without this gap, STA=0x5000 (Data CRC timeout)
+              occurs on many SDXC cards when the next write arrives too early.
+           This combination: adaptive wait handles slow cards, fixed gap handles
+           the CMD13-vs-NAND timing mismatch that causes CRC errors. */
         t0 = HAL_GetTick();
         if (SD_WaitForReady() != 0) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -273,6 +282,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         }
         wait_ms = HAL_GetTick() - t0;
 
+        /* Minimum inter-batch recovery gap (configurable via SD_BATCH_RECOVERY_GAP_MS in app_config.h) */
         t0 = HAL_GetTick();
         vTaskDelay(pdMS_TO_TICKS(SD_BATCH_RECOVERY_GAP_MS));
         uint32_t gap_ms = HAL_GetTick() - t0;
@@ -281,8 +291,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         st = HAL_SD_WriteBlocks(&hsd1, sd_batch_buf, current_block, blocks_in_batch, HAL_MAX_DELAY);
         write_ms = HAL_GetTick() - t0;
 
-        Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, gap_ms,
-                            st == HAL_OK ? blocks_in_batch : 0);
+        Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, gap_ms, st == HAL_OK ? blocks_in_batch : 0);
         if (st != HAL_OK) {
 #if PERF_DEBUG_LEVEL >= 1
             printf("[SD] FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
@@ -297,8 +306,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
             uint32_t done_bytes = img_offset + blocks_in_batch * SD_BLOCK_SIZE;
             float pct = (100.0f * done_bytes) / img_size;
             printf("[SD] #%lu wait=%lums write=%lums gap=%lums | %.1f%%\n",
-                   (unsigned long)local_batch_count, (unsigned long)wait_ms,
-                   (unsigned long)write_ms, (unsigned long)gap_ms, pct);
+               (unsigned long)local_batch_count, (unsigned long)wait_ms, (unsigned long)write_ms, (unsigned long)gap_ms, pct);
         }
 #elif PERF_DEBUG_LEVEL >= 1
         if ((local_batch_count % 64) == 0) {
@@ -312,10 +320,10 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
     }
 
     g_sd_img_base_block = current_block;
+    /* Cycle completion belongs to Capture_RequestSnapshot, after all frames. */
 #if PERF_DEBUG_LEVEL >= 1
     printf("[SD] OK blocks %lu..%lu (%lu batches)\n",
-           (unsigned long)base, (unsigned long)(current_block - 1),
-           (unsigned long)local_batch_count);
+           (unsigned long)base, (unsigned long)(current_block - 1), (unsigned long)local_batch_count);
 #endif
     return 0;
 }
@@ -341,6 +349,7 @@ void sensor_task(void *arg)
     VL53L5CX_StartRanging();
 
 #if VL53L5CX_DUAL_SENSOR
+    /* Initialize external (guardian) sensor */
     if (VL53L5CX_External_Init() != 0) {
         printf("[WARN] External ToF init failed, continuing with primary only\n");
     } else {
@@ -349,13 +358,23 @@ void sensor_task(void *arg)
     }
 #endif
 
+    /* Learn primary sensor baseline (sensor is active from StartRanging above) */
     VL53L5CX_LearnBaseline();
 
 #if VL53L5CX_DUAL_SENSOR
+    /* Learn external sensor baseline */
     if (VL53L5CX_External_GetState() != EXTERNAL_STATE_IDLE) {
         VL53L5CX_External_LearnBaseline();
     }
+
+    /* NOW put primary sensor to sleep (both baselines are learned).
+       Use the startup variant: plain Primary_Sleep() is a no-op here because
+       the state machine still holds its initial SLEEP value while the sensor
+       is physically ranging. */
     VL53L5CX_Primary_SleepAtStartup();
+
+    /* Announce the selected sleep/wake baseline refresh strategy so
+       the console makes it obvious when the cycle refresh is off. */
 #if VL53L5CX_DUAL_BASELINE_MODE == VL53L5CX_BASELINE_NO_REFRESH
     printf("[PRIMARY] Baseline mode: NO_REFRESH - cycle refresh DISABLED\n");
 #elif VL53L5CX_DUAL_BASELINE_MODE == VL53L5CX_BASELINE_PRE_SLEEP
@@ -365,6 +384,7 @@ void sensor_task(void *arg)
 #endif
 #endif
 
+    /* Only fail if PRIMARY sensor baseline is not ready (external is optional) */
     if (!VL53L5CX_IsBaselineReady()) {
         g_sensor_state = SENSOR_STATE_STOPPED;
         printf("[ERROR] Primary ToF baseline not ready!\n");
@@ -381,14 +401,18 @@ void sensor_task(void *arg)
 #endif
 
     while (1) {
-        if (g_sensor_state == SENSOR_STATE_PAUSED) {
-            vTaskDelay(pdMS_TO_TICKS(50));
-            continue;
-        }
+        if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
 
 #if TEST_TOF_MODE
+        /* ---- Manual baseline refresh via USER button (PC13) ----
+           TEST build only: one press = one full refresh of the primary
+           baseline and, in dual mode, the external guardian baseline as
+           well (see VL53L5CX_RefreshBaseline_Manual()). Debounced and
+           edge-triggered — re-arms once the button is released. The RED
+           LED stays on for the whole refresh (a few seconds). */
         static uint8_t btn_refresh_armed = 1;
-        if (btn_refresh_armed && HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
+        if (btn_refresh_armed &&
+            HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
                 btn_refresh_armed = 0;
@@ -406,15 +430,30 @@ void sensor_task(void *arg)
 #endif
 
 #if VL53L5CX_DUAL_SENSOR
+        /* ---- DUAL SENSOR MODE ----
+           External sensor is always ON, monitoring for motion/signal drop.
+           Primary sensor (camera ToF) is in sleep mode by default.
+           When external detects something, it wakes the primary. */
+
+        /* Cooldown countdown, one step per loop iteration (same as single-sensor
+           mode). Without this, cooldown latches at 30 after the first capture
+           and blocks every subsequent trigger, even when raw data shows the
+           signal drop above threshold. */
         if (cooldown > 0) cooldown--;
 
+        /* Update external (guardian) sensor continuously */
         if (VL53L5CX_External_GetState() == EXTERNAL_STATE_MONITORING) {
             (void)VL53L5CX_External_Update();
         }
+
+        /* Check primary sensor wake timeout */
         VL53L5CX_Primary_CheckWakeTimeout();
 
+        /* When primary is active, also update it for detection */
         if (VL53L5CX_Primary_IsActive()) {
-            if (!VL53L5CX_Update()) vTaskDelay(pdMS_TO_TICKS(10));
+            if (!VL53L5CX_Update()) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
 
 #if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
             if (consecutive_window_active &&
@@ -426,17 +465,15 @@ void sensor_task(void *arg)
             }
 #endif
 
+            /* Check primary sensor detection while it's awake */
             if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
-                if (g_capture_busy) {
-                    vTaskDelay(pdMS_TO_TICKS(5));
-                    continue;
-                }
+                if (g_capture_busy) { vTaskDelay(pdMS_TO_TICKS(5)); continue; }
                 g_capture_busy = 1;
                 g_sensor_state = SENSOR_STATE_PAUSED;
                 VL53L5CX_DetectionResult_t res = VL53L5CX_GetResult();
 
 #if PERF_DEBUG_LEVEL >= 1
-                const char *trig_str;
+                const char* trig_str;
                 if (res.trigger_source == 1) trig_str = "SIGNAL";
                 else if (res.trigger_source == 2) trig_str = "MOTION";
                 else if (res.trigger_source == 3) trig_str = "SIGNAL+MOTION";
@@ -445,6 +482,7 @@ void sensor_task(void *arg)
 #endif
 
 #if TEST_TOF_MODE
+                /* === ON-SITE TEST MODE: no camera, no SD — RED LED only === */
                 printf(">>> TEST: %u zone(s) affected, %u valid\r\n",
                        (unsigned)res.affected_count, (unsigned)res.valid_measurements);
                 for (int a = 0; a < res.affected_count; a++)
@@ -470,7 +508,11 @@ void sensor_task(void *arg)
 #endif
 
 #if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
-                consecutive_captures = consecutive_window_active ? consecutive_captures + 1U : 1U;
+                if (consecutive_window_active) {
+                    consecutive_captures++;
+                } else {
+                    consecutive_captures = 1;
+                }
                 consecutive_window_active = 0;
                 printf("[ADAPT] Camera activation %u/%u\n",
                        (unsigned)consecutive_captures,
@@ -518,14 +560,15 @@ void sensor_task(void *arg)
                     printf("[SENSOR] Capture FAILED rc=%d\n", rc);
 #endif
                 }
-#endif
+#endif /* TEST_TOF_MODE */
             }
         }
 #else
-        if (!VL53L5CX_Update()) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-            continue;
-        }
+        /* ---- SINGLE SENSOR MODE ----
+           Standard VL53L5CX_Update() loop as before. */
+
+        /* Update primary sensor */
+        if (!VL53L5CX_Update()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
         g_debug_frame_count++;
         if (g_debug_frame_count >= 1) g_debug_frame_count = 0;
@@ -541,6 +584,7 @@ void sensor_task(void *arg)
         }
 #endif
 
+        /* Check primary sensor detection */
         if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
             if (g_capture_busy) continue;
             g_capture_busy = 1;
@@ -548,7 +592,7 @@ void sensor_task(void *arg)
             VL53L5CX_DetectionResult_t res = VL53L5CX_GetResult();
 
 #if PERF_DEBUG_LEVEL >= 1
-            const char *trig_str;
+            const char* trig_str;
             if (res.trigger_source == 1) trig_str = "SIGNAL";
             else if (res.trigger_source == 2) trig_str = "MOTION";
             else if (res.trigger_source == 3) trig_str = "SIGNAL+MOTION";
@@ -557,6 +601,10 @@ void sensor_task(void *arg)
 #endif
 
 #if TEST_TOF_MODE
+            /* === ON-SITE TEST MODE: no camera, no SD — RED LED only ===
+               Zone list shows WHERE in the FOV the target was, so sensor
+               position/orientation can be validated. The WS2812 strip is
+               not used in test mode. */
             printf(">>> TEST: %u zone(s) affected, %u valid\r\n",
                    (unsigned)res.affected_count, (unsigned)res.valid_measurements);
             for (int a = 0; a < res.affected_count; a++)
@@ -582,7 +630,11 @@ void sensor_task(void *arg)
 #endif
 
 #if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
-            consecutive_captures = consecutive_window_active ? consecutive_captures + 1U : 1U;
+            if (consecutive_window_active) {
+                consecutive_captures++;
+            } else {
+                consecutive_captures = 1;
+            }
             consecutive_window_active = 0;
             printf("[ADAPT] Camera activation %u/%u\n",
                    (unsigned)consecutive_captures,
@@ -630,13 +682,14 @@ void sensor_task(void *arg)
                 printf("[SENSOR] Capture FAILED rc=%d\n", rc);
 #endif
             }
-#endif
+#endif /* TEST_TOF_MODE */
         }
-#endif
+#endif /* VL53L5CX_DUAL_SENSOR */
 
         vTaskDelay(pdMS_TO_TICKS(5));
     }
 }
+
 
 /* ==================== CAMERA TASK ==================== */
 void camera_task(void *arg)
@@ -645,6 +698,10 @@ void camera_task(void *arg)
     extern volatile int system_ready;
     while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 
+    /* NOTE:
+       - CAPTURE_MODE==1: camera already initialized in main_thread (pipe running).
+         camera_task only services ISP in idle loop and handles snap commands.
+       - CAPTURE_MODE==2: camera_task starts the continuous pipe here. */
 #if CAPTURE_MODE == 2
     CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
 #endif
@@ -669,8 +726,7 @@ void camera_task(void *arg)
             PERF_MARK(g_perf_timer, CAM_END);
             if (rc == 0) {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[CAM] OK %lu ms\n",
-                       (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
+                printf("[CAM] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
 #endif
                 xSemaphoreGive(camera_ready_sem);
                 StorageCmd_t sc = {0};
@@ -691,6 +747,7 @@ void camera_task(void *arg)
             rc = CAM_ContinuousBatchSnap(batch_buf, frame_size);
             PERF_MARK(g_perf_timer, CAM_END);
 #else
+            /* CAPTURE_MODE == 4: Callback-Batch (continuous, NO stop/restart) */
             rc = CAM_CallbackBatchSnap(batch_buf, frame_size);
             PERF_MARK(g_perf_timer, CAM_END);
 #endif
@@ -704,13 +761,9 @@ void camera_task(void *arg)
 #endif
 #endif
                 xSemaphoreGive(camera_ready_sem);
-
-                /* One RTC transaction after the complete batch. In Mode 4 each
-                   frame then receives its own exact camera completion tick. */
-                RTC_Stamp rtc_anchor = RTC_CaptureStamp();
+                RTC_Stamp stamp = RTC_CaptureStamp();
                 uint32_t first_id = g_next_snap_id;
                 g_next_snap_id += (uint32_t)rc;
-
                 for (int f = 0; f < rc; f++) {
                     StorageCmd_t sc = {0};
                     sc.type = STORAGE_CMD_SAVE;
@@ -719,10 +772,9 @@ void camera_task(void *arg)
                     sc.width = SNAP_WIDTH; sc.height = SNAP_HEIGHT;
                     sc.pixel_format = 0; sc.snap_id = first_id + (uint32_t)f;
 #if CAPTURE_MODE == 4
-                    sc.stamp = RTC_RebaseStampToFrame(
-                        rtc_anchor, CAM_GetCallbackFrameTick((uint32_t)f));
+                    sc.stamp = RTC_StampForFrame(stamp, CAM_GetCallbackFrameTick((uint32_t)f));
 #else
-                    sc.stamp = rtc_anchor;
+                    sc.stamp = stamp;
 #endif
                     if (xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000)) != pdTRUE) {
 #if PERF_DEBUG_LEVEL >= 1
@@ -741,14 +793,11 @@ void camera_task(void *arg)
                 xSemaphoreGive(camera_ready_sem);
             }
 #else
-            rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE,
-                                        SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS,
-                                        SNAP_WARMUP_FRAMES);
+            rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS, SNAP_WARMUP_FRAMES);
             PERF_MARK(g_perf_timer, CAM_END);
             if (rc == 0) {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[CAM] OK %lu ms\n",
-                       (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
+                printf("[CAM] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
 #endif
                 xSemaphoreGive(camera_ready_sem);
                 StorageCmd_t sc = {0};
@@ -781,15 +830,17 @@ void storage_task(void *arg)
         if (cmd.type == STORAGE_CMD_SAVE) {
             PERF_MARK(g_perf_timer, STORAGE);
             uint32_t storage_start = HAL_GetTick();
-            int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height,
-                                      cmd.pixel_format, cmd.snap_id, cmd.stamp);
+            int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp);
             if (rc != 0) {
+                /* A single transient card hiccup (timeout / CRC) previously meant this
+                   image was silently lost. Reinit the peripheral and retry the SAME
+                   image ONCE before giving up, since g_sd_img_base_block was restored
+                   to the block this image was supposed to start at. */
 #if PERF_DEBUG_LEVEL >= 1
                 printf("[SD] FAIL — attempting recovery + retry...\n");
 #endif
                 if (SD_Reinit() == 0) {
-                    rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height,
-                                          cmd.pixel_format, cmd.snap_id, cmd.stamp);
+                    rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp);
                 }
             }
             if (rc != 0) g_last_storage_rc = rc;
@@ -806,8 +857,7 @@ void storage_task(void *arg)
 #endif
                 SD_Reinit();
             }
-            Perf_StorageComplete(&g_perf_timer, HAL_GetTick() - storage_start,
-                                 cmd.image_size, rc == 0);
+            Perf_StorageComplete(&g_perf_timer, HAL_GetTick() - storage_start, cmd.image_size, rc == 0);
             xSemaphoreGive(storage_done_sem);
         }
     }
@@ -835,15 +885,14 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
 #endif
 
 #if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
+    /* Wait for ALL BATCH_FRAMES to be stored before returning */
     int frames_to_wait = g_last_batch_frames > 0 ? g_last_batch_frames : BATCH_FRAMES;
     for (int i = 0; i < frames_to_wait; i++) {
         if (timeout_ms > 0) {
             uint32_t elapsed = HAL_GetTick() - t_start;
             if (elapsed >= timeout_ms) return -1;
             ticks = pdMS_TO_TICKS(timeout_ms - elapsed);
-        } else {
-            ticks = portMAX_DELAY;
-        }
+        } else { ticks = portMAX_DELAY; }
         if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE) return -1;
     }
 #else
@@ -851,12 +900,9 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
         uint32_t elapsed = HAL_GetTick() - t_start;
         if (elapsed >= timeout_ms) return -1;
         ticks = pdMS_TO_TICKS(timeout_ms - elapsed);
-    } else {
-        ticks = portMAX_DELAY;
-    }
+    } else { ticks = portMAX_DELAY; }
     if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE) return -1;
 #endif
-
     Perf_Stop(&g_perf_timer);
     if (g_last_storage_rc != 0) return -1;
     return 0;
