@@ -4,7 +4,8 @@
 #include "i2c_arbiter.h"
 #include <stdio.h>
 extern I2C_HandleTypeDef hi2c1;
-#define RTC_ADDRESS (0x57U << 1)
+#define RTC_ADDRESS_7BIT 0x68U
+#define RTC_ADDRESS      (RTC_ADDRESS_7BIT << 1)
 /* Saved while holding the bus mutex; printing happens after releasing it. */
 static unsigned last_hal;
 static uint32_t last_error;
@@ -27,12 +28,12 @@ static void print_failure(int rc) {
     if (rc==-3) {
         printf("[RTC] Shared I2C1 mutex unavailable; clock was not read\n");
     } else if (rc==-1) {
-        printf("[RTC] I2C transfer failed: 7-bit=0x68 HAL-address=0xD0 HAL=%u error=0x%08lX\n",
+        printf("[RTC] I2C transfer failed: expected DS3231 7-bit=0x68 HAL-address=0xD0 HAL=%u error=0x%08lX\n",
                last_hal,(unsigned long)last_error);
         if (last_error & HAL_I2C_ERROR_AF)
-            printf("[RTC] NACK: check RTC power/SDA/SCL and chip marking; setting time cannot fix this\n");
+            printf("[RTC] NACK at 0x68: do not substitute 0x57 (AT24C32 EEPROM) or 0x69 without identifying that device\n");
     } else if (rc==-2) {
-        printf("[RTC] Device responded: control=0x%02X status=0x%02X; %s\n",
+        printf("[RTC] Device responded at 0x68: control=0x%02X status=0x%02X; %s\n",
                (unsigned)last_control,(unsigned)last_status,
                (last_status&0x80)?"oscillator-stop flag set":
                (last_control&0x80)?"battery oscillator disabled":"invalid calendar");
@@ -92,6 +93,7 @@ RTC_Stamp RTC_CaptureStamp(void) {
 }
 void RTC_Init(void) {
 #if RTC_ENABLE
+    printf("[RTC] Expecting DS3231 at fixed 7-bit address 0x68 (HAL 0xD0); AT24C32 at 0x57 is not the clock\n");
 #if RTC_SET_ON_BOOT
     RTC_DateTime set;
     if (RTC_ParseUTC(RTC_SET_UTC,&set)) {
