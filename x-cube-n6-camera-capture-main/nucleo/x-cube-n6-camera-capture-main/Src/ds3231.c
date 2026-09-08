@@ -40,6 +40,45 @@ static void rtc_probe_address(uint8_t address_7bit) {
     printf("[RTC DIAG] 0x%02X: ACK %u/%u\n", address_7bit, ack_count, attempts);
 }
 
+static void rtc_direct_read_diagnostic(void) {
+    const unsigned attempts = 10;
+    unsigned ok_count = 0;
+
+    printf("[RTC READ] Direct 0x68 register read test: reg 0x00, 7 bytes, %u attempts, READ ONLY\n",
+           attempts);
+
+    for (unsigned i = 0; i < attempts; i++) {
+        uint8_t regs[7] = {0};
+        HAL_StatusTypeDef hal;
+        uint32_t err;
+
+        if (!lock()) {
+            printf("[RTC READ %02u] mutex unavailable\n", i + 1);
+            HAL_Delay(50);
+            continue;
+        }
+
+        hal = HAL_I2C_Mem_Read(&hi2c1, RTC_ADDRESS, 0x00U,
+                               I2C_MEMADD_SIZE_8BIT, regs, sizeof(regs), 20);
+        err = HAL_I2C_GetError(&hi2c1);
+        xSemaphoreGive(g_i2c1_mutex);
+
+        if (hal == HAL_OK) {
+            ok_count++;
+            printf("[RTC READ %02u] OK RAW=%02X %02X %02X %02X %02X %02X %02X\n",
+                   i + 1,
+                   regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6]);
+        } else {
+            printf("[RTC READ %02u] FAIL HAL=%u ERR=0x%08lX\n",
+                   i + 1, (unsigned)hal, (unsigned long)err);
+        }
+
+        HAL_Delay(50);
+    }
+
+    printf("[RTC READ] Summary: %u/%u direct reads succeeded\n", ok_count, attempts);
+}
+
 static void rtc_targeted_diagnostics(void) {
     printf("[RTC DIAG] Safe targeted test only; no writes and no ToF reconfiguration\n");
     printf("[RTC DIAG] I2C1 state before probes: %u\n", (unsigned)HAL_I2C_GetState(&hi2c1));
@@ -47,6 +86,7 @@ static void rtc_targeted_diagnostics(void) {
     printf("[RTC DIAG] 0x68 = DS3231 RTC address\n");
     rtc_probe_address(0x57U);
     rtc_probe_address(0x68U);
+    rtc_direct_read_diagnostic();
     printf("[RTC DIAG] I2C1 state after probes: %u\n", (unsigned)HAL_I2C_GetState(&hi2c1));
 }
 
