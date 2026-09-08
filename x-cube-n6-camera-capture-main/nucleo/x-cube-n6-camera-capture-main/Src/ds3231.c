@@ -26,54 +26,28 @@ static int write_reg(unsigned reg, uint8_t *data, unsigned n) {
 #if RTC_ENABLE
 static void rtc_probe_address(uint8_t address_7bit) {
     unsigned ack_count = 0;
+    const unsigned attempts = 10;
     if (!lock()) {
         printf("[RTC DIAG] 0x%02X: mutex unavailable\n", address_7bit);
         return;
     }
-    for (unsigned i = 0; i < 5; i++) {
+    for (unsigned i = 0; i < attempts; i++) {
         if (HAL_I2C_IsDeviceReady(&hi2c1, (uint16_t)(address_7bit << 1), 1, 10) == HAL_OK)
             ack_count++;
+        HAL_Delay(2);
     }
     xSemaphoreGive(g_i2c1_mutex);
-    printf("[RTC DIAG] 0x%02X: ACK %u/5\n", address_7bit, ack_count);
-}
-
-static void rtc_dump_candidate_69(void) {
-    uint8_t regs[16] = {0};
-    HAL_StatusTypeDef hal;
-    uint32_t err;
-
-    if (!lock()) {
-        printf("[RTC DIAG] 0x69 register dump: mutex unavailable\n");
-        return;
-    }
-    hal = HAL_I2C_Mem_Read(&hi2c1, (uint16_t)(0x69U << 1), 0x00U,
-                           I2C_MEMADD_SIZE_8BIT, regs, sizeof(regs), 20);
-    err = HAL_I2C_GetError(&hi2c1);
-    xSemaphoreGive(g_i2c1_mutex);
-
-    if (hal != HAL_OK) {
-        printf("[RTC DIAG] 0x69 register dump FAILED: HAL=%u error=0x%08lX\n",
-               (unsigned)hal, (unsigned long)err);
-        return;
-    }
-
-    printf("[RTC DIAG] 0x69 regs 00..0F (READ ONLY):\n");
-    for (unsigned i = 0; i < sizeof(regs); i++) {
-        printf("  %02X:%02X%s", i, regs[i], ((i & 7U) == 7U) ? "\n" : "  ");
-    }
-    printf("[RTC DIAG] If 0x69 were RTC-compatible: 00..06 should look like BCD time/date; 0E=control, 0F=status\n");
+    printf("[RTC DIAG] 0x%02X: ACK %u/%u\n", address_7bit, ack_count, attempts);
 }
 
 static void rtc_targeted_diagnostics(void) {
-    printf("[RTC DIAG] Targeted address test (5 probes each, no writes)\n");
-    printf("[RTC DIAG] 0x57 = expected AT24C32 EEPROM candidate\n");
-    printf("[RTC DIAG] 0x68 = expected DS3231 RTC address\n");
-    printf("[RTC DIAG] 0x69 = unexpected candidate seen in bus scan\n");
+    printf("[RTC DIAG] Safe targeted test only; no writes and no ToF reconfiguration\n");
+    printf("[RTC DIAG] I2C1 state before probes: %u\n", (unsigned)HAL_I2C_GetState(&hi2c1));
+    printf("[RTC DIAG] 0x57 = AT24C32 EEPROM candidate\n");
+    printf("[RTC DIAG] 0x68 = DS3231 RTC address\n");
     rtc_probe_address(0x57U);
     rtc_probe_address(0x68U);
-    rtc_probe_address(0x69U);
-    rtc_dump_candidate_69();
+    printf("[RTC DIAG] I2C1 state after probes: %u\n", (unsigned)HAL_I2C_GetState(&hi2c1));
 }
 
 static void print_failure(int rc) {
@@ -83,7 +57,7 @@ static void print_failure(int rc) {
         printf("[RTC] I2C transfer failed: expected DS3231 7-bit=0x68 HAL-address=0xD0 HAL=%u error=0x%08lX\n",
                last_hal,(unsigned long)last_error);
         if (last_error & HAL_I2C_ERROR_AF)
-            printf("[RTC] NACK at 0x68: do not substitute 0x57 (AT24C32 EEPROM) or 0x69 without identifying that device\n");
+            printf("[RTC] NACK at 0x68: keep RTC_SET_ON_BOOT=0 until 0x68 is stable\n");
     } else if (rc==-2) {
         printf("[RTC] Device responded at 0x68: control=0x%02X status=0x%02X; %s\n",
                (unsigned)last_control,(unsigned)last_status,
@@ -146,6 +120,8 @@ RTC_Stamp RTC_CaptureStamp(void) {
 void RTC_Init(void) {
 #if RTC_ENABLE
     printf("[RTC] Expecting DS3231 at fixed 7-bit address 0x68 (HAL 0xD0); AT24C32 at 0x57 is not the clock\n");
+    /* Short quiet interval only. I2C1 configuration and ToF behavior are unchanged. */
+    HAL_Delay(100);
     rtc_targeted_diagnostics();
 #if RTC_SET_ON_BOOT
     RTC_DateTime set;
