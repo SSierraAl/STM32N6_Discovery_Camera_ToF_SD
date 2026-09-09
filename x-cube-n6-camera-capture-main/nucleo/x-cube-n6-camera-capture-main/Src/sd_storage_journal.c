@@ -161,6 +161,13 @@ static int sdj_load(SD_HandleTypeDef *hsd)
 static int sdj_reserve_image(SD_HandleTypeDef *hsd, uint32_t image_blocks,
                              uint32_t *physical_start, uint32_t *snap_id)
 {
+    /* Re-read A/B for every new image. This is only 1 KB outside the camera
+       capture loop, and guarantees that a hot-swapped card or a journal edited
+       on the PC can never inherit the previous card's cached append pointer. If
+       the HAL handle is stale after removal, these reads fail before any photo
+       block is touched; the existing storage retry then performs SD_Reinit(). */
+    g_state_loaded = 0U;
+    g_state_slot = 0xFFU;
     if (sdj_load(hsd) != 0) return -1;
     if (image_blocks == 0U) return -1;
 
