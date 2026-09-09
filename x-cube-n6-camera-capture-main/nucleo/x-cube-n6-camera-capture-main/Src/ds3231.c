@@ -121,17 +121,35 @@ void RTC_Init(void)
 {
 #if RTC_ENABLE
 #if RTC_SET_ON_BOOT
-    RTC_DateTime set;
-    if (RTC_ParseUTC(RTC_SET_UTC, &set)) {
-        printf("[RTC] SET FAILED: RTC_SET_UTC must be YYYY-MM-DDTHH:MM:SSZ\n");
-    } else {
-        int set_rc = RTC_Set(&set);
-        if (set_rc) {
-            printf("[RTC] SET FAILED\n");
-            print_failure(set_rc);
+    /* Provision only while the DS3231 is invalid (typically OSF=1 on a new
+       module/battery). This avoids resetting a valid clock on every reboot. */
+    RTC_DateTime existing;
+    int existing_rc = RTC_Get(&existing);
+    if (existing_rc != 0) {
+        RTC_DateTime set;
+        if (RTC_ParseUTC(RTC_SET_UTC, &set)) {
+            printf("[RTC] SET FAILED: RTC_SET_UTC must be YYYY-MM-DDTHH:MM:SSZ\n");
         } else {
-            printf("[RTC] UTC provisioned; restore RTC_SET_ON_BOOT=0 and rebuild\n");
+            int set_rc = RTC_Set(&set);
+            if (set_rc) {
+                printf("[RTC] SET FAILED\n");
+                print_failure(set_rc);
+            } else {
+                HAL_Delay(2);
+                RTC_DateTime verify;
+                int verify_rc = RTC_Get(&verify);
+                if (verify_rc == 0) {
+                    char verify_text[21];
+                    RTC_FormatUTC(&verify, verify_text, sizeof(verify_text));
+                    printf("[RTC] Provisioning verified: %s\n", verify_text);
+                } else {
+                    printf("[RTC] SET FAILED verification\n");
+                    print_failure(verify_rc);
+                }
+            }
         }
+    } else {
+        printf("[RTC] Clock already valid; provisioning skipped\n");
     }
 #endif
 
