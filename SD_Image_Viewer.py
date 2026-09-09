@@ -9,12 +9,15 @@ Format the card externally first when needed. The button only erases STM32 RAW
 photos that belong to this application and resets the redundant append journal.
 """
 
+import ctypes
 import errno
+import msvcrt
 import os
 import struct
 import sys
 import time
 import zlib
+from ctypes import wintypes
 
 import _sd_image_viewer_core as core
 
@@ -70,6 +73,117 @@ def _journal_open(path, write=False, attempts=8, settle=0.35):
     raise last
 
 
+# Python's CRT descriptor path can read PhysicalDrive devices reliably but on
+# some Windows/card-reader combinations os.write() returns EBADF even when the
+# descriptor was opened O_RDWR as Administrator. Keep the familiar descriptor
+# for lifetime management, but perform RAW writes through the underlying native
+# Win32 HANDLE (SetFilePointerEx + WriteFile).
+_kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+_kernel32.SetFilePointerEx.argtypes = [
+    wintypes.HANDLE,
+    ctypes.c_longlong,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+]
+_kernel32.SetFilePointerEx.restype = wintypes.BOOL
+_kernel32.WriteFile.argtypes = [
+    wintypes.HANDLE,
+    ctypes.c_void_p,
+    wintypes.DWORD,
+    ctypes.POINTER(wintypes.DWORD),
+    ctypes.c_void_p,
+]
+_kernel32.WriteFile.restype = wintypes.BOOL
+_kernel32.FlushFileBuffers.argtypes = [wintypes.HANDLE]
+_kernel32.FlushFileBuffers.restype = wintypes.BOOL
+_FILE_BEGIN = 0
+
+
+def _raise_win32(stage):
+    code = ctypes.get_last_error()
+    text = ctypes.FormatError(code).strip() if code else "unknown Win32 error"
+    raise OSError(code, f"{stage}: Win32 error {code}: {text}")
+
+
+def _native_handle(fd):
+    try:
+        handle_value = msvcrt.get_osfhandle(fd)
+    except OSError as exc:
+        raise OSError(exc.errno or errno.EBADF,
+                      f"get_osfhandle failed for raw SD descriptor: {exc}") from exc
+    if handle_value == -1:
+        raise OSError(errno.EBADF, "get_osfhandle returned INVALID_HANDLE_VALUE")
+    return wintypes.HANDLE(handle_value)
+
+
+def _win_write_fd(fd, absolute_offset, data):
+    """Write bytes to a raw PhysicalDrive through the native Win32 HANDLE."""
+    if not data:
+        return
+    handle = _native_handle(fd)
+    ctypes.set_last_error(0)
+    if not _kernel32.SetFilePointerEx(
+        handle, ctypes.c_longlong(int(absolute_offset)), None, _FILE_BEGIN
+    ):
+        _raise_win32(f"SetFilePointerEx(offset={int(absolute_offset)})")
+
+    buf = ctypes.create_string_buffer(data, len(data))
+    written = wintypes.DWORD(0)
+    ctypes.set_last_error(0)
+    if not _kernel32.WriteFile(
+        handle,
+        ctypes.cast(buf, ctypes.c_void_p),
+        len(data),
+        ctypes.byref(written),
+        None,
+    ):
+        _raise_win32(f"WriteFile(offset={int(absolute_offset)}, bytes={len(data)})")
+    if written.value != len(data):
+        raise OSError(
+            f"short raw Win32 write at offset {int(absolute_offset)}: "
+            f"{written.value}/{len(data)} bytes"
+        )
+
+
+def _win_flush_fd(fd):
+    handle = _native_handle(fd)
+    ctypes.set_last_error(0)
+    if not _kernel32.FlushFileBuffers(handle):
+        _raise_win32("FlushFileBuffers")
+
+
+def _win_zero_fill(path, start_blk, num_blks):
+    """Erase an STM32 image range using native Win32 raw-device writes."""
+    start_blk = int(start_blk)
+    num_blks = int(num_blks)
+    if num_blks <= 0:
+        return
+
+    fd = None
+    try:
+        fd = _journal_open(path, True)
+        base_offset = start_blk * core.BLOCK_SIZE
+        total = num_blks * core.BLOCK_SIZE
+        chunk = b"\x00" * (64 * 1024)
+        done = 0
+        while done < total:
+            n = min(len(chunk), total - done)
+            _win_write_fd(fd, base_offset + done, chunk[:n])
+            done += n
+        _win_flush_fd(fd)
+    except OSError as exc:
+        raise OSError(
+            getattr(exc, "errno", 0) or 0,
+            f"raw photo erase failed at block {start_blk} ({num_blks} blocks): {exc}",
+        ) from exc
+    finally:
+        _safe_close_fd(fd)
+
+
+# Delete Selected and Prepare/Reset SD now use the same native Win32 writer.
+core.zero_fill = _win_zero_fill
+
+
 def _read_block_fd(fd, block):
     os.lseek(fd, int(block) * core.BLOCK_SIZE, os.SEEK_SET)
     return os.read(fd, core.BLOCK_SIZE)
@@ -78,14 +192,8 @@ def _read_block_fd(fd, block):
 def _write_block_fd(fd, block, data):
     if len(data) != core.BLOCK_SIZE:
         raise ValueError("journal write must be exactly one 512-byte block")
-    os.lseek(fd, int(block) * core.BLOCK_SIZE, os.SEEK_SET)
-    written = os.write(fd, data)
-    if written != core.BLOCK_SIZE:
-        raise OSError(f"short journal write: {written}/{core.BLOCK_SIZE} bytes")
-    try:
-        os.fsync(fd)
-    except OSError:
-        pass
+    _win_write_fd(fd, int(block) * core.BLOCK_SIZE, data)
+    _win_flush_fd(fd)
 
 
 def _journal_crc(payload):
