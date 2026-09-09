@@ -9,7 +9,8 @@ Format SD. This is required by Windows for raw writes inside a mounted volume.
 Format SD does NOT format the filesystem:
   - first run Scan Snapshots,
   - delete every scanned STM32 photo,
-  - clear journal blocks 3070/3071.
+  - clear journal blocks 3070/3071,
+  - verify journal A/B are really empty.
 """
 
 import ctypes
@@ -210,6 +211,22 @@ class LockedEraseThread(core.QThread):
                     )
                     core.zero_fill(self.drive, JOURNAL_BLOCK_A, 2)
 
+            if self.clear_journal:
+                self.progress.emit("Verifying journal A/B are empty ...")
+                raw = core.rbulk(self.drive, JOURNAL_BLOCK_A, 2)
+                expected = 2 * core.BLOCK_SIZE
+                if raw is None or len(raw) < expected:
+                    raise OSError(
+                        f"journal verification read failed: got "
+                        f"{0 if raw is None else len(raw)}/{expected} bytes"
+                    )
+                if any(raw[:expected]):
+                    raise OSError(
+                        f"journal reset verification failed: blocks "
+                        f"{JOURNAL_BLOCK_A}/{JOURNAL_BLOCK_B} are not fully zero"
+                    )
+                self.progress.emit("Journal A/B verified empty.")
+
             self.finished_ok.emit(total)
         except Exception as exc:
             self.failed.emit(str(exc))
@@ -230,8 +247,8 @@ class SDVisualizer(core.SDVisualizer):
         self.btn_format = core.QPushButton("⚠ Format SD")
         self.btn_format.setObjectName("DangerButton")
         self.btn_format.setToolTip(
-            "Delete all photos found by the last Scan and clear journal "
-            "blocks 3070/3071. Does NOT format FAT32."
+            "Delete all photos found by the last Scan, clear journal "
+            "blocks 3070/3071, and verify they are empty. Does NOT format FAT32."
         )
         self.btn_format.clicked.connect(self.format_card)
         toolbar_layout.insertWidget(2, self.btn_format)
@@ -327,8 +344,8 @@ class SDVisualizer(core.SDVisualizer):
             "question",
             "⚠ RESET STM32 SD STORAGE",
             f"PhysicalDrive{drive_num}\n\n"
-            f"Delete ALL {len(self.snapshots)} scanned STM32 photo(s) and "
-            "clear journal blocks 3070/3071?\n\n"
+            f"Delete ALL {len(self.snapshots)} scanned STM32 photo(s), clear "
+            "journal blocks 3070/3071, and verify the journal reset?\n\n"
             "The Windows filesystem is NOT formatted.",
         )
         if reply != core.QMessageBox.StandardButton.Yes:
@@ -353,14 +370,15 @@ class SDVisualizer(core.SDVisualizer):
         self.snapshots.clear()
         self.current_snap = None
         self.statusBar().showMessage(
-            f"SD reset complete: {count} photo(s) deleted; journal A/B cleared."
+            f"SD reset complete: {count} photo(s) deleted; journal A/B verified empty."
         )
         core.dialog(
             self,
             "info",
             "SD ready",
             f"Deleted {count} STM32 photo(s).\n"
-            f"Journal blocks {JOURNAL_BLOCK_A}/{JOURNAL_BLOCK_B} are empty.",
+            f"Journal blocks {JOURNAL_BLOCK_A}/{JOURNAL_BLOCK_B} were cleared "
+            "and verified empty.",
         )
 
     @core.Slot(str)
