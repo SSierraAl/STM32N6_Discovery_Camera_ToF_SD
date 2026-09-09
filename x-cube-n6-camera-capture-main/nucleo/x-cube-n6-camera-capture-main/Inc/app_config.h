@@ -134,7 +134,7 @@
     less light. Select it from measured motion and field of view.
     CMW_CAMERA_GetExposure returns a cache, not physical register readback. */
 #ifndef CAM_EXPOSURE_VALUE
-#define CAM_EXPOSURE_VALUE   10000 //10ms
+#define CAM_EXPOSURE_VALUE   15000 //10ms
 #endif
 
 /** Manual sensor gain in millidecibels, quantized down in 300 mdB steps.
@@ -244,7 +244,7 @@
      
      Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
      With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
-#define CALLBACK_WARMUP_FRAMES   8 //11 is working    /* Frames to discard after wake (callback-based) */
+#define CALLBACK_WARMUP_FRAMES   5 //11 is working limit 2    /* Frames to discard after wake (callback-based) */
 #define CALLBACK_FRAMES          4   /* Number of frames to capture per trigger */
 #define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
 
@@ -432,7 +432,7 @@
        at different speeds, calibrating detection thresholds.
        NOTE: requires CAPTURE_MODE != 0 (ToF is disabled in mode 0).
    0 = PRODUCTION: normal capture + SD save on detection. */
-#define TEST_TOF_MODE                0
+#define TEST_TOF_MODE                1
 
 
 /** RED LED indication duration in TEST_TOF_MODE (ms). */
@@ -580,8 +580,8 @@
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
    DEBUG MODE 2: ALLPARAM - full per-zone parameters every N frames (datalogger.py)
    Both can be enabled simultaneously (bandwidth trade-off). */
-#define VL53L5CX_DET_DEBUG_ZFRAME       0  //1 for debug and pthon itnerface
-#define VL53L5CX_DET_DEBUG_ZFRAME_INT   0  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
+#define VL53L5CX_DET_DEBUG_ZFRAME       1  //1 for debug and pthon itnerface
+#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 
