@@ -280,4 +280,16 @@ void Perf_UpdateStats(PerfTimer_t *t)
    External reference to SD handle (for clock div display)
    ================================================================ */
 
-
+/*
+ * CubeIDE build bridge for the raw-SD append journal.
+ *
+ * This project links source files individually. Src/sd_storage_journal.c is
+ * present in the repository but is not currently a linkedResource in the
+ * CubeIDE .project, so its SDJ_* symbols would otherwise be missing at link
+ * time. perf_debug.c is linked in every current build configuration and does
+ * not include raw_image.h, making it a safe build-only host for the journal.
+ *
+ * Keep this include at the very end. TEST_TOF_MODE / ZFRAME behavior is not
+ * changed; in test mode the sensor task still skips camera and SD at runtime.
+ */
+#include "sd_storage_journal.c"
