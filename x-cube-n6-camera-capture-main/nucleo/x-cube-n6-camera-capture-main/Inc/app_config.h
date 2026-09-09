@@ -76,7 +76,7 @@
 #define RTC_SET_ON_BOOT 0
 #endif
 #ifndef RTC_SET_UTC
-#define RTC_SET_UTC "SET-UTC-BEFORE-ENABLING"
+#define RTC_SET_UTC "2026-09-09T10:46:23Z"
 #endif
 
 /** Snapshot resolution (auto-calculated from CAM_BINNING).
@@ -102,7 +102,7 @@
      REDUCED FROM 11 → 8: Saves ~133ms per capture (33ms saved per frame).
      CRITICAL: Each warmup frame = ~33ms of delay where the insect can move!
      If images have green tint on first few captures, increase this value. */
-#define SNAP_WARMUP_FRAMES    11
+#define SNAP_WARMUP_FRAMES    8  //11 is working
 
 /** Maximum time to wait for warmup + capture frames (milliseconds). */
 #define SNAP_TIMEOUT_MS      200
@@ -134,7 +134,7 @@
     less light. Select it from measured motion and field of view.
     CMW_CAMERA_GetExposure returns a cache, not physical register readback. */
 #ifndef CAM_EXPOSURE_VALUE
-#define CAM_EXPOSURE_VALUE   5000
+#define CAM_EXPOSURE_VALUE   10000 //10ms
 #endif
 
 /** Manual sensor gain in millidecibels, quantized down in 300 mdB steps.
@@ -146,14 +146,6 @@
 #define CAM_GAIN_VALUE       12000
 #endif
 
-#if CAPTURE_MODE == 4
-#if (CAM_EXPOSURE_MODE != 0) && (CAM_EXPOSURE_MODE != 1)
-#error "Mode 4 supports AUTO (0) or MANUAL (1); IMX335 FREEZE is unsupported"
-#endif
-#if (CAM_EXPOSURE_MODE == 1) && ((CAM_EXPOSURE_VALUE < 8) || (CAM_EXPOSURE_VALUE > 33266) || (CAM_GAIN_VALUE < 0) || (CAM_GAIN_VALUE > 72000))
-#error "IMX335 manual exposure/gain outside the supported tuning range"
-#endif
-#endif
 
 /** Brightness adjustment.
     Range: depends on sensor (typically -128 to +127).
@@ -252,7 +244,7 @@
      
      Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
      With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
-#define CALLBACK_WARMUP_FRAMES   11     /* Frames to discard after wake (callback-based) */
+#define CALLBACK_WARMUP_FRAMES   8 //11 is working    /* Frames to discard after wake (callback-based) */
 #define CALLBACK_FRAMES          4   /* Number of frames to capture per trigger */
 #define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
 
@@ -333,7 +325,7 @@
     For bottleneck analysis, use level 2 or 3.
     For production deployment, use level 0. */
 #ifndef PERF_DEBUG_LEVEL
-#define PERF_DEBUG_LEVEL         2
+#define PERF_DEBUG_LEVEL         2 //2 to see the table of perofrmance
 #endif
 
 /** When PERF_DEBUG_LEVEL >= 2, print SD batch timing every N batches.
@@ -407,7 +399,7 @@
     brighter here has negligible power/thermal impact. Brightness is applied as
     RGB value scaling (not time-based PWM), so it stays perfectly in sync with
     even very short camera exposures - safe to raise further if still too dark. */
-#define WS2812_ILLUMINATION_BRIGHTNESS  100
+#define WS2812_ILLUMINATION_BRIGHTNESS  90
 
 /** Illumination color new update 0xGGRRBB!!!
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
