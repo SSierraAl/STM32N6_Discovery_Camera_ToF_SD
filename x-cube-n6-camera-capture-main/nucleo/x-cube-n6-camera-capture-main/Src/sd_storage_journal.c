@@ -7,6 +7,11 @@
  *
  * Safety policy: reserve first, write second. A power loss can leave unused or
  * partially-written blocks, but an older image is never intentionally reused.
+ *
+ * Journal recovery policy:
+ *   - if A or B is valid, continue from the newest valid record;
+ *   - if neither is valid (new/cleared/corrupt card), create a fresh journal
+ *     at SD_SNAP_BASE_BLOCK / image ID 0 instead of blocking image capture.
  */
 #include "stm32n6xx_hal.h"
 #include "app_config.h"
@@ -41,7 +46,6 @@ _Static_assert(sizeof(SDJ_Record) == 28U, "Unexpected SD journal layout");
 static SDJ_Record g_state;
 static uint8_t g_state_loaded = 0U;
 static uint8_t g_state_slot = 0xFFU; /* 0=A, 1=B */
-static uint8_t g_missing_reported = 0U;
 
 /* Current logical->physical translation, valid only while one image is being
    emitted by the existing batched writer. */
@@ -123,6 +127,51 @@ static int sdj_write_record(SD_HandleTypeDef *hsd, uint32_t block, SDJ_Record *r
     return 0;
 }
 
+static int sdj_create_fresh(SD_HandleTypeDef *hsd)
+{
+    SDJ_Record fresh = {
+        .magic = SDJ_MAGIC,
+        .version = SDJ_VERSION,
+        .sequence = 1U,
+        .next_block = SD_SNAP_BASE_BLOCK,
+        .next_snap_id = 0U,
+        .snap_base = SD_SNAP_BASE_BLOCK,
+        .crc32 = 0U,
+    };
+
+    /* One valid slot is enough to continue. Prefer recreating both so the next
+       power interruption again has A/B redundancy. */
+    if (sdj_write_record(hsd, SDJ_BLOCK_A, &fresh) != 0) {
+        fresh.sequence = 1U;
+        if (sdj_write_record(hsd, SDJ_BLOCK_B, &fresh) != 0) {
+            printf("[SD META] Fresh journal creation FAILED on both A/B slots\n");
+            return -1;
+        }
+        g_state = fresh;
+        g_state_slot = 1U;
+        g_state_loaded = 1U;
+        printf("[SD META] Fresh journal created on B: next_block=%lu next_id=0\n",
+               (unsigned long)SD_SNAP_BASE_BLOCK);
+        return 0;
+    }
+
+    g_state = fresh;
+    g_state_slot = 0U;
+    g_state_loaded = 1U;
+
+    fresh.sequence = 2U;
+    if (sdj_write_record(hsd, SDJ_BLOCK_B, &fresh) == 0) {
+        g_state = fresh;
+        g_state_slot = 1U;
+    } else {
+        printf("[SD META] Warning: journal B refresh failed; continuing with valid A\n");
+    }
+
+    printf("[SD META] Fresh journal: next_block=%lu next_id=0\n",
+           (unsigned long)SD_SNAP_BASE_BLOCK);
+    return 0;
+}
+
 static int sdj_load(SD_HandleTypeDef *hsd)
 {
     if (g_state_loaded) return 0;
@@ -132,14 +181,9 @@ static int sdj_load(SD_HandleTypeDef *hsd)
     int vb = (sdj_read_record(hsd, SDJ_BLOCK_B, &b) == 0) && sdj_record_valid(&b, hsd);
 
     if (!va && !vb) {
-        if (!g_missing_reported) {
-            printf("[SD META] No valid append journal at blocks %lu/%lu.\n",
-                   (unsigned long)SDJ_BLOCK_A, (unsigned long)SDJ_BLOCK_B);
-            printf("[SD META] Image writes BLOCKED to avoid overwriting legacy photos. "
-                   "Initialize/repair this card with SD_Storage_Journal.py.\n");
-            g_missing_reported = 1U;
-        }
-        return -1;
+        printf("[SD META] No valid A/B journal; starting fresh at block %lu / ID 0\n",
+               (unsigned long)SD_SNAP_BASE_BLOCK);
+        return sdj_create_fresh(hsd);
     }
 
     if (va && (!vb || (int32_t)(a.sequence - b.sequence) > 0)) {
@@ -150,7 +194,6 @@ static int sdj_load(SD_HandleTypeDef *hsd)
         g_state_slot = 1U;
     }
     g_state_loaded = 1U;
-    g_missing_reported = 0U;
     printf("[SD META] Loaded seq=%lu next_block=%lu next_id=%lu\n",
            (unsigned long)g_state.sequence,
            (unsigned long)g_state.next_block,
@@ -230,7 +273,6 @@ HAL_StatusTypeDef SDJ_HAL_SD_Init(SD_HandleTypeDef *hsd)
        card, so never carry an old card's mapping across it. */
     g_state_loaded = 0U;
     g_state_slot = 0xFFU;
-    g_missing_reported = 0U;
     g_map_active = 0U;
 
     /* Boot already uses ClockDiv=4. Force the same validated value for the
