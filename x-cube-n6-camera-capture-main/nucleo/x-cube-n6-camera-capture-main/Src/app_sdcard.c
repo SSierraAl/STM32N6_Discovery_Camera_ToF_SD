@@ -233,3 +233,16 @@ void APP_SDCard_ResetStats(void)
 /* ============================================================================
  * End of File
  * ========================================================================== */
+
+/*
+ * CubeIDE build bridge for the raw-SD append journal.
+ *
+ * This STM32CubeIDE project links Src/*.c files individually in .project
+ * rather than linking the whole Src directory. sd_storage_journal.c therefore
+ * must be pulled into an already-linked translation unit or its SDJ_* symbols
+ * are absent at link time. Keep this include at the end so the journal's
+ * internal HAL macro handling cannot affect the legacy FileX helpers above.
+ *
+ * This is build-only integration: TEST_TOF_MODE / ZFRAME behavior is unchanged.
+ */
+#include "sd_storage_journal.c"
