@@ -148,12 +148,12 @@ uint8_t VL53L5CX_Reset_Sensor(VL53L5CX_Platform *p_platform)
 
 	/* Set pin LPN to LOW */
 	/* Set pin AVDD to LOW */
-	/* Set pin VDDIO  to LOW */
+	/* Set pin VDDIO to LOW */
 	VL53L5CX_WaitMs(p_platform, 100);
 
 	/* Set pin LPN of to HIGH */
 	/* Set pin AVDD of to HIGH */
-	/* Set pin VDDIO  to HIGH */
+	/* Set pin VDDIO of  to HIGH */
 	VL53L5CX_WaitMs(p_platform, 100);
   
 	return 0;
