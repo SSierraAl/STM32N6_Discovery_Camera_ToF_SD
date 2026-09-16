@@ -28,6 +28,11 @@
 #include "semphr.h"
 #include "perf_debug.h"
 
+/* This existing task header is an explicit dependency of app_thread.c.
+   Bumping this token forces CubeIDE to rebuild the sensor task so the
+   Src/vl53l5cx_detection.h fast-noise wrapper is picked up after checkout. */
+#define TOF_FAST_NOISE_FILTER_WIRING_REV  1
+
 /* ================================================================
    SENSOR STATES
    ================================================================ */
