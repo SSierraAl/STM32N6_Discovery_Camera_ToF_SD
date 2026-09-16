@@ -244,7 +244,7 @@
      
      Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
      With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
-#define CALLBACK_WARMUP_FRAMES   5 //11 is working limit 2    /* Frames to discard after wake (callback-based) */
+#define CALLBACK_WARMUP_FRAMES   8 //11 is working limit 2    /* Frames to discard after wake (callback-based) */
 #define CALLBACK_FRAMES          4   /* Number of frames to capture per trigger */
 #define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
 
@@ -325,7 +325,7 @@
     For bottleneck analysis, use level 2 or 3.
     For production deployment, use level 0. */
 #ifndef PERF_DEBUG_LEVEL
-#define PERF_DEBUG_LEVEL         2 //2 to see the table of perofrmance
+#define PERF_DEBUG_LEVEL         0 //2 to see the table of perofrmance
 #endif
 
 /** When PERF_DEBUG_LEVEL >= 2, print SD batch timing every N batches.
@@ -336,19 +336,19 @@
     When enabled, the final summary will show total time spent waiting
     for the card to be ready vs blocking HAL write time. */
 #ifndef PERF_TRACK_SD_WAIT_TIME
-#define PERF_TRACK_SD_WAIT_TIME    1
+#define PERF_TRACK_SD_WAIT_TIME    0 //
 #endif
 
 /** Print a performance summary after each complete capture cycle.
     Shows: phase breakdown, bottleneck identification, throughput MB/s. */
 #ifndef PERF_PRINT_SUMMARY
-#define PERF_PRINT_SUMMARY         1  /* TABLE ON=1, OFF=0 */
+#define PERF_PRINT_SUMMARY         0  /* TABLE ON=1, OFF=0 */
 #endif
 
 /** TABLE CONTENT: 0=one line, 1=basic table, 2=full table with SD details.
     Independent of PERF_DEBUG_LEVEL (application log verbosity). */
 #ifndef PERF_REPORT_DETAIL
-#define PERF_REPORT_DETAIL         2
+#define PERF_REPORT_DETAIL         0 //2
 #endif
 #if PERF_REPORT_DETAIL < 0 || PERF_REPORT_DETAIL > 2
 #error "PERF_REPORT_DETAIL must be 0, 1 or 2"
@@ -399,7 +399,7 @@
     brighter here has negligible power/thermal impact. Brightness is applied as
     RGB value scaling (not time-based PWM), so it stays perfectly in sync with
     even very short camera exposures - safe to raise further if still too dark. */
-#define WS2812_ILLUMINATION_BRIGHTNESS  90
+#define WS2812_ILLUMINATION_BRIGHTNESS  100
 
 /** Illumination color new update 0xGGRRBB!!!
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
@@ -432,7 +432,7 @@
        at different speeds, calibrating detection thresholds.
        NOTE: requires CAPTURE_MODE != 0 (ToF is disabled in mode 0).
    0 = PRODUCTION: normal capture + SD save on detection. */
-#define TEST_TOF_MODE                1
+#define TEST_TOF_MODE                0
 
 
 /** RED LED indication duration in TEST_TOF_MODE (ms). */
@@ -536,8 +536,8 @@
 #define VL53L5CX_DET_MOTION_THRESH      200     /* 8x8: higher motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
 #else
-#define VL53L5CX_DET_THRESHOLD_PCT      4       /* 4x4: lower signal drop threshold */
-#define VL53L5CX_DET_MOTION_THRESH      60      /* 4x4: lower motion threshold */
+#define VL53L5CX_DET_THRESHOLD_PCT      3       /* 4x4: lower signal drop threshold */
+#define VL53L5CX_DET_MOTION_THRESH      40      /* 4x4: lower motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 1       /* 4x4: single zone triggers */
 #endif
 
@@ -580,8 +580,8 @@
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
    DEBUG MODE 2: ALLPARAM - full per-zone parameters every N frames (datalogger.py)
    Both can be enabled simultaneously (bandwidth trade-off). */
-#define VL53L5CX_DET_DEBUG_ZFRAME       1  //1 for debug and pthon itnerface
-#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
+#define VL53L5CX_DET_DEBUG_ZFRAME       0  //1 for debug and python interface
+#define VL53L5CX_DET_DEBUG_ZFRAME_INT   0  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 
