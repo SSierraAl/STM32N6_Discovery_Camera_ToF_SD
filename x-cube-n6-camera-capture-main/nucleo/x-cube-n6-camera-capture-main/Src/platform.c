@@ -21,7 +21,7 @@
 *
 ********************************************************************************
 *
-* Alternatively, the VL53L5CX Ultra Lite Driver may be distributed under the
+* Alternatively the VL53L5CX Ultra Lite Driver may be distributed under the
 * terms of 'BSD 3-clause "New" or "Revised" License', in which case the
 * following provisions apply instead of the ones mentioned above :
 *
@@ -188,23 +188,49 @@ uint8_t VL53L5CX_WaitMs(
 
 #if !VL53L5CX_DUAL_SENSOR && !TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4)
 
-#define TOF_REARM_FRAMES                 10U
-#define TOF_FAST_MIN_VALID_ZONES        12U
-#define TOF_FAST_STRONG_SHIFT_MM         2U
-#define TOF_FAST_MAX_MAD_MM              1U
-#define TOF_FAST_MIN_COHERENCE_PCT      90U
+#define TOF_REARM_FRAMES                  5U
+#define TOF_HISTORY_FRAMES                3U
+#define TOF_FAST_MIN_VALID_ZONES         12U
+#define TOF_FAST_STRONG_SHIFT_MM          2U
+#define TOF_FAST_MAX_MAD_MM               1U
+#define TOF_FAST_MIN_COHERENCE_PCT       90U
 #define TOF_NEIGHBOR_SUPPORT_PCT          1U
+#define TOF_LOCAL_EVID_SIGNAL_PCT         2U
+#define TOF_LOCAL_EVID_DISTANCE_MM        2U
+
+#define TOF_DEC_SIGNAL_ACCEPT             1U
+#define TOF_DEC_BOTH_ACCEPT               2U
+#define TOF_DEC_MOTION_MULTI_ACCEPT       3U
+#define TOF_DEC_MOTION_LOCAL_ACCEPT       4U
+#define TOF_DEC_MOTION_PENDING            5U
+#define TOF_DEC_MOTION_CONFIRMED          6U
+#define TOF_DEC_VIBRATION_REJECT          7U
+#define TOF_DEC_FAIL_OPEN_ACCEPT          8U
 
 static uint16_t s_prev_distance[VL53L5CX_DET_NUM_ZONES] = {0};
 static uint8_t  s_prev_valid[VL53L5CX_DET_NUM_ZONES] = {0};
 static uint32_t s_prev_signal[VL53L5CX_DET_NUM_ZONES] = {0};
 static uint8_t  s_prev_signal_valid[VL53L5CX_DET_NUM_ZONES] = {0};
-static uint8_t  s_rearm_frames = 0;
-static uint8_t  s_common_motion_streak = 0;
+
+static uint16_t s_hist_dist_residual[VL53L5CX_DET_NUM_ZONES][TOF_HISTORY_FRAMES] = {{0}};
+static uint16_t s_hist_signal_residual[VL53L5CX_DET_NUM_ZONES][TOF_HISTORY_FRAMES] = {{0}};
+static uint8_t  s_hist_dist_valid[VL53L5CX_DET_NUM_ZONES][TOF_HISTORY_FRAMES] = {{0}};
+static uint8_t  s_hist_signal_valid[VL53L5CX_DET_NUM_ZONES][TOF_HISTORY_FRAMES] = {{0}};
+static uint8_t  s_hist_pos = 0U;
+
+static uint8_t  s_rearm_frames = 0U;
+static uint8_t  s_common_motion_streak = 0U;
+static uint8_t  s_motion_confirm_pending = 0U;
+static uint8_t  s_motion_pending_zone = 0U;
 
 static uint32_t FastAbsI32(int32_t value)
 {
     return (value < 0) ? (uint32_t)(-(int64_t)value) : (uint32_t)value;
+}
+
+static uint16_t FastClampU16(uint32_t value)
+{
+    return (value > 65535U) ? 65535U : (uint16_t)value;
 }
 
 static int32_t FastMedianI32(const int32_t *values, uint8_t count)
@@ -249,19 +275,34 @@ static uint32_t FastMedianU32(const uint32_t *values, uint8_t count)
                        (uint64_t)sorted[count / 2U]) / 2ULL);
 }
 
+static uint32_t FastHistoryMax(const uint16_t hist[VL53L5CX_DET_NUM_ZONES][TOF_HISTORY_FRAMES],
+                               const uint8_t valid[VL53L5CX_DET_NUM_ZONES][TOF_HISTORY_FRAMES],
+                               uint8_t zone)
+{
+    uint32_t max_value = 0U;
+    if (zone >= VL53L5CX_DET_NUM_ZONES) return 0U;
+
+    for (uint8_t i = 0; i < TOF_HISTORY_FRAMES; i++) {
+        if (valid[zone][i] && hist[zone][i] > max_value)
+            max_value = hist[zone][i];
+    }
+    return max_value;
+}
+
 int VL53L5CX_IsInsectDetectedFiltered(void)
 {
     const int raw_detected = VL53L5CX_IsInsectDetected();
     VL53L5CX_DetectionResult_t res = {0};
+
     int32_t frame_delta[VL53L5CX_DET_NUM_ZONES] = {0};
     uint8_t frame_valid[VL53L5CX_DET_NUM_ZONES] = {0};
     int32_t valid_delta[VL53L5CX_DET_NUM_ZONES];
-    uint8_t valid_count = 0;
+    uint8_t valid_count = 0U;
 
     int32_t signal_delta_pct[VL53L5CX_DET_NUM_ZONES] = {0};
     uint8_t signal_frame_valid[VL53L5CX_DET_NUM_ZONES] = {0};
     int32_t valid_signal_delta[VL53L5CX_DET_NUM_ZONES];
-    uint8_t signal_valid_count = 0;
+    uint8_t signal_valid_count = 0U;
     uint32_t current_signal[VL53L5CX_DET_NUM_ZONES] = {0};
     uint8_t current_signal_valid[VL53L5CX_DET_NUM_ZONES] = {0};
 
@@ -275,14 +316,14 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
 
         uint8_t zone_valid = (uint8_t)(VL53L5CX_IsZoneValid(z) &&
                                        VL53L5CX_STATUS_OK_FILT(status));
-        uint8_t current_valid = (uint8_t)(zone_valid && distance > 0U);
+        uint8_t distance_valid = (uint8_t)(zone_valid && distance > 0U);
         uint8_t signal_valid = (uint8_t)(zone_valid &&
                                          signal >= VL53L5CX_DET_MIN_SIGNAL);
 
         current_signal[z] = signal;
         current_signal_valid[z] = signal_valid;
 
-        if (current_valid && s_prev_valid[z]) {
+        if (distance_valid && s_prev_valid[z]) {
             frame_delta[z] = (int32_t)distance - (int32_t)s_prev_distance[z];
             frame_valid[z] = 1U;
             valid_delta[valid_count++] = frame_delta[z];
@@ -297,7 +338,7 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
         }
 
         s_prev_distance[z] = distance;
-        s_prev_valid[z] = current_valid;
+        s_prev_valid[z] = distance_valid;
         s_prev_signal[z] = signal;
         s_prev_signal_valid[z] = signal_valid;
     }
@@ -311,7 +352,7 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
     uint32_t coherence_tol = mad * 3U;
     if (coherence_tol < 1U) coherence_tol = 1U;
 
-    uint8_t coherent = 0;
+    uint8_t coherent = 0U;
     for (uint8_t z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
         if (frame_valid[z] && FastAbsI32(frame_delta[z] - global_delta) <= coherence_tol)
             coherent++;
@@ -323,8 +364,25 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
         signal_deviations[i] = FastAbsI32(valid_signal_delta[i] - global_signal_delta);
     uint32_t signal_mad = FastMedianU32(signal_deviations, signal_valid_count);
 
+    for (uint8_t z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
+        s_hist_dist_valid[z][s_hist_pos] = 0U;
+        s_hist_signal_valid[z][s_hist_pos] = 0U;
+
+        if (frame_valid[z]) {
+            s_hist_dist_residual[z][s_hist_pos] =
+                FastClampU16(FastAbsI32(frame_delta[z] - global_delta));
+            s_hist_dist_valid[z][s_hist_pos] = 1U;
+        }
+        if (signal_frame_valid[z]) {
+            s_hist_signal_residual[z][s_hist_pos] =
+                FastClampU16(FastAbsI32(signal_delta_pct[z] - global_signal_delta));
+            s_hist_signal_valid[z][s_hist_pos] = 1U;
+        }
+    }
+    s_hist_pos = (uint8_t)((s_hist_pos + 1U) % TOF_HISTORY_FRAMES);
+
     uint32_t abs_global = FastAbsI32(global_delta);
-    uint8_t common_motion = 0;
+    uint8_t common_motion = 0U;
     if (valid_count >= TOF_FAST_MIN_VALID_ZONES) {
         if (abs_global >= TOF_FAST_STRONG_SHIFT_MM &&
             mad <= TOF_FAST_MAX_MAD_MM &&
@@ -345,78 +403,147 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
     if (s_rearm_frames > 0U) {
         s_rearm_frames--;
         s_common_motion_streak = 0U;
+        s_motion_confirm_pending = 0U;
         if (s_rearm_frames > 0U) return 0;
     }
 
-    if (!raw_detected) return 0;
+    if (!raw_detected) {
+        if (s_motion_confirm_pending) {
+            printf("TOFDEC,motion_drop,z=%u\r\n", (unsigned)s_motion_pending_zone);
+            s_motion_confirm_pending = 0U;
+        }
+        return 0;
+    }
 
-    uint32_t local_residual = 0;
-    uint8_t local_valid = 0;
+    uint8_t best_z = 0U;
+    if (res.affected_count > 0U) {
+        best_z = res.affected_zones[0];
+        uint32_t best_strength = res.affected_drop[0];
+        for (uint8_t i = 1U; i < res.affected_count; i++) {
+            if (res.affected_drop[i] > best_strength) {
+                best_strength = res.affected_drop[i];
+                best_z = res.affected_zones[i];
+            }
+        }
+    }
+
+    uint32_t local_residual = 0U;
+    uint8_t local_valid = 0U;
     int32_t candidate_signal_delta = 0;
-    uint32_t local_signal_residual = 0;
-    uint8_t signal_local_valid = 0;
-    uint8_t neighbor_baseline_support = 0;
-    uint8_t neighbor_baseline_valid = 0;
-    uint8_t neighbor_fast_support = 0;
-    uint8_t neighbor_fast_valid = 0;
+    uint32_t local_signal_residual = 0U;
+    uint8_t signal_local_valid = 0U;
+    uint8_t neighbor_baseline_support = 0U;
+    uint8_t neighbor_baseline_valid = 0U;
+    uint8_t neighbor_fast_support = 0U;
+    uint8_t neighbor_fast_valid = 0U;
 
-    if (res.affected_count == 1U) {
-        uint8_t z = res.affected_zones[0];
-        if (z < VL53L5CX_DET_NUM_ZONES && frame_valid[z]) {
-            local_residual = FastAbsI32(frame_delta[z] - global_delta);
-            local_valid = 1U;
-        }
-        if (z < VL53L5CX_DET_NUM_ZONES && signal_frame_valid[z]) {
-            candidate_signal_delta = signal_delta_pct[z];
-            local_signal_residual = FastAbsI32(signal_delta_pct[z] - global_signal_delta);
-            signal_local_valid = 1U;
-        }
+    if (best_z < VL53L5CX_DET_NUM_ZONES && frame_valid[best_z]) {
+        local_residual = FastAbsI32(frame_delta[best_z] - global_delta);
+        local_valid = 1U;
+    }
+    if (best_z < VL53L5CX_DET_NUM_ZONES && signal_frame_valid[best_z]) {
+        candidate_signal_delta = signal_delta_pct[best_z];
+        local_signal_residual = FastAbsI32(signal_delta_pct[best_z] - global_signal_delta);
+        signal_local_valid = 1U;
+    }
 
-        if (z < VL53L5CX_DET_NUM_ZONES) {
-            int row = (int)z / 4;
-            int col = (int)z % 4;
-            for (int dr = -1; dr <= 1; dr++) {
-                for (int dc = -1; dc <= 1; dc++) {
-                    if (dr == 0 && dc == 0) continue;
-                    int nr = row + dr;
-                    int nc = col + dc;
-                    if (nr < 0 || nr >= 4 || nc < 0 || nc >= 4) continue;
+    if (best_z < VL53L5CX_DET_NUM_ZONES) {
+        int row = (int)best_z / 4;
+        int col = (int)best_z % 4;
+        for (int dr = -1; dr <= 1; dr++) {
+            for (int dc = -1; dc <= 1; dc++) {
+                if (dr == 0 && dc == 0) continue;
+                int nr = row + dr;
+                int nc = col + dc;
+                if (nr < 0 || nr >= 4 || nc < 0 || nc >= 4) continue;
 
-                    uint8_t nz = (uint8_t)(nr * 4 + nc);
-                    if (current_signal_valid[nz]) {
-                        uint32_t baseline_signal = 0;
-                        VL53L5CX_GetBaselineData(nz, &baseline_signal, NULL);
-                        if (baseline_signal >= VL53L5CX_DET_MIN_SIGNAL) {
-                            int64_t numerator = ((int64_t)current_signal[nz] -
-                                                 (int64_t)baseline_signal) * 100LL;
-                            int32_t baseline_pct = (int32_t)(numerator /
-                                                             (int64_t)baseline_signal);
-                            neighbor_baseline_valid++;
-                            if (FastAbsI32(baseline_pct) >= TOF_NEIGHBOR_SUPPORT_PCT)
-                                neighbor_baseline_support++;
-                        }
+                uint8_t nz = (uint8_t)(nr * 4 + nc);
+                if (current_signal_valid[nz]) {
+                    uint32_t baseline_signal = 0U;
+                    VL53L5CX_GetBaselineData(nz, &baseline_signal, NULL);
+                    if (baseline_signal >= VL53L5CX_DET_MIN_SIGNAL) {
+                        int64_t numerator = ((int64_t)current_signal[nz] -
+                                             (int64_t)baseline_signal) * 100LL;
+                        int32_t baseline_pct = (int32_t)(numerator /
+                                                         (int64_t)baseline_signal);
+                        neighbor_baseline_valid++;
+                        if (FastAbsI32(baseline_pct) >= TOF_NEIGHBOR_SUPPORT_PCT)
+                            neighbor_baseline_support++;
                     }
+                }
 
-                    if (signal_frame_valid[nz]) {
-                        neighbor_fast_valid++;
-                        if (FastAbsI32(signal_delta_pct[nz] - global_signal_delta) >=
-                            TOF_NEIGHBOR_SUPPORT_PCT)
-                            neighbor_fast_support++;
-                    }
+                if (signal_frame_valid[nz]) {
+                    neighbor_fast_valid++;
+                    if (FastAbsI32(signal_delta_pct[nz] - global_signal_delta) >=
+                        TOF_NEIGHBOR_SUPPORT_PCT)
+                        neighbor_fast_support++;
                 }
             }
         }
     }
 
-    uint32_t local_limit = (abs_global >= 3U) ? 1U : 0U;
-    uint8_t veto = (uint8_t)(res.trigger_source == VL53L5CX_TRIG_SIGNAL &&
-                             res.affected_count == 1U &&
-                             common_motion &&
-                             s_common_motion_streak >= 2U &&
-                             local_valid &&
-                             local_residual <= local_limit);
+    uint32_t max_recent_rfd = 0U;
+    uint32_t max_recent_rfs = 0U;
+    uint8_t affected_with_temporal_evidence = 0U;
+    for (uint8_t i = 0U; i < res.affected_count; i++) {
+        uint8_t z = res.affected_zones[i];
+        uint32_t recent_rfd = FastHistoryMax(s_hist_dist_residual, s_hist_dist_valid, z);
+        uint32_t recent_rfs = FastHistoryMax(s_hist_signal_residual, s_hist_signal_valid, z);
+        if (recent_rfd > max_recent_rfd) max_recent_rfd = recent_rfd;
+        if (recent_rfs > max_recent_rfs) max_recent_rfs = recent_rfs;
+        if (recent_rfd >= TOF_LOCAL_EVID_DISTANCE_MM ||
+            recent_rfs >= TOF_LOCAL_EVID_SIGNAL_PCT)
+            affected_with_temporal_evidence++;
+    }
 
-    printf("FASTNOISE,Gfd=%ld,MADfd=%lu,cohFd=%u/%u,Rfd=%lu,Gfs=%ld,MADfs=%lu,Fsz=%ld,Rfs=%lu,validFs=%u,neighB=%u/%u,neighF=%u/%u,streak=%u,veto=%u\r\n",
+    uint32_t local_limit = (abs_global >= 3U) ? 1U : 0U;
+    uint8_t vibration_veto = (uint8_t)(res.trigger_source == VL53L5CX_TRIG_SIGNAL &&
+                                       res.affected_count == 1U &&
+                                       common_motion &&
+                                       s_common_motion_streak >= 2U &&
+                                       local_valid &&
+                                       local_residual <= local_limit &&
+                                       max_recent_rfs <= 1U);
+
+    uint8_t decision = TOF_DEC_FAIL_OPEN_ACCEPT;
+    uint8_t accept = 1U;
+
+    if (vibration_veto) {
+        decision = TOF_DEC_VIBRATION_REJECT;
+        accept = 0U;
+        s_motion_confirm_pending = 0U;
+    } else if (res.trigger_source == VL53L5CX_TRIG_BOTH) {
+        decision = TOF_DEC_BOTH_ACCEPT;
+        s_motion_confirm_pending = 0U;
+    } else if (res.trigger_source == VL53L5CX_TRIG_SIGNAL) {
+        decision = TOF_DEC_SIGNAL_ACCEPT;
+        s_motion_confirm_pending = 0U;
+    } else if (res.trigger_source == VL53L5CX_TRIG_MOTION) {
+        if (res.affected_count > 1U) {
+            decision = TOF_DEC_MOTION_MULTI_ACCEPT;
+            s_motion_confirm_pending = 0U;
+        } else {
+            uint8_t local_evidence = (uint8_t)(max_recent_rfd >= TOF_LOCAL_EVID_DISTANCE_MM ||
+                                               max_recent_rfs >= TOF_LOCAL_EVID_SIGNAL_PCT ||
+                                               neighbor_fast_support >= 2U);
+            if (local_evidence) {
+                decision = TOF_DEC_MOTION_LOCAL_ACCEPT;
+                s_motion_confirm_pending = 0U;
+            } else if (s_motion_confirm_pending) {
+                decision = TOF_DEC_MOTION_CONFIRMED;
+                s_motion_confirm_pending = 0U;
+            } else {
+                decision = TOF_DEC_MOTION_PENDING;
+                accept = 0U;
+                s_motion_confirm_pending = 1U;
+                s_motion_pending_zone = best_z;
+            }
+        }
+    } else {
+        s_motion_confirm_pending = 0U;
+    }
+
+    printf("FASTNOISE,Gfd=%ld,MADfd=%lu,cohFd=%u/%u,Rfd=%lu,Gfs=%ld,MADfs=%lu,Fsz=%ld,Rfs=%lu,validFs=%u,neighB=%u/%u,neighF=%u/%u,histRfd=%lu,histRfs=%lu,affEv=%u/%u,streak=%u,mPend=%u,dec=%u,veto=%u\r\n",
            (long)global_delta,
            (unsigned long)mad,
            (unsigned)coherent,
@@ -431,12 +558,18 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
            (unsigned)neighbor_baseline_valid,
            (unsigned)neighbor_fast_support,
            (unsigned)neighbor_fast_valid,
+           (unsigned long)max_recent_rfd,
+           (unsigned long)max_recent_rfs,
+           (unsigned)affected_with_temporal_evidence,
+           (unsigned)res.affected_count,
            (unsigned)s_common_motion_streak,
-           (unsigned)veto);
+           (unsigned)s_motion_confirm_pending,
+           (unsigned)decision,
+           (unsigned)vibration_veto);
 
     (void)signal_local_valid;
 
-    if (veto) return 0;
+    if (!accept) return 0;
 
     s_rearm_frames = TOF_REARM_FRAMES;
     return 1;
