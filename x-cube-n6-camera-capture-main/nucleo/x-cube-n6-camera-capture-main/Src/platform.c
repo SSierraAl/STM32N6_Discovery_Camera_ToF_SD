@@ -196,7 +196,7 @@ uint8_t VL53L5CX_WaitMs(
 #define TOF_FAST_MIN_COHERENCE_PCT       90U
 #define TOF_NEIGHBOR_SUPPORT_PCT          1U
 #define TOF_LOCAL_EVID_SIGNAL_PCT         2U
-#define TOF_LOCAL_EVID_DISTANCE_MM        2U
+#define TOF_LOCAL_EVID_DISTANCE_MM        3U
 
 #define TOF_DEC_SIGNAL_ACCEPT             1U
 #define TOF_DEC_BOTH_ACCEPT               2U
@@ -524,8 +524,7 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
             s_motion_confirm_pending = 0U;
         } else {
             uint8_t local_evidence = (uint8_t)(max_recent_rfd >= TOF_LOCAL_EVID_DISTANCE_MM ||
-                                               max_recent_rfs >= TOF_LOCAL_EVID_SIGNAL_PCT ||
-                                               neighbor_fast_support >= 2U);
+                                               max_recent_rfs >= TOF_LOCAL_EVID_SIGNAL_PCT);
             if (local_evidence) {
                 decision = TOF_DEC_MOTION_LOCAL_ACCEPT;
                 s_motion_confirm_pending = 0U;
