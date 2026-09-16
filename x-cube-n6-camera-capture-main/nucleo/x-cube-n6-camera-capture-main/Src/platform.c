@@ -153,7 +153,7 @@ uint8_t VL53L5CX_Reset_Sensor(VL53L5CX_Platform *p_platform)
 
 	/* Set pin LPN of to HIGH */
 	/* Set pin AVDD of to HIGH */
-	/* Set pin VDDIO of  to HIGH */
+	/* Set pin VDDIO  to HIGH */
 	VL53L5CX_WaitMs(p_platform, 100);
   
 	return 0;
@@ -188,7 +188,7 @@ uint8_t VL53L5CX_WaitMs(
 
 #if !VL53L5CX_DUAL_SENSOR && !TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4)
 
-#define TOF_REARM_FRAMES                 7U
+#define TOF_REARM_FRAMES                 10U
 #define TOF_FAST_MIN_VALID_ZONES        12U
 #define TOF_FAST_STRONG_SHIFT_MM         2U
 #define TOF_FAST_MAX_MAD_MM              1U
@@ -313,6 +313,7 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
 
     if (s_rearm_frames > 0U) {
         s_rearm_frames--;
+        s_common_motion_streak = 0U;
         if (s_rearm_frames > 0U) return 0;
     }
 
