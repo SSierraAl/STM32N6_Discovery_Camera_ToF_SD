@@ -21,7 +21,7 @@
 *
 ********************************************************************************
 *
-* Alternatively the VL53L5CX Ultra Lite Driver may be distributed under the
+* Alternatively, the VL53L5CX Ultra Lite Driver may be distributed under the
 * terms of 'BSD 3-clause "New" or "Revised" License', in which case the
 * following provisions apply instead of the ones mentioned above :
 *
