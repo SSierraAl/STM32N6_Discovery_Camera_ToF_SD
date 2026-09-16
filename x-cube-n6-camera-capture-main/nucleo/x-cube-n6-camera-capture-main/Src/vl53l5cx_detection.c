@@ -10,6 +10,7 @@
  */
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include "vl53l5cx_detection.h"
 #include "platform.h"
@@ -34,6 +35,82 @@ static uint8_t   s_baseline_ready = 0;
 
 static VL53L5CX_DetectionResult_t s_last_result = {0};
 static uint8_t s_last_insect_detected = 0;
+
+/* Observation-only diagnostics for the vibration/noise study.
+   This flag intentionally lives locally for this characterization commit so
+   no existing app_config mode or alternate sensor path is modified.
+   Set to 0 for production to compile out the extra calculations/printf. */
+#ifndef VL53L5CX_DET_DEBUG_NOISE_METRICS
+#define VL53L5CX_DET_DEBUG_NOISE_METRICS  1
+#endif
+
+#if VL53L5CX_DET_DEBUG_NOISE_METRICS > 0
+static uint32_t VL53L5CX_AbsDiffI32(int32_t a, int32_t b)
+{
+    int64_t d = (int64_t)a - (int64_t)b;
+    if (d < 0) d = -d;
+    return (uint32_t)d;
+}
+
+static uint32_t VL53L5CX_AbsDiffU32(uint32_t a, uint32_t b)
+{
+    return (a >= b) ? (a - b) : (b - a);
+}
+
+static int32_t VL53L5CX_MedianI32(const int32_t *values, uint8_t count)
+{
+    if (count == 0) return 0;
+
+    int32_t sorted[VL53L5CX_DET_NUM_ZONES];
+    for (uint8_t i = 0; i < count; i++) sorted[i] = values[i];
+
+    for (uint8_t i = 1; i < count; i++) {
+        int32_t key = sorted[i];
+        int j = (int)i - 1;
+        while (j >= 0 && sorted[j] > key) {
+            sorted[j + 1] = sorted[j];
+            j--;
+        }
+        sorted[j + 1] = key;
+    }
+
+    if (count & 1U) return sorted[count / 2U];
+    return (int32_t)(((int64_t)sorted[count / 2U - 1U] +
+                      (int64_t)sorted[count / 2U]) / 2LL);
+}
+
+static uint32_t VL53L5CX_MedianU32(const uint32_t *values, uint8_t count)
+{
+    if (count == 0) return 0;
+
+    uint32_t sorted[VL53L5CX_DET_NUM_ZONES];
+    for (uint8_t i = 0; i < count; i++) sorted[i] = values[i];
+
+    for (uint8_t i = 1; i < count; i++) {
+        uint32_t key = sorted[i];
+        int j = (int)i - 1;
+        while (j >= 0 && sorted[j] > key) {
+            sorted[j + 1] = sorted[j];
+            j--;
+        }
+        sorted[j + 1] = key;
+    }
+
+    if (count & 1U) return sorted[count / 2U];
+    return (uint32_t)(((uint64_t)sorted[count / 2U - 1U] +
+                       (uint64_t)sorted[count / 2U]) / 2ULL);
+}
+
+static uint8_t VL53L5CX_CountBits16(uint16_t mask)
+{
+    uint8_t count = 0;
+    while (mask) {
+        count += (uint8_t)(mask & 1U);
+        mask >>= 1;
+    }
+    return count;
+}
+#endif
 
 /* ================================================================
     Dual Sensor Mode State (External = Guardian, Primary = Camera ToF)
@@ -388,6 +465,16 @@ int VL53L5CX_Update(void)
     uint8_t frame_trig_signal = 0;
     uint8_t frame_trig_motion = 0;
 
+#if VL53L5CX_DET_DEBUG_NOISE_METRICS > 0
+    /* Observation-only arrays. They never feed back into the detector. */
+    int32_t noise_dist_delta[VL53L5CX_DET_NUM_ZONES] = {0};
+    int32_t noise_signal_delta_pct[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint32_t noise_motion[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint8_t noise_dist_valid[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint8_t noise_signal_valid[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint8_t noise_motion_valid[VL53L5CX_DET_NUM_ZONES] = {0};
+#endif
+
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
 
 
@@ -408,6 +495,28 @@ int VL53L5CX_Update(void)
 
         int signal_triggered = 0;
         uint32_t signal_drop = 0;
+
+#if VL53L5CX_DET_DEBUG_NOISE_METRICS > 0
+        /* Signed distance/signal deltas are collected from trustworthy
+           baseline zones. This is diagnostic only; the existing detector
+           below continues to use its original absolute signal-drop logic. */
+        if (s_zone_valid[z] && VL53L5CX_STATUS_OK_FILT(status)) {
+            uint16_t cur_dist = s_results.distance_mm[idx];
+            uint32_t cur_sig = s_results.signal_per_spad[idx];
+
+            if (s_baseline_distance[z] > 0 && cur_dist > 0) {
+                noise_dist_delta[z] = (int32_t)cur_dist - (int32_t)s_baseline_distance[z];
+                noise_dist_valid[z] = 1;
+            }
+
+            if (s_baseline_signal[z] > 0 &&
+                cur_sig != 0 && cur_sig >= VL53L5CX_DET_MIN_SIGNAL) {
+                int64_t numerator = ((int64_t)cur_sig - (int64_t)s_baseline_signal[z]) * 100LL;
+                noise_signal_delta_pct[z] = (int32_t)(numerator / (int64_t)s_baseline_signal[z]);
+                noise_signal_valid[z] = 1;
+            }
+        }
+#endif
 
         /* SIGNAL: gates (zone_valid, VL53L5CX_STATUS_OK = 5/6/9,
            signal present, >= MIN, baseline drop > THRESH_PCT). */
@@ -443,6 +552,10 @@ int VL53L5CX_Update(void)
         if (s_motion_initialized) {
             motion_val = s_results.motion_indicator.motion[s_motion_config.map_id[z]];
             motion_triggered = (motion_val >= VL53L5CX_DET_MOTION_THRESH);
+#if VL53L5CX_DET_DEBUG_NOISE_METRICS > 0
+            noise_motion[z] = motion_val;
+            noise_motion_valid[z] = 1;
+#endif
         }
 
         if (signal_triggered || motion_triggered) {
@@ -465,6 +578,109 @@ int VL53L5CX_Update(void)
                 : 0;
         }
     }
+
+#if VL53L5CX_DET_DEBUG_NOISE_METRICS > 0
+    /* Stage-1 observation mode: characterize common motion and local residuals
+       only when the EXISTING detector already decided to trigger. Nothing in
+       this block can clear or set s_last_insect_detected. */
+    if (s_last_insect_detected) {
+        int32_t dist_values[VL53L5CX_DET_NUM_ZONES];
+        int32_t sig_values[VL53L5CX_DET_NUM_ZONES];
+        uint32_t motion_values[VL53L5CX_DET_NUM_ZONES];
+        uint8_t dist_count = 0, sig_count = 0, motion_count = 0;
+        uint8_t motion_coverage = 0;
+
+        for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
+            if (noise_dist_valid[z]) dist_values[dist_count++] = noise_dist_delta[z];
+            if (noise_signal_valid[z]) sig_values[sig_count++] = noise_signal_delta_pct[z];
+            if (noise_motion_valid[z]) {
+                motion_values[motion_count++] = noise_motion[z];
+                if (noise_motion[z] >= VL53L5CX_DET_MOTION_THRESH) motion_coverage++;
+            }
+        }
+
+        int32_t global_dist = VL53L5CX_MedianI32(dist_values, dist_count);
+        int32_t global_sig = VL53L5CX_MedianI32(sig_values, sig_count);
+        uint32_t global_motion = VL53L5CX_MedianU32(motion_values, motion_count);
+
+        uint32_t dist_dev[VL53L5CX_DET_NUM_ZONES];
+        uint32_t sig_dev[VL53L5CX_DET_NUM_ZONES];
+        uint32_t motion_dev[VL53L5CX_DET_NUM_ZONES];
+        for (uint8_t i = 0; i < dist_count; i++)
+            dist_dev[i] = VL53L5CX_AbsDiffI32(dist_values[i], global_dist);
+        for (uint8_t i = 0; i < sig_count; i++)
+            sig_dev[i] = VL53L5CX_AbsDiffI32(sig_values[i], global_sig);
+        for (uint8_t i = 0; i < motion_count; i++)
+            motion_dev[i] = VL53L5CX_AbsDiffU32(motion_values[i], global_motion);
+
+        uint32_t mad_dist = VL53L5CX_MedianU32(dist_dev, dist_count);
+        uint32_t mad_sig = VL53L5CX_MedianU32(sig_dev, sig_count);
+        uint32_t mad_motion = VL53L5CX_MedianU32(motion_dev, motion_count);
+
+        /* Coherence is diagnostic only. 3*MAD scales with the observed frame
+           dispersion; small floors avoid a zero-width band on very quiet data. */
+        uint32_t dist_tol = mad_dist * 3U;
+        uint32_t sig_tol = mad_sig * 3U;
+        if (dist_tol < 2U) dist_tol = 2U;
+        if (sig_tol < 1U) sig_tol = 1U;
+
+        uint8_t coherent_dist = 0, coherent_sig = 0;
+        for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
+            if (noise_dist_valid[z] &&
+                VL53L5CX_AbsDiffI32(noise_dist_delta[z], global_dist) <= dist_tol)
+                coherent_dist++;
+            if (noise_signal_valid[z] &&
+                VL53L5CX_AbsDiffI32(noise_signal_delta_pct[z], global_sig) <= sig_tol)
+                coherent_sig++;
+        }
+
+        uint16_t row_mask = 0;
+        uint16_t col_mask = 0;
+        uint32_t max_local_dist = 0;
+        uint32_t max_local_sig = 0;
+
+        for (uint8_t i = 0; i < s_last_result.affected_count; i++) {
+            uint8_t z = s_last_result.affected_zones[i];
+            uint8_t row = (uint8_t)(z / VL53L5CX_DET_RESOLUTION);
+            uint8_t col = (uint8_t)(z % VL53L5CX_DET_RESOLUTION);
+            if (row < 16U) row_mask |= (uint16_t)(1U << row);
+            if (col < 16U) col_mask |= (uint16_t)(1U << col);
+
+            if (noise_dist_valid[z]) {
+                uint32_t residual = VL53L5CX_AbsDiffI32(noise_dist_delta[z], global_dist);
+                if (residual > max_local_dist) max_local_dist = residual;
+            }
+            if (noise_signal_valid[z]) {
+                uint32_t residual = VL53L5CX_AbsDiffI32(noise_signal_delta_pct[z], global_sig);
+                if (residual > max_local_sig) max_local_sig = residual;
+            }
+        }
+
+        printf("NOISEMETRIC,temp=%d,trig=%u,affected=%u,validD=%u,Gd=%ld,MADd=%lu,cohD=%u/%u,validS=%u,Gs=%ld,MADs=%lu,cohS=%u/%u,validM=%u,Gm=%lu,MADm=%lu,motionCov=%u/%u,rows=%u,cols=%u,maxRd=%lu,maxRs=%lu\r\n",
+               (int)s_results.silicon_temp_degc,
+               (unsigned)s_last_result.trigger_source,
+               (unsigned)s_last_result.affected_count,
+               (unsigned)dist_count,
+               (long)global_dist,
+               (unsigned long)mad_dist,
+               (unsigned)coherent_dist,
+               (unsigned)dist_count,
+               (unsigned)sig_count,
+               (long)global_sig,
+               (unsigned long)mad_sig,
+               (unsigned)coherent_sig,
+               (unsigned)sig_count,
+               (unsigned)motion_count,
+               (unsigned long)global_motion,
+               (unsigned long)mad_motion,
+               (unsigned)motion_coverage,
+               (unsigned)motion_count,
+               (unsigned)VL53L5CX_CountBits16(row_mask),
+               (unsigned)VL53L5CX_CountBits16(col_mask),
+               (unsigned long)max_local_dist,
+               (unsigned long)max_local_sig);
+    }
+#endif
 
     /* BASELINE REFRESH */
 #if VL53L5CX_DET_PERIODIC_RESTART_ENABLED > 0
