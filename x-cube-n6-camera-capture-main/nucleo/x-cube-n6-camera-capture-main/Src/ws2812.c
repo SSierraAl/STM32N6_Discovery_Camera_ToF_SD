@@ -38,6 +38,15 @@ static volatile bool ws2812_flash_active = false;
 
 static uint32_t WS2812_ApplyBrightness(uint32_t color);
 static void WS2812_BuildPWMData(void);
+static bool WS2812_SendStrobeFrameReliable(void);
+
+/* A completed DMA transfer only proves that the MCU sent the waveform; the
+   one-wire WS2812 bus has no acknowledgement from the LEDs. Send every camera
+   strobe state twice so a transiently misdecoded ON/OFF frame is overwritten
+   by a second complete frame. Attempts stay finite and transfers never overlap. */
+#define WS2812_STROBE_FRAME_COPIES   2U
+#define WS2812_STROBE_MAX_ATTEMPTS   3U
+#define WS2812_STROBE_RETRY_GAP_MS   1U
 
 /* ================================================================
    DMA CALLBACK (must be linked in stm32n6xx_it.c)
@@ -176,6 +185,37 @@ bool WS2812_Update(void)
     return true;
 }
 
+/**
+ * @brief Deliver two complete copies of the current strobe state.
+ * @note  WS2812_Update() is blocking, so DMA transfers remain sequential.
+ */
+static bool WS2812_SendStrobeFrameReliable(void)
+{
+    uint32_t delivered = 0U;
+
+    for (uint32_t attempt = 0U;
+         attempt < WS2812_STROBE_MAX_ATTEMPTS &&
+         delivered < WS2812_STROBE_FRAME_COPIES;
+         attempt++) {
+        if (WS2812_Update()) {
+            delivered++;
+        }
+
+        if (delivered < WS2812_STROBE_FRAME_COPIES) {
+            HAL_Delay(WS2812_STROBE_RETRY_GAP_MS);
+        }
+    }
+
+    if (delivered < WS2812_STROBE_FRAME_COPIES) {
+        printf("[WS2812] ERROR: strobe frame delivered %lu/%lu times!\n",
+               (unsigned long)delivered,
+               (unsigned long)WS2812_STROBE_FRAME_COPIES);
+        return false;
+    }
+
+    return true;
+}
+
 /* ================================================================
    PRIVATE FUNCTIONS
    ================================================================ */
@@ -250,7 +290,7 @@ void WS2812_Flash(uint32_t color, uint8_t brightness, uint32_t duration_ms)
         ws2812_led_buffer[i] = grb_color;
     }
     ws2812_current_color = color;
-    WS2812_Update();
+    (void)WS2812_SendStrobeFrameReliable();
     
     // Block for duration
     if (duration_ms > 0)
@@ -261,7 +301,7 @@ void WS2812_Flash(uint32_t color, uint8_t brightness, uint32_t duration_ms)
         ws2812_led_buffer[i] = 0;
     }
     ws2812_current_color = 0;
-    WS2812_Update();
+    (void)WS2812_SendStrobeFrameReliable();
     
     // Restore brightness
     ws2812_brightness = saved_brightness;
@@ -285,7 +325,7 @@ void WS2812_FlashStart(uint32_t color, uint8_t brightness)
         ws2812_led_buffer[i] = grb_color;
     }
     ws2812_current_color = color;
-    WS2812_Update();
+    (void)WS2812_SendStrobeFrameReliable();
 }
 
 /**
@@ -299,11 +339,7 @@ void WS2812_FlashStop(void)
         ws2812_led_buffer[i] = 0;
     }
     ws2812_current_color = 0;
-    if (!WS2812_Update()) {
-        /* One finite retry; never recurse or start overlapping DMA transfers. */
-        HAL_Delay(1U);
-        (void)WS2812_Update();
-    }
+    (void)WS2812_SendStrobeFrameReliable();
 }
 
 /**

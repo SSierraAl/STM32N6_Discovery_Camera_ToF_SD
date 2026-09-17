@@ -558,7 +558,10 @@ class ScanThread(QThread):
                 var_results = []
 
                 # Variable stride scanning based on exact data_size
-                while count < 300:
+                # Images are appended contiguously. Stop at the first sustained
+                # header gap or the physical end of the card, not at an
+                # arbitrary UI limit.
+                while True:
                     if self._cancelled():
                         return
                     raw, err = _read_with_retry(self.drive,
@@ -628,7 +631,7 @@ class ScanThread(QThread):
         err = None
 
         blk = SNAP_BASE_NEW
-        while blk < limit and len(results) < 300:
+        while blk < limit:
             if self._cancelled():
                 return results, err
             self.progress.emit(f"Deep scan: {blk * BLOCK_SIZE // (1024*1024)} / "

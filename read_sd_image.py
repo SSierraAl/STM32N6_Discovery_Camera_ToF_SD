@@ -303,7 +303,7 @@ class SDVisualizer(ctk.CTk):
                 gaps = 0
                 fixed_results = []
 
-                while count < 300:
+                while True:
                     try:
                         raw = rblk(self.drive, probe)
                         if len(raw) < HEADER_SIZE:
@@ -332,7 +332,7 @@ class SDVisualizer(ctk.CTk):
                 gaps = 0
                 var_results = []
 
-                while count < 300:
+                while True:
                     try:
                         raw = rblk(self.drive, probe)
                         if len(raw) < HEADER_SIZE:
