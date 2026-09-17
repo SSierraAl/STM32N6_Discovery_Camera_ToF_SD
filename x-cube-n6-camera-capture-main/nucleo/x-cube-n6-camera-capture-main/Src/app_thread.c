@@ -873,10 +873,20 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
     while (xSemaphoreTake(storage_done_sem, 0) == pdTRUE) {
         /* Drain stale completion tokens from previous capture cycles. */
     }
-    if (xQueueSend(camera_cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) return -2;
+    if (xQueueSend(camera_cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
+#if WS2812_MODE == 0 || WS2812_MODE == 1
+        WS2812_FlashStop();
+#endif
+        return -2;
+    }
 
     TickType_t ticks = (timeout_ms > 0) ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY;
-    if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) return -1;
+    if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) {
+#if WS2812_MODE == 0 || WS2812_MODE == 1
+        WS2812_FlashStop();
+#endif
+        return -1;
+    }
 
 #if WS2812_MODE == 1
     WS2812_FlashStop();

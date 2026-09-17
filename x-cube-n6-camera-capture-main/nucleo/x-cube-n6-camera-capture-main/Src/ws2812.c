@@ -139,7 +139,7 @@ uint8_t WS2812_GetBrightness(void)
 /**
  * @brief Send data to LEDs
  */
-void WS2812_Update(void)
+bool WS2812_Update(void)
 {
     ws2812_dma_done = false;
     
@@ -151,18 +151,29 @@ void WS2812_Update(void)
                             WS2812_BUFFER_SIZE * sizeof(uint16_t));
     
     // Start DMA transfer
-    HAL_TIM_PWM_Start_DMA(&htim1, TIM_CHANNEL_1,
-                          (uint32_t*)ws2812_pwm_buffer, 
-                          WS2812_BUFFER_SIZE);
+    HAL_StatusTypeDef status = HAL_TIM_PWM_Start_DMA(&htim1, TIM_CHANNEL_1,
+                                                     (uint32_t*)ws2812_pwm_buffer,
+                                                     WS2812_BUFFER_SIZE);
+    if (status != HAL_OK) {
+        /* Recover the timer/DMA state so a following OFF frame can retry. */
+        (void)HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_1);
+        __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+        printf("[WS2812] ERROR: DMA start failed (%d)!\n", (int)status);
+        return false;
+    }
     
     // Wait for completion (with timeout)
     uint32_t timeout = HAL_GetTick();
     while (!ws2812_dma_done) {
         if (HAL_GetTick() - timeout > 1000) {
             printf("[WS2812] ERROR: DMA timeout!\n");
-            break;
+            (void)HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_1);
+            __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
+            return false;
         }
     }
+
+    return true;
 }
 
 /* ================================================================
@@ -288,7 +299,11 @@ void WS2812_FlashStop(void)
         ws2812_led_buffer[i] = 0;
     }
     ws2812_current_color = 0;
-    WS2812_Update();
+    if (!WS2812_Update()) {
+        /* One finite retry; never recurse or start overlapping DMA transfers. */
+        HAL_Delay(1U);
+        (void)WS2812_Update();
+    }
 }
 
 /**
