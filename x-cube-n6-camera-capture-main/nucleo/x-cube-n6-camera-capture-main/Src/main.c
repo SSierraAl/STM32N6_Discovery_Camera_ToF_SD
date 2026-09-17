@@ -1295,7 +1295,7 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef *hpcd)
  * @brief  TIM1 initialization for WS2812 PWM signal generation
  *
  *         Prescaler = 5 → 200 MHz / 6 = 33.33 MHz timer clock
- *         Period    = 41 → PWM frequency ≈ 793.7 kHz
+ *         Period    = 500 (validated hardware configuration)
  *         Channel 1, PWM1 mode
  */
 static void MX_TIM1_Init(void)

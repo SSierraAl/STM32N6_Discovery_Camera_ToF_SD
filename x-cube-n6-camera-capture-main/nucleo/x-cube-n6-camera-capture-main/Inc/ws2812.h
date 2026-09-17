@@ -27,16 +27,12 @@ extern "C" {
 /** Default brightness (0-100%) */
 #define WS2812_BRIGHTNESS_DEFAULT   10
 
-/**
- * Timer timing for an 800 kHz WS2812 data stream.
- * TIM1 counter clock: 200 MHz / (5 + 1) = 33.33 MHz.
- * 42 timer counts give a 1.26 us bit period (~793.7 kHz).
- */
-#define WS2812_PERIOD               41U
+/** Timer period from the validated hardware configuration. */
+#define WS2812_PERIOD               500U
 
-/** High-time counts for logical 1 and 0 at the timer rate above. */
-#define WS2812_PWM_ONE              23U
-#define WS2812_PWM_ZERO             12U
+/** PWM values from the validated hardware configuration. */
+#define WS2812_PWM_ONE              80U
+#define WS2812_PWM_ZERO             30U
 
 /** Reset entries (must be > 50µs at your timer frequency) */
 #define WS2812_RESET_ENTRIES        1700
