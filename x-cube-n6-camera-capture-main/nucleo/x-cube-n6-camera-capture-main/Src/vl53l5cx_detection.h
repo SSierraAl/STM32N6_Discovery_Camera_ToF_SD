@@ -1,7 +1,27 @@
 #ifndef VL53L5CX_DETECTION_SRC_WRAPPER_H
 #define VL53L5CX_DETECTION_SRC_WRAPPER_H
 
+/* Tuning-only diagnostics added while characterizing the robust detector.
+   Keep at 1 during validation. Set to 0 for the deployed production build:
+   - compiles out the observation-only NOISEMETRIC calculations/print
+   - suppresses FASTNOISE and TOFDEC UART prints from platform.c
+   - does NOT disable the robust filtering/history/confirmation algorithm. */
+#ifndef VL53L5CX_DET_TUNING_DIAGNOSTICS
+#define VL53L5CX_DET_TUNING_DIAGNOSTICS  1
+#endif
+
+#ifndef VL53L5CX_DET_DEBUG_NOISE_METRICS
+#define VL53L5CX_DET_DEBUG_NOISE_METRICS VL53L5CX_DET_TUNING_DIAGNOSTICS
+#endif
+
 #include "../Inc/vl53l5cx_detection.h"
+
+/* platform.c currently contains only tuning printf() calls (FASTNOISE/TOFDEC).
+   Suppress those at compile time in the production build without changing the
+   detector computations that feed the decision layer. */
+#if defined(_PLATFORM_H_) && !VL53L5CX_DET_TUNING_DIAGNOSTICS
+#define printf(...) ((void)0)
+#endif
 
 #if defined(TOF_FAST_NOISE_FILTER_WIRING_REV)
 int VL53L5CX_IsInsectDetectedFiltered(void);
