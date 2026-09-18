@@ -116,6 +116,18 @@ int  VL53L5CX_IsBaselineReady(void);
 void VL53L5CX_LearnBaseline(void);
 void VL53L5CX_ResetBaseline(void);
 
+/** Clear temporal detector history after a baseline change or a long capture
+    gap. This does not modify the learned baseline itself. */
+void VL53L5CX_ResetDetectionFilterState(void);
+
+/** Monotonic generation used by the task-level wrapper to discard its own
+    history whenever the core filter is reset. */
+uint32_t VL53L5CX_GetDetectionFilterGeneration(void);
+
+/** Consume a bounded request raised after persistent weak/stable signal drift.
+    Returns 1 once per request, otherwise 0. */
+int VL53L5CX_TakeBaselineRefreshRequest(void);
+
 /** Manual (button-triggered) baseline refresh — TEST_TOF_MODE only.
     Refreshes the primary (camera ToF) baseline with the same procedure
     as the periodic/adaptive auto-refresh (stop-ranging -> 50 ms ->

@@ -267,8 +267,10 @@ static void WS2812_LatchOffReliable(void)
  */
 static uint32_t WS2812_ApplyBrightness(uint32_t color)
 {
-    uint8_t r = (color >> 16) & 0xFF;
-    uint8_t g = (color >> 8) & 0xFF;
+    /* The LED buffer is already GRB. Scale each stored channel in place;
+       swapping R/G here a second time made 0xC8B080 appear green. */
+    uint8_t g = (color >> 16) & 0xFF;
+    uint8_t r = (color >> 8) & 0xFF;
     uint8_t b = color & 0xFF;
     
     // Apply brightness scaling
@@ -276,7 +278,7 @@ static uint32_t WS2812_ApplyBrightness(uint32_t color)
     g = (g * ws2812_brightness) / 100;
     b = (b * ws2812_brightness) / 100;
     
-    // Return as GRB format (WS2812 expects GRB, not RGB)
+    // Preserve GRB wire order (WS2812 expects GRB, not RGB)
     return ((uint32_t)g << 16) | ((uint32_t)r << 8) | b;
 }
 
@@ -364,8 +366,9 @@ void WS2812_FlashStart(uint32_t color, uint8_t brightness)
     }
     ws2812_current_color = color;
     bool delivered = WS2812_SendOnFrame();
-    printf("[LIGHT] ON color=0x%06lX brightness=%u dma=%s\n",
+    printf("[LIGHT] ON color=0x%06lX wire=0x%06lX brightness=%u dma=%s\n",
            (unsigned long)(color & 0xFFFFFFU),
+           (unsigned long)(grb_color & 0xFFFFFFU),
            (unsigned)brightness,
            delivered ? "OK" : "FAIL");
 }

@@ -61,6 +61,7 @@
 *******************************************************************************/
 
 #include <stdio.h>
+#include <string.h>
 #include "platform.h"
 #include "i2c_arbiter.h"
 #include "vl53l5cx_detection.h"
@@ -201,6 +202,10 @@ uint8_t VL53L5CX_WaitMs(
    already present in the first post-baseline frame. Weaker single-zone signal
    candidates must show a fresh local edge before they can trigger a capture. */
 #define TOF_SIGNAL_STRONG_DROP_PCT        12U
+/* Five consecutive weak/stable rejects match the field trace immediately
+   preceding the false edge, while a real temporal edge is still accepted on
+   its first frame. At 15 Hz this adapts after roughly one third of a second. */
+#define TOF_STABLE_REFRESH_FRAMES         5U
 
 #define TOF_DEC_SIGNAL_ACCEPT             1U
 #define TOF_DEC_BOTH_ACCEPT               2U
@@ -227,6 +232,44 @@ static uint8_t  s_rearm_frames = 0U;
 static uint8_t  s_common_motion_streak = 0U;
 static uint8_t  s_motion_confirm_pending = 0U;
 static uint8_t  s_motion_pending_zone = 0U;
+static uint8_t  s_stable_reject_streak = 0U;
+static uint8_t  s_baseline_refresh_requested = 0U;
+/* One automatic refresh per uninterrupted raw-signal episode. A clear frame
+   rearms it; a persistently bad sensor therefore cannot enter a refresh loop. */
+static uint8_t  s_stable_refresh_armed = 1U;
+static uint32_t s_filter_generation = 0U;
+
+void VL53L5CX_ResetDetectionFilterState(void)
+{
+    memset(s_prev_distance, 0, sizeof(s_prev_distance));
+    memset(s_prev_valid, 0, sizeof(s_prev_valid));
+    memset(s_prev_signal, 0, sizeof(s_prev_signal));
+    memset(s_prev_signal_valid, 0, sizeof(s_prev_signal_valid));
+    memset(s_hist_dist_residual, 0, sizeof(s_hist_dist_residual));
+    memset(s_hist_signal_residual, 0, sizeof(s_hist_signal_residual));
+    memset(s_hist_dist_valid, 0, sizeof(s_hist_dist_valid));
+    memset(s_hist_signal_valid, 0, sizeof(s_hist_signal_valid));
+    s_hist_pos = 0U;
+    s_rearm_frames = TOF_REARM_FRAMES;
+    s_common_motion_streak = 0U;
+    s_motion_confirm_pending = 0U;
+    s_motion_pending_zone = 0U;
+    s_stable_reject_streak = 0U;
+    s_baseline_refresh_requested = 0U;
+    s_filter_generation++;
+}
+
+uint32_t VL53L5CX_GetDetectionFilterGeneration(void)
+{
+    return s_filter_generation;
+}
+
+int VL53L5CX_TakeBaselineRefreshRequest(void)
+{
+    if (!s_baseline_refresh_requested) return 0;
+    s_baseline_refresh_requested = 0U;
+    return 1;
+}
 
 static uint32_t FastAbsI32(int32_t value)
 {
@@ -409,10 +452,13 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
         s_rearm_frames--;
         s_common_motion_streak = 0U;
         s_motion_confirm_pending = 0U;
+        s_stable_reject_streak = 0U;
         if (s_rearm_frames > 0U) return 0;
     }
 
     if (!raw_detected) {
+        s_stable_reject_streak = 0U;
+        s_stable_refresh_armed = 1U;
         if (s_motion_confirm_pending) {
             printf("TOFDEC,motion_drop,z=%u\r\n", (unsigned)s_motion_pending_zone);
             s_motion_confirm_pending = 0U;
@@ -491,6 +537,7 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
     uint32_t max_recent_rfd = 0U;
     uint32_t max_recent_rfs = 0U;
     uint8_t affected_with_temporal_evidence = 0U;
+    uint8_t affected_with_signal_edge = 0U;
     for (uint8_t i = 0U; i < res.affected_count; i++) {
         uint8_t z = res.affected_zones[i];
         uint32_t recent_rfd = FastHistoryMax(s_hist_dist_residual, s_hist_dist_valid, z);
@@ -500,6 +547,8 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
         if (recent_rfd >= TOF_LOCAL_EVID_DISTANCE_MM ||
             recent_rfs >= TOF_LOCAL_EVID_SIGNAL_PCT)
             affected_with_temporal_evidence++;
+        if (recent_rfs >= TOF_LOCAL_EVID_SIGNAL_PCT)
+            affected_with_signal_edge++;
     }
 
     uint32_t local_limit = (abs_global >= 3U) ? 1U : 0U;
@@ -519,16 +568,28 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
         accept = 0U;
         s_motion_confirm_pending = 0U;
     } else if (res.trigger_source == VL53L5CX_TRIG_BOTH) {
-        decision = TOF_DEC_BOTH_ACCEPT;
-        s_motion_confirm_pending = 0U;
+        /* One noisy motion zone combined with a persistent signal offset used
+           to bypass every guard. Require a real local edge, or two consecutive
+           BOTH frames in the same strongest zone, before photographing it. */
+        if (affected_with_temporal_evidence > 0U) {
+            decision = TOF_DEC_BOTH_ACCEPT;
+            s_motion_confirm_pending = 0U;
+        } else if (s_motion_confirm_pending && s_motion_pending_zone == best_z) {
+            decision = TOF_DEC_MOTION_CONFIRMED;
+            s_motion_confirm_pending = 0U;
+        } else {
+            decision = TOF_DEC_MOTION_PENDING;
+            accept = 0U;
+            s_motion_confirm_pending = 1U;
+            s_motion_pending_zone = best_z;
+        }
     } else if (res.trigger_source == VL53L5CX_TRIG_SIGNAL) {
         /* The captured idle logs show a persistent 7-11% baseline offset in
            one zone with no frame-to-frame distance/signal edge. Previously the
            SIGNAL branch accepted that first stable candidate unconditionally.
            Keep fast/strong events fail-open, but do not photograph a weak,
-           stationary single-zone offset. */
-        if (res.affected_count == 1U &&
-            affected_with_temporal_evidence == 0U &&
+           stationary offset merely because it spans two adjacent zones. */
+        if (affected_with_signal_edge == 0U &&
             best_strength < TOF_SIGNAL_STRONG_DROP_PCT) {
             decision = TOF_DEC_SIGNAL_STABLE_REJECT;
             accept = 0U;
@@ -546,7 +607,7 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
             if (local_evidence) {
                 decision = TOF_DEC_MOTION_LOCAL_ACCEPT;
                 s_motion_confirm_pending = 0U;
-            } else if (s_motion_confirm_pending) {
+            } else if (s_motion_confirm_pending && s_motion_pending_zone == best_z) {
                 decision = TOF_DEC_MOTION_CONFIRMED;
                 s_motion_confirm_pending = 0U;
             } else {
@@ -560,7 +621,20 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
         s_motion_confirm_pending = 0U;
     }
 
-    printf("FASTNOISE,Gfd=%ld,MADfd=%lu,cohFd=%u/%u,Rfd=%lu,Gfs=%ld,MADfs=%lu,Fsz=%ld,Rfs=%lu,validFs=%u,neighB=%u/%u,neighF=%u/%u,histRfd=%lu,histRfs=%lu,affEv=%u/%u,streak=%u,mPend=%u,dec=%u,veto=%u\r\n",
+    if (decision == TOF_DEC_SIGNAL_STABLE_REJECT) {
+        if (s_stable_reject_streak < 255U) s_stable_reject_streak++;
+        if (s_stable_reject_streak >= TOF_STABLE_REFRESH_FRAMES &&
+            s_stable_refresh_armed && !s_baseline_refresh_requested) {
+            s_baseline_refresh_requested = 1U;
+            s_stable_refresh_armed = 0U;
+            printf("TOFDEC,baseline_refresh_request,stable=%u\r\n",
+                   (unsigned)s_stable_reject_streak);
+        }
+    } else {
+        s_stable_reject_streak = 0U;
+    }
+
+    printf("FASTNOISE,Gfd=%ld,MADfd=%lu,cohFd=%u/%u,Rfd=%lu,Gfs=%ld,MADfs=%lu,Fsz=%ld,Rfs=%lu,validFs=%u,neighB=%u/%u,neighF=%u/%u,histRfd=%lu,histRfs=%lu,affEv=%u/%u,streak=%u,srej=%u,mPend=%u,dec=%u,veto=%u\r\n",
            (long)global_delta,
            (unsigned long)mad,
            (unsigned)coherent,
@@ -580,6 +654,7 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
            (unsigned)affected_with_temporal_evidence,
            (unsigned)res.affected_count,
            (unsigned)s_common_motion_streak,
+           (unsigned)s_stable_reject_streak,
            (unsigned)s_motion_confirm_pending,
            (unsigned)decision,
            (unsigned)vibration_veto);
@@ -593,6 +668,20 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
 }
 
 #else
+
+void VL53L5CX_ResetDetectionFilterState(void)
+{
+}
+
+uint32_t VL53L5CX_GetDetectionFilterGeneration(void)
+{
+    return 0U;
+}
+
+int VL53L5CX_TakeBaselineRefreshRequest(void)
+{
+    return 0;
+}
 
 int VL53L5CX_IsInsectDetectedFiltered(void)
 {

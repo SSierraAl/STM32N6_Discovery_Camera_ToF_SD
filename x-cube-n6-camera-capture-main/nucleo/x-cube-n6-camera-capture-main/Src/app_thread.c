@@ -584,8 +584,29 @@ void sensor_task(void *arg)
         }
 #endif
 
+        /* Evaluate every fresh frame so rejected stable drift can request one
+           bounded baseline refresh. Never consume that request in cooldown. */
+        const int insect_detected = VL53L5CX_IsInsectDetected();
+        if (cooldown == 0 && VL53L5CX_TakeBaselineRefreshRequest()) {
+            printf("[ADAPT] Persistent stable drift, refreshing baseline\n");
+            g_sensor_state = SENSOR_STATE_PAUSED;
+            VL53L5CX_StopRanging();
+            vTaskDelay(pdMS_TO_TICKS(50));
+            VL53L5CX_StartRanging();
+            vTaskDelay(pdMS_TO_TICKS(200));
+            VL53L5CX_LearnBaseline();
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
+            consecutive_captures = 0;
+            consecutive_window_active = 0;
+#endif
+            g_sensor_state = SENSOR_STATE_RUNNING;
+            cooldown = 5;
+            printf("[ADAPT] Stable-drift baseline refresh complete\n");
+            continue;
+        }
+
         /* Check primary sensor detection */
-        if (VL53L5CX_IsInsectDetected() && cooldown == 0) {
+        if (insect_detected && cooldown == 0) {
             if (g_capture_busy) continue;
             g_capture_busy = 1;
             g_sensor_state = SENSOR_STATE_PAUSED;
@@ -645,6 +666,9 @@ void sensor_task(void *arg)
             PERF_START(t);
             int rc = Capture_RequestSnapshot(60000);
             PERF_STOP(t);
+            /* sensor_task was blocked throughout camera/SD work. Do not compare
+               the first new ToF sample with stale pre-capture history. */
+            VL53L5CX_ResetDetectionFilterState();
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
 #if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
             if (consecutive_captures >= VL53L5CX_DET_MAX_DETECTIONS) {

@@ -401,7 +401,7 @@
     even very short camera exposures - safe to raise further if still too dark. */
 #define WS2812_ILLUMINATION_BRIGHTNESS  100
 
-/** Illumination color new update 0xGGRRBB!!!
+/** Illumination color (0xRRGGBB; driver converts once to WS2812 GRB).
     White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
     Green (0x00FF00): Insects less sensitive, more natural behavior
     Red (0xFF0000): Least disruptive to insects but camera needs more gain */
@@ -536,8 +536,8 @@
 #define VL53L5CX_DET_MOTION_THRESH      200     /* 8x8: higher motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
 #else
-#define VL53L5CX_DET_THRESHOLD_PCT      3       /* 4x4: lower signal drop threshold */
-#define VL53L5CX_DET_MOTION_THRESH      40      /* 4x4: lower motion threshold */
+#define VL53L5CX_DET_THRESHOLD_PCT      6       /* 4x4: above observed 4-5% idle noise */
+#define VL53L5CX_DET_MOTION_THRESH      60      /* 4x4: original noise-safe threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 1       /* 4x4: single zone triggers */
 #endif
 

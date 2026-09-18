@@ -443,6 +443,9 @@ void VL53L5CX_LearnBaseline(void)
     }
 
     s_baseline_ready = 1;
+    /* Baseline samples and settle frames must never remain in either temporal
+       detector history. The next live frames will prime fresh history. */
+    VL53L5CX_ResetDetectionFilterState();
     printf("\n[BASELINE] Done. Valid zones: %d/%d\n", valid_count, VL53L5CX_DET_NUM_ZONES);
     VL53L5CX_PrintBaselineFrame();
 }
@@ -1427,4 +1430,3 @@ void VL53L5CX_RefreshBaseline_Manual(void)
 
     printf("[BTN] Baseline refresh done\n");
 }
-

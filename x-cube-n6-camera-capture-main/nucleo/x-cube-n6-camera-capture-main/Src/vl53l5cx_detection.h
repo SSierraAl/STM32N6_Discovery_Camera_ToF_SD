@@ -28,6 +28,7 @@
 #endif
 
 #if defined(TOF_FAST_NOISE_FILTER_WIRING_REV)
+#include <string.h>
 int VL53L5CX_IsInsectDetectedFiltered(void);
 
 #if !VL53L5CX_DUAL_SENSOR && !TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4)
@@ -48,6 +49,19 @@ static uint8_t  s_task_prev_distance_valid[VL53L5CX_DET_NUM_ZONES] = {0};
 static uint16_t s_task_hist_signal[VL53L5CX_DET_NUM_ZONES][TOF_TASK_LATCH_HISTORY_FRAMES] = {{0}};
 static uint16_t s_task_hist_distance[VL53L5CX_DET_NUM_ZONES][TOF_TASK_LATCH_HISTORY_FRAMES] = {{0}};
 static uint8_t  s_task_hist_pos = 0U;
+static uint32_t s_task_filter_generation = 0U;
+
+static inline void VL53L5CX_ResetTaskFilterState(void)
+{
+    s_task_signal_latched_mask = 0U;
+    memset(s_task_prev_signal, 0, sizeof(s_task_prev_signal));
+    memset(s_task_prev_distance, 0, sizeof(s_task_prev_distance));
+    memset(s_task_prev_signal_valid, 0, sizeof(s_task_prev_signal_valid));
+    memset(s_task_prev_distance_valid, 0, sizeof(s_task_prev_distance_valid));
+    memset(s_task_hist_signal, 0, sizeof(s_task_hist_signal));
+    memset(s_task_hist_distance, 0, sizeof(s_task_hist_distance));
+    s_task_hist_pos = 0U;
+}
 
 static inline uint32_t VL53L5CX_TaskAbsDiffU32(uint32_t a, uint32_t b)
 {
@@ -68,6 +82,12 @@ static inline uint32_t VL53L5CX_TaskHistoryMax(
 
 static inline int VL53L5CX_IsInsectDetectedTaskLatched(void)
 {
+    const uint32_t filter_generation = VL53L5CX_GetDetectionFilterGeneration();
+    if (filter_generation != s_task_filter_generation) {
+        VL53L5CX_ResetTaskFilterState();
+        s_task_filter_generation = filter_generation;
+    }
+
     const int accepted = VL53L5CX_IsInsectDetectedFiltered();
     VL53L5CX_DetectionResult_t res = VL53L5CX_GetResult();
 

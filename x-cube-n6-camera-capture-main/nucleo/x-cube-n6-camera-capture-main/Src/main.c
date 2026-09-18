@@ -1014,7 +1014,7 @@ static void main_thread_fct(void *arg)
     SystemClock_Config();
     vPortSetupTimerInterrupt();
     CONSOLE_Config();
-    printf("[BUILD] KAN-36 light-edge-v1 %s %s maxDet=%u\n",
+    printf("[BUILD] KAN-36 drift-reset-v2 %s %s maxDet=%u\n",
            __DATE__, __TIME__, (unsigned)VL53L5CX_DET_MAX_DETECTIONS);
     Fuse_Programming();
 
