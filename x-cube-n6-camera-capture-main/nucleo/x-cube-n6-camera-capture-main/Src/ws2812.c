@@ -39,6 +39,7 @@ static volatile bool ws2812_flash_active = false;
 static uint32_t WS2812_ApplyBrightness(uint32_t color);
 static void WS2812_BuildPWMData(void);
 static bool WS2812_SendStrobeFrameReliable(uint32_t frame_copies);
+static bool WS2812_SendOnFrame(void);
 static void WS2812_LatchOffReliable(void);
 
 /* A completed DMA transfer only proves that the MCU sent the waveform; the
@@ -46,7 +47,6 @@ static void WS2812_LatchOffReliable(void);
    complete frames so a transiently misdecoded state is overwritten. OFF gets
    one extra copy because leaving light on is the unsafe failure mode. Attempts
    stay finite and transfers never overlap. */
-#define WS2812_STROBE_ON_FRAME_COPIES    2U
 #define WS2812_STROBE_OFF_FRAME_COPIES   3U
 #define WS2812_STROBE_EXTRA_ATTEMPTS     1U
 #define WS2812_STROBE_RETRY_GAP_MS       1U
@@ -225,6 +225,18 @@ static bool WS2812_SendStrobeFrameReliable(uint32_t frame_copies)
 }
 
 /**
+ * @brief Send the illumination ON state through the known-good single-frame
+ *        path. Retry only when the DMA transfer itself reports a failure.
+ */
+static bool WS2812_SendOnFrame(void)
+{
+    if (WS2812_Update()) return true;
+
+    HAL_Delay(WS2812_STROBE_RETRY_GAP_MS);
+    return WS2812_Update();
+}
+
+/**
  * @brief Send a redundant black frame and leave the timer output forced low.
  * @note  WS2812 devices have no readback/acknowledgement line. Three complete
  *        OFF frames plus a forced-low idle state are the strongest bounded
@@ -320,7 +332,7 @@ void WS2812_Flash(uint32_t color, uint8_t brightness, uint32_t duration_ms)
         ws2812_led_buffer[i] = grb_color;
     }
     ws2812_current_color = color;
-    (void)WS2812_SendStrobeFrameReliable(WS2812_STROBE_ON_FRAME_COPIES);
+    (void)WS2812_SendOnFrame();
     
     // Block for duration
     if (duration_ms > 0)
@@ -351,7 +363,11 @@ void WS2812_FlashStart(uint32_t color, uint8_t brightness)
         ws2812_led_buffer[i] = grb_color;
     }
     ws2812_current_color = color;
-    (void)WS2812_SendStrobeFrameReliable(WS2812_STROBE_ON_FRAME_COPIES);
+    bool delivered = WS2812_SendOnFrame();
+    printf("[LIGHT] ON color=0x%06lX brightness=%u dma=%s\n",
+           (unsigned long)(color & 0xFFFFFFU),
+           (unsigned)brightness,
+           delivered ? "OK" : "FAIL");
 }
 
 /**
@@ -359,9 +375,11 @@ void WS2812_FlashStart(uint32_t color, uint8_t brightness)
  */
 void WS2812_FlashStop(void)
 {
+    bool was_active = ws2812_flash_active;
     ws2812_flash_active = false;
     
     WS2812_LatchOffReliable();
+    if (was_active) printf("[LIGHT] OFF\n");
 }
 
 /**

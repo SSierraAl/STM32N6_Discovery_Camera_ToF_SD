@@ -197,6 +197,10 @@ uint8_t VL53L5CX_WaitMs(
 #define TOF_NEIGHBOR_SUPPORT_PCT          1U
 #define TOF_LOCAL_EVID_SIGNAL_PCT         2U
 #define TOF_LOCAL_EVID_DISTANCE_MM        3U
+/* A strong single-zone baseline change remains fail-open even when it was
+   already present in the first post-baseline frame. Weaker single-zone signal
+   candidates must show a fresh local edge before they can trigger a capture. */
+#define TOF_SIGNAL_STRONG_DROP_PCT        12U
 
 #define TOF_DEC_SIGNAL_ACCEPT             1U
 #define TOF_DEC_BOTH_ACCEPT               2U
@@ -206,6 +210,7 @@ uint8_t VL53L5CX_WaitMs(
 #define TOF_DEC_MOTION_CONFIRMED          6U
 #define TOF_DEC_VIBRATION_REJECT          7U
 #define TOF_DEC_FAIL_OPEN_ACCEPT          8U
+#define TOF_DEC_SIGNAL_STABLE_REJECT      9U
 
 static uint16_t s_prev_distance[VL53L5CX_DET_NUM_ZONES] = {0};
 static uint8_t  s_prev_valid[VL53L5CX_DET_NUM_ZONES] = {0};
@@ -416,9 +421,10 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
     }
 
     uint8_t best_z = 0U;
+    uint32_t best_strength = 0U;
     if (res.affected_count > 0U) {
         best_z = res.affected_zones[0];
-        uint32_t best_strength = res.affected_drop[0];
+        best_strength = res.affected_drop[0];
         for (uint8_t i = 1U; i < res.affected_count; i++) {
             if (res.affected_drop[i] > best_strength) {
                 best_strength = res.affected_drop[i];
@@ -516,7 +522,19 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
         decision = TOF_DEC_BOTH_ACCEPT;
         s_motion_confirm_pending = 0U;
     } else if (res.trigger_source == VL53L5CX_TRIG_SIGNAL) {
-        decision = TOF_DEC_SIGNAL_ACCEPT;
+        /* The captured idle logs show a persistent 7-11% baseline offset in
+           one zone with no frame-to-frame distance/signal edge. Previously the
+           SIGNAL branch accepted that first stable candidate unconditionally.
+           Keep fast/strong events fail-open, but do not photograph a weak,
+           stationary single-zone offset. */
+        if (res.affected_count == 1U &&
+            affected_with_temporal_evidence == 0U &&
+            best_strength < TOF_SIGNAL_STRONG_DROP_PCT) {
+            decision = TOF_DEC_SIGNAL_STABLE_REJECT;
+            accept = 0U;
+        } else {
+            decision = TOF_DEC_SIGNAL_ACCEPT;
+        }
         s_motion_confirm_pending = 0U;
     } else if (res.trigger_source == VL53L5CX_TRIG_MOTION) {
         if (res.affected_count > 1U) {
