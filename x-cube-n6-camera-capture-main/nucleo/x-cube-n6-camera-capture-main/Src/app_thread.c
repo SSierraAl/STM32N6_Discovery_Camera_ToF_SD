@@ -864,6 +864,17 @@ void storage_task(void *arg)
 }
 
 /* ==================== PIPELINE ==================== */
+static int Capture_ReturnWithIlluminationOff(int result)
+{
+#if WS2812_MODE == 0 || WS2812_MODE == 1
+    /* Final fail-safe cleanup for every success/error/timeout return path.
+       The normal camera-complete path still turns the ring off immediately;
+       this second cleanup catches a misdecoded OFF frame after SD activity. */
+    WS2812_FlashStop();
+#endif
+    return result;
+}
+
 int Capture_RequestSnapshot(uint32_t timeout_ms)
 {
     Perf_Start(&g_perf_timer);
@@ -874,18 +885,12 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
         /* Drain stale completion tokens from previous capture cycles. */
     }
     if (xQueueSend(camera_cmd_queue, &cmd, pdMS_TO_TICKS(100)) != pdTRUE) {
-#if WS2812_MODE == 0 || WS2812_MODE == 1
-        WS2812_FlashStop();
-#endif
-        return -2;
+        return Capture_ReturnWithIlluminationOff(-2);
     }
 
     TickType_t ticks = (timeout_ms > 0) ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY;
     if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) {
-#if WS2812_MODE == 0 || WS2812_MODE == 1
-        WS2812_FlashStop();
-#endif
-        return -1;
+        return Capture_ReturnWithIlluminationOff(-1);
     }
 
 #if WS2812_MODE == 1
@@ -896,24 +901,31 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
 
 #if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
     /* Wait for ALL BATCH_FRAMES to be stored before returning */
-    int frames_to_wait = g_last_batch_frames > 0 ? g_last_batch_frames : BATCH_FRAMES;
+    if (g_last_batch_frames <= 0) {
+        /* camera_task signals camera_ready_sem on capture failure as well.
+           Do not wait for storage tokens that will never be produced. */
+        return Capture_ReturnWithIlluminationOff(-1);
+    }
+    int frames_to_wait = g_last_batch_frames;
     for (int i = 0; i < frames_to_wait; i++) {
         if (timeout_ms > 0) {
             uint32_t elapsed = HAL_GetTick() - t_start;
-            if (elapsed >= timeout_ms) return -1;
+            if (elapsed >= timeout_ms) return Capture_ReturnWithIlluminationOff(-1);
             ticks = pdMS_TO_TICKS(timeout_ms - elapsed);
         } else { ticks = portMAX_DELAY; }
-        if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE) return -1;
+        if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE)
+            return Capture_ReturnWithIlluminationOff(-1);
     }
 #else
     if (timeout_ms > 0) {
         uint32_t elapsed = HAL_GetTick() - t_start;
-        if (elapsed >= timeout_ms) return -1;
+        if (elapsed >= timeout_ms) return Capture_ReturnWithIlluminationOff(-1);
         ticks = pdMS_TO_TICKS(timeout_ms - elapsed);
     } else { ticks = portMAX_DELAY; }
-    if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE) return -1;
+    if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE)
+        return Capture_ReturnWithIlluminationOff(-1);
 #endif
     Perf_Stop(&g_perf_timer);
-    if (g_last_storage_rc != 0) return -1;
-    return 0;
+    if (g_last_storage_rc != 0) return Capture_ReturnWithIlluminationOff(-1);
+    return Capture_ReturnWithIlluminationOff(0);
 }

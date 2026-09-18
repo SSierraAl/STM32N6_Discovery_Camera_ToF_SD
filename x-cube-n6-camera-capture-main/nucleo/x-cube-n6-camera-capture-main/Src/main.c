@@ -808,6 +808,12 @@ static void btn_thread_fct(void *arg)
             uint32_t t_capture_end = HAL_GetTick();
             uint32_t capture_elapsed = t_capture_end - t_capture_start;
 
+            /* Illumination is only needed by the camera. Turn it off before
+               any SD operation so card removal/reinit/write errors can never
+               keep the ring energized. A second cleanup remains below after
+               storage as a fail-safe retransmission. */
+            WS2812_FlashStop();
+
             if (rc != 0) {
                 printf("[BTN] >>> Camera capture FAILED (rc=%d)!\n", rc);
                 BSP_LED_Off(LED_RED);
