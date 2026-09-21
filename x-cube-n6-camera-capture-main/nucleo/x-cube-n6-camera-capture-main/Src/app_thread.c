@@ -334,6 +334,9 @@ void sensor_task(void *arg)
     (void)arg;
     extern volatile int system_ready;
     while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
+    printf("[TOF TEST] sensor_task started\n");
+#endif
 
     if (VL53L5CX_Init(&hi2c1) != 0) {
         g_sensor_state = SENSOR_STATE_STOPPED;
@@ -399,7 +402,8 @@ void sensor_task(void *arg)
     uint8_t consecutive_window_active = 0;
     TickType_t consecutive_window_start = 0;
 #endif
-#if TEST_TOF_MODE && !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && !VL53L5CX_DUAL_SENSOR && \
+    (VL53L5CX_DET_RESOLUTION == 4) && \
     (VL53L5CX_DET_ZONE_LOG_INTERVAL_MS > 0)
     TickType_t zone_log_last = xTaskGetTickCount();
 #endif
@@ -591,7 +595,8 @@ void sensor_task(void *arg)
         /* Evaluate every fresh frame so rejected stable drift can request one
            bounded baseline refresh. Never consume that request in cooldown. */
         const int insect_detected = VL53L5CX_IsInsectDetected();
-#if TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4) && \
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && \
+    (VL53L5CX_DET_RESOLUTION == 4) && \
     (VL53L5CX_DET_ZONE_LOG_INTERVAL_MS > 0)
         TickType_t zone_log_now = xTaskGetTickCount();
         if ((zone_log_now - zone_log_last) >=
@@ -601,7 +606,8 @@ void sensor_task(void *arg)
         }
 #endif
         if (cooldown == 0 && VL53L5CX_TakeBaselineRefreshRequest()) {
-#if TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4)
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && \
+    (VL53L5CX_DET_RESOLUTION == 4)
             VL53L5CX_PrintZoneSnapshot("drift");
 #endif
             printf("[ADAPT] Persistent stable drift, refreshing baseline\n");
@@ -650,7 +656,7 @@ void sensor_task(void *arg)
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
             vTaskDelay(pdMS_TO_TICKS(TEST_TOF_LED_MS));
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
-#if VL53L5CX_DET_RESOLUTION == 4
+#if VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
             VL53L5CX_PrintZoneSnapshot("trigger");
 #if VL53L5CX_DET_ZONE_LOG_INTERVAL_MS > 0
             zone_log_last = xTaskGetTickCount();

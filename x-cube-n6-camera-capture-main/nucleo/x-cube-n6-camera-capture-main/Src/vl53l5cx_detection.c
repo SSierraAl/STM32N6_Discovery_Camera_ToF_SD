@@ -35,7 +35,9 @@ static uint8_t   s_baseline_ready = 0;
 
 static VL53L5CX_DetectionResult_t s_last_result = {0};
 static uint8_t s_last_insect_detected = 0;
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
 static uint32_t s_last_frame_tick = 0U;
+#endif
 
 /* Observation-only diagnostics for the vibration/noise study.
    This flag intentionally lives locally for this characterization commit so
@@ -405,7 +407,7 @@ void VL53L5CX_LearnBaseline(void)
     uint32_t sum_signal[VL53L5CX_DET_NUM_ZONES] = {0};
     uint32_t sum_distance[VL53L5CX_DET_NUM_ZONES] = {0};
     uint16_t ok_frames[VL53L5CX_DET_NUM_ZONES] = {0};
-#if TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4)
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
     int16_t min_distance[VL53L5CX_DET_NUM_ZONES];
     int16_t max_distance[VL53L5CX_DET_NUM_ZONES] = {0};
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++)
@@ -427,7 +429,7 @@ void VL53L5CX_LearnBaseline(void)
                 }
                 sum_signal[z]   += s_results.signal_per_spad[idx];
                 sum_distance[z] += s_results.distance_mm[idx];
-#if TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4)
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
                 if (s_results.distance_mm[idx] < min_distance[z])
                     min_distance[z] = s_results.distance_mm[idx];
                 if (s_results.distance_mm[idx] > max_distance[z])
@@ -436,6 +438,9 @@ void VL53L5CX_LearnBaseline(void)
                 ok_frames[z]++;
             }
         }
+#if !(TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY)
+        printf("  [BASELINE %d/%d]\r", i + 1, baseline_samples);
+#endif
     }
 
     uint8_t valid_count = 0;
@@ -451,6 +456,9 @@ void VL53L5CX_LearnBaseline(void)
     for (uint8_t i = 0; i < settle_frames; i++) {
         if (!VL53L5CX_WaitForDataReady(1000)) continue;
         if (VL53L5CX_GetData() != 0) continue;
+#if !(TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY)
+        printf("  [SETTLE %d/%d]\r", i + 1, settle_frames);
+#endif
     }
 
     s_baseline_ready = 1;
@@ -459,7 +467,7 @@ void VL53L5CX_LearnBaseline(void)
     VL53L5CX_ResetDetectionFilterState();
     printf("\n[BASELINE] Done. Valid zones: %d/%d\n", valid_count, VL53L5CX_DET_NUM_ZONES);
     VL53L5CX_PrintBaselineFrame();
-#if TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4)
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
     /* Baseline is already per zone. Sample count and observed distance span
        identify unreliable/mixed zones before a floor mask is chosen. */
     printf("TOFBASE,t=%lu,format=z:valid:n:distance_mm:signal:span_mm",
@@ -482,7 +490,9 @@ int VL53L5CX_Update(void)
 {
     if (!VL53L5CX_WaitForDataReady(1000)) return 0;
     if (VL53L5CX_GetData() != 0) return 0;
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
     s_last_frame_tick = HAL_GetTick();
+#endif
 
     s_last_insect_detected = 0;
     s_last_result.insect_detected = 0;
@@ -827,6 +837,7 @@ void VL53L5CX_PrintBaselineFrame(void)
     printf("\r\n");
 }
 
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
 void VL53L5CX_PrintZoneSnapshot(const char *reason)
 {
     /* s_results is the frame VL53L5CX_Update() just read. No new ranging or
@@ -849,6 +860,7 @@ void VL53L5CX_PrintZoneSnapshot(const char *reason)
     }
     printf("\r\n");
 }
+#endif
 
 int VL53L5CX_ScanI2CBus(void)
 {

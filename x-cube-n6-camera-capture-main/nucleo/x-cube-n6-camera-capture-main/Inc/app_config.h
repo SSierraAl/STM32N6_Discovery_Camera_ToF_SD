@@ -434,6 +434,11 @@
    0 = PRODUCTION: normal capture + SD save on detection. */
 #define TEST_TOF_MODE                1
 
+/* Temporary 4x4 survey. Set to 0 after collecting logs to restore the
+   previous ZFRAME/NOISEMETRIC/FASTNOISE telemetry without removing it.
+   Previous value: this option did not exist; normal telemetry was enabled. */
+#define VL53L5CX_DET_ZONE_SURVEY     1
+
 
 /** RED LED indication duration in TEST_TOF_MODE (ms). */
 #define TEST_TOF_LED_MS              300
@@ -585,10 +590,14 @@
    0 disables periodic snapshots; event snapshots still print.
    Previous value: no dedicated zone snapshot log. */
 #define VL53L5CX_DET_ZONE_LOG_INTERVAL_MS  2000U
-/* Previous value: 1 in Debug_Detection. TOFZONE includes status and motion;
-   suppress per-frame ZFRAME to keep the sensor loop responsive at 115200 baud. */
+/* Previous ZFRAME value: 1 (every frame for zone_monitor.py). Suppress it
+   only while the temporary ToF-only zone survey is active. */
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
 #define VL53L5CX_DET_DEBUG_ZFRAME       0
-#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1  /* Previous value: 1; used when enabled */
+#else
+#define VL53L5CX_DET_DEBUG_ZFRAME       1  //1 for debug and python interface
+#endif
+#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 

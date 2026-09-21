@@ -148,9 +148,11 @@ VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void);
 void VL53L5CX_PrintAllZoneParams(void);
 void VL53L5CX_PrintZFrame(void);
 void VL53L5CX_PrintBaselineFrame(void);
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
 /** Print the already-read 4x4 zone frame for floor/wall survey (no I2C read).
     Each tuple is zone:baseline_valid:status:distance_mm:signal:motion. */
 void VL53L5CX_PrintZoneSnapshot(const char *reason);
+#endif
 int  VL53L5CX_ScanI2CBus(void);
 
 /* --- Legacy Test Functions --- */

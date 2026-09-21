@@ -927,6 +927,8 @@ static int main_freertos(void)
                             main_thread_stack, &main_thread_cb);
     assert(hdl != NULL);
 
+    /* ---- Storage and camera tasks are not needed for the ToF-only test. ---- */
+#if !TEST_TOF_MODE
     /* ---- Storage task (blocking SD writes) ---- */
     hdl = xTaskCreateStatic(storage_task, "storage",
                             STORAGE_TASK_STACK_SIZE, NULL,
@@ -940,6 +942,12 @@ static int main_freertos(void)
                             tskIDLE_PRIORITY + 3,
                             camera_thread_stack, &camera_thread_cb);
     assert(hdl != NULL);
+#else
+    (void)storage_thread_stack;
+    (void)storage_thread_cb;
+    (void)camera_thread_stack;
+    (void)camera_thread_cb;
+#endif
 
     /* ---- Sensor task (ToF monitoring, highest priority for detection) ----
        Not needed in ON-DEMAND mode (CAPTURE_MODE=0): capture is triggered
@@ -1014,7 +1022,11 @@ static void main_thread_fct(void *arg)
     SystemClock_Config();
     vPortSetupTimerInterrupt();
     CONSOLE_Config();
-    printf("[BUILD] KAN-36 tof-zones-v1 %s %s maxDet=%u\n",
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
+    printf("[BUILD] KAN-36 tof-zones-v2 %s %s maxDet=%u\n",
+#else
+    printf("[BUILD] KAN-36 drift-reset-v2 %s %s maxDet=%u\n",
+#endif
            __DATE__, __TIME__, (unsigned)VL53L5CX_DET_MAX_DETECTIONS);
     Fuse_Programming();
 
@@ -1074,6 +1086,7 @@ static void main_thread_fct(void *arg)
        - Card state machine not ready after reset
 
        We retry the full init sequence up to SD_MAX_RETRIES times until success. */
+#if !TEST_TOF_MODE
     #define SD_MAX_RETRIES  5
     #define SD_RETRY_DELAY_MS 500
 
@@ -1168,6 +1181,9 @@ static void main_thread_fct(void *arg)
     if (!sd_ok) {
         printf("\n[ERROR] SD card NOT detected after %d attempts! Camera captures will fail.\n", SD_MAX_RETRIES);
     }
+#else
+    printf("[TOF TEST] SD init skipped\n");
+#endif
 
     /* ---- Initialize IPC (queues + semaphores) ----
        Must be done AFTER console init (printf used in IPC_Init diagnostics)
@@ -1187,7 +1203,9 @@ static void main_thread_fct(void *arg)
         Mode 4: full init + warmup + standby. When ToF triggers, camera wakes.
         Mode 1: full init + warmup + leaves pipe RUNNING. Camera_task does NOT
         re-init — it just services ISP in the idle loop. */
-#if CAPTURE_MODE == 4
+#if TEST_TOF_MODE
+    printf("[TOF TEST] Camera init skipped\n");
+#elif CAPTURE_MODE == 4
     printf("[INIT] Camera callback-batch init (before tasks start to avoid I2C conflict)...\n");
     if (CAM_CallbackInit(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS) != 0) {
         printf("[WARN] Camera callback init FAILED! Captures may fail.\n");
@@ -1209,6 +1227,11 @@ static void main_thread_fct(void *arg)
     /* ---- System Ready ---- */
     printf("\n===========================================\n");
     printf("[INFO] System READY!\n");
+#if TEST_TOF_MODE
+    printf("[INFO] ToF test only: no SD, camera or photographs\n");
+    printf("[INFO]   - sensor_task  (ToF monitoring)\n");
+    printf("[INFO] Press USER button (PC13) to re-learn ToF baseline.\n");
+#else
     printf("[INFO] Multi-threaded architecture active:\n");
     printf("[INFO]   - sensor_task  (ToF monitoring)\n");
     printf("[INFO]   - camera_task  (acquisition)\n");
@@ -1226,6 +1249,7 @@ static void main_thread_fct(void *arg)
 #endif
 
     printf("[INFO] Press USER button (PC13) to capture + save.\n");
+#endif
     printf("===========================================\n\n");
 
 
