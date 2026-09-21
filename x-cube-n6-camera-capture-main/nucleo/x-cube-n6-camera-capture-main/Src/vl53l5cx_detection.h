@@ -2,12 +2,12 @@
 #define VL53L5CX_DETECTION_SRC_WRAPPER_H
 
 /* Tuning-only diagnostics added while characterizing the robust detector.
-   Keep at 1 during validation. Set to 0 for the deployed production build:
-   - compiles out the observation-only NOISEMETRIC calculations/print
-   - suppresses FASTNOISE and TOFDEC UART prints from platform.c
-   - does NOT disable the robust filtering/history/confirmation algorithm. */
+   Previous value: 1 (printed NOISEMETRIC/FASTNOISE for every raw candidate).
+   At 0, compiles out the observation-only NOISEMETRIC calculations and
+   suppresses FASTNOISE/TOFDEC prints. The filtering algorithm still runs.
+   Set to 1 only when tracing filter internals. */
 #ifndef VL53L5CX_DET_TUNING_DIAGNOSTICS
-#define VL53L5CX_DET_TUNING_DIAGNOSTICS  1
+#define VL53L5CX_DET_TUNING_DIAGNOSTICS  0
 #endif
 
 #ifndef VL53L5CX_DET_DEBUG_NOISE_METRICS

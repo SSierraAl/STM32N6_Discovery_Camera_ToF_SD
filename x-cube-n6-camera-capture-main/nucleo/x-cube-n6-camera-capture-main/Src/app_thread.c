@@ -399,6 +399,10 @@ void sensor_task(void *arg)
     uint8_t consecutive_window_active = 0;
     TickType_t consecutive_window_start = 0;
 #endif
+#if TEST_TOF_MODE && !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    (VL53L5CX_DET_ZONE_LOG_INTERVAL_MS > 0)
+    TickType_t zone_log_last = xTaskGetTickCount();
+#endif
 
     while (1) {
         if (g_sensor_state == SENSOR_STATE_PAUSED) { vTaskDelay(pdMS_TO_TICKS(50)); continue; }
@@ -587,7 +591,19 @@ void sensor_task(void *arg)
         /* Evaluate every fresh frame so rejected stable drift can request one
            bounded baseline refresh. Never consume that request in cooldown. */
         const int insect_detected = VL53L5CX_IsInsectDetected();
+#if TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4) && \
+    (VL53L5CX_DET_ZONE_LOG_INTERVAL_MS > 0)
+        TickType_t zone_log_now = xTaskGetTickCount();
+        if ((zone_log_now - zone_log_last) >=
+            pdMS_TO_TICKS(VL53L5CX_DET_ZONE_LOG_INTERVAL_MS)) {
+            zone_log_last = zone_log_now;
+            VL53L5CX_PrintZoneSnapshot("periodic");
+        }
+#endif
         if (cooldown == 0 && VL53L5CX_TakeBaselineRefreshRequest()) {
+#if TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4)
+            VL53L5CX_PrintZoneSnapshot("drift");
+#endif
             printf("[ADAPT] Persistent stable drift, refreshing baseline\n");
             g_sensor_state = SENSOR_STATE_PAUSED;
             VL53L5CX_StopRanging();
@@ -634,6 +650,12 @@ void sensor_task(void *arg)
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
             vTaskDelay(pdMS_TO_TICKS(TEST_TOF_LED_MS));
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+#if VL53L5CX_DET_RESOLUTION == 4
+            VL53L5CX_PrintZoneSnapshot("trigger");
+#if VL53L5CX_DET_ZONE_LOG_INTERVAL_MS > 0
+            zone_log_last = xTaskGetTickCount();
+#endif
+#endif
             g_sensor_state = SENSOR_STATE_RUNNING;
             g_capture_busy = 0;
             cooldown = 30;

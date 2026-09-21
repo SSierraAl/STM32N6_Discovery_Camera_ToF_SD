@@ -580,8 +580,15 @@
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
    DEBUG MODE 2: ALLPARAM - full per-zone parameters every N frames (datalogger.py)
    Both can be enabled simultaneously (bandwidth trade-off). */
-#define VL53L5CX_DET_DEBUG_ZFRAME       1  //1 for debug and python interface
-#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
+/* 4x4 TEST_TOF_MODE floor/wall survey: one snapshot every 2 s (including
+   candidate frames), plus accepted triggers and drift refreshes.
+   0 disables periodic snapshots; event snapshots still print.
+   Previous value: no dedicated zone snapshot log. */
+#define VL53L5CX_DET_ZONE_LOG_INTERVAL_MS  2000U
+/* Previous value: 1 in Debug_Detection. TOFZONE includes status and motion;
+   suppress per-frame ZFRAME to keep the sensor loop responsive at 115200 baud. */
+#define VL53L5CX_DET_DEBUG_ZFRAME       0
+#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1  /* Previous value: 1; used when enabled */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 
