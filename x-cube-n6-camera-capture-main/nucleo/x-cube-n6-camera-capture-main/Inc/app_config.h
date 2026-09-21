@@ -434,10 +434,15 @@
    0 = PRODUCTION: normal capture + SD save on detection. */
 #define TEST_TOF_MODE                1
 
-/* Temporary 4x4 survey. Set to 0 after collecting logs to restore the
-   previous ZFRAME/NOISEMETRIC/FASTNOISE telemetry without removing it.
-   Previous value: this option did not exist; normal telemetry was enabled. */
-#define VL53L5CX_DET_ZONE_SURVEY     1
+/* Temporary 4x4 zone survey; 0 restores the original ZFRAME records used
+   by the telemetry app. Previous value in the survey build: 1.
+   Before that build, this option did not exist. */
+#define VL53L5CX_DET_ZONE_SURVEY     0
+
+/* Trial detection logic for the single 4x4 ToF in TEST_TOF_MODE only.
+   Previous value: absent (raw 6% signal / 60 motion, retriggered every cooldown).
+   Production and dual-sensor modes keep their existing detector. */
+#define VL53L5CX_DET_HIGH_SENS_TEST  1
 
 
 /** RED LED indication duration in TEST_TOF_MODE (ms). */

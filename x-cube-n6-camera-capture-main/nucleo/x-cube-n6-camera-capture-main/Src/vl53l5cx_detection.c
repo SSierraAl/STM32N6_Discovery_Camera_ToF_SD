@@ -37,14 +37,57 @@ static uint8_t   s_baseline_ready = 0;
 
 static VL53L5CX_DetectionResult_t s_last_result = {0};
 static uint8_t s_last_insect_detected = 0;
+
+#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
+    (VL53L5CX_DET_RESOLUTION == 4)
+/* Keep a photographed zone latched while the same signal offset persists.
+   The short edge test still accepts another object in that zone immediately.
+   Zone-specific recalibration happens only after a long stationary plateau. */
+#define TOF_TEST_CLEAR_FRAMES       3U
+#define TOF_TEST_QUIET_FRAMES      15U
+#define TOF_TEST_EDGE_SIGNAL_PCT    3U
+#define TOF_TEST_EDGE_DISTANCE_MM   3U
+#define TOF_TEST_QUIET_SIGNAL_PCT   4U
+#define TOF_TEST_SETTLE_MS          20000U
+#define TOF_TEST_SCENE_SETTLE_MS     5000U
+static uint16_t s_test_latched = 0U;
+static uint8_t s_test_clear[16] = {0};
+static uint32_t s_test_prev_sig[16] = {0};
+static uint16_t s_test_prev_dist[16] = {0};
+static uint32_t s_test_prev_motion[16] = {0};
+static uint8_t s_test_prev_valid[16] = {0};
+static uint32_t s_test_stable_since[16] = {0};
+static uint32_t s_test_stable_sig[16] = {0};
+static uint32_t s_test_scene_since = 0U;
+static uint8_t s_test_refresh_requested = 0U;
+
+static uint32_t TestAbsDiff(uint32_t a, uint32_t b)
+{
+    return a >= b ? a - b : b - a;
+}
+
+static void TestResetDetectionState(void)
+{
+    s_test_latched = 0U;
+    memset(s_test_clear, 0, sizeof(s_test_clear));
+    memset(s_test_prev_sig, 0, sizeof(s_test_prev_sig));
+    memset(s_test_prev_dist, 0, sizeof(s_test_prev_dist));
+    memset(s_test_prev_motion, 0, sizeof(s_test_prev_motion));
+    memset(s_test_prev_valid, 0, sizeof(s_test_prev_valid));
+    memset(s_test_stable_since, 0, sizeof(s_test_stable_since));
+    memset(s_test_stable_sig, 0, sizeof(s_test_stable_sig));
+    s_test_scene_since = 0U;
+    s_test_refresh_requested = 0U;
+}
+#endif
+
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
 static uint32_t s_last_frame_tick = 0U;
 #endif
 
 /* Observation-only diagnostics for the vibration/noise study.
-   This flag intentionally lives locally for this characterization commit so
-   no existing app_config mode or alternate sensor path is modified.
-   Set to 0 for production to compile out the extra calculations/printf. */
+   The source wrapper selects the mode-specific setting; keep the fallback
+   when this file is built without that wrapper. */
 #ifndef VL53L5CX_DET_DEBUG_NOISE_METRICS
 #define VL53L5CX_DET_DEBUG_NOISE_METRICS  1
 #endif
@@ -389,6 +432,10 @@ void VL53L5CX_ResetBaseline(void)
     memset(s_baseline_distance, 0, sizeof(s_baseline_distance));
     memset(s_zone_valid, 0, sizeof(s_zone_valid));
     s_baseline_ready = 0;
+#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
+    (VL53L5CX_DET_RESOLUTION == 4)
+    TestResetDetectionState();
+#endif
     printf("[ToF] Baseline reset\n");
 }
 
@@ -766,6 +813,149 @@ int VL53L5CX_IsInsectDetected(void)
 {
     return s_last_insect_detected;
 }
+
+#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
+    (VL53L5CX_DET_RESOLUTION == 4)
+int VL53L5CX_TestDetectionStep(int allow_event)
+{
+    const uint32_t now = HAL_GetTick();
+    uint16_t raw_mask = 0U;
+    uint8_t new_evidence = 0U;
+    uint8_t distance_up = 0U, distance_down = 0U;
+    uint8_t signal_up = 0U, signal_down = 0U;
+    uint8_t motion_active = 0U;
+    VL53L5CX_DetectionResult_t res = VL53L5CX_GetResult();
+
+    for (uint8_t i = 0U; i < res.affected_count; i++) {
+        if (res.affected_zones[i] < 16U)
+            raw_mask |= (uint16_t)(1U << res.affected_zones[i]);
+    }
+
+    for (uint8_t z = 0U; z < 16U; z++) {
+        const uint16_t bit = (uint16_t)(1U << z);
+        const uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+        const uint32_t signal = s_results.signal_per_spad[idx];
+        const int16_t distance = s_results.distance_mm[idx];
+        const uint32_t base = s_baseline_signal[z];
+        const uint16_t base_dist = s_baseline_distance[z];
+        const uint8_t valid = (uint8_t)(s_zone_valid[z] &&
+            VL53L5CX_STATUS_OK_FILT(s_results.target_status[idx]) &&
+            signal >= VL53L5CX_DET_MIN_SIGNAL && distance > 0);
+        uint32_t motion = 0U;
+#ifndef VL53L5CX_DISABLE_MOTION_INDICATOR
+        if (s_motion_initialized)
+            motion = s_results.motion_indicator.motion[s_motion_config.map_id[z]];
+#endif
+        if (motion >= VL53L5CX_DET_MOTION_THRESH) motion_active = 1U;
+
+        /* Clear an old event even if the target becomes temporarily invalid.
+           Motion is allowed to trigger on invalid ranging zones. */
+        if (!(raw_mask & bit)) {
+            if (s_test_clear[z] < TOF_TEST_QUIET_FRAMES) s_test_clear[z]++;
+            if (s_test_clear[z] >= TOF_TEST_CLEAR_FRAMES)
+                s_test_latched &= (uint16_t)~bit;
+        } else {
+            s_test_clear[z] = 0U;
+        }
+        const uint8_t latched = (uint8_t)((s_test_latched & bit) != 0U);
+        const uint8_t motion_edge = (uint8_t)(motion >= VL53L5CX_DET_MOTION_THRESH &&
+            (s_test_prev_motion[z] < VL53L5CX_DET_MOTION_THRESH ||
+             motion >= s_test_prev_motion[z] + 40U));
+
+        if (!valid) {
+            if (allow_event && (raw_mask & bit) && (!latched || motion_edge))
+                new_evidence = 1U;
+            s_test_prev_valid[z] = 0U;
+            s_test_prev_motion[z] = motion;
+            s_test_stable_since[z] = 0U;
+            continue;
+        }
+
+        const uint32_t signal_change = (base > 0U) ?
+            (uint32_t)(((uint64_t)TestAbsDiff(signal, base) * 100U) / base) : 0U;
+        const uint32_t distance_change = TestAbsDiff((uint32_t)distance, base_dist);
+        if (base_dist > 0U && distance >= (int32_t)base_dist + 4) distance_up++;
+        if (base_dist > 0U && (int32_t)distance + 4 <= base_dist) distance_down++;
+        if (base > 0U && signal >= base && signal_change >= 7U) signal_up++;
+        if (base > 0U && signal < base && signal_change >= 7U) signal_down++;
+
+        const uint32_t frame_signal_pct = (s_test_prev_valid[z] &&
+            s_test_prev_sig[z] > 0U) ?
+            (uint32_t)(((uint64_t)TestAbsDiff(signal, s_test_prev_sig[z]) * 100U) /
+                       s_test_prev_sig[z]) : 0U;
+        const uint32_t frame_distance_mm = s_test_prev_valid[z] ?
+            TestAbsDiff((uint32_t)distance, s_test_prev_dist[z]) : 0U;
+        if (allow_event && (raw_mask & bit) &&
+            (!latched || frame_signal_pct >= TOF_TEST_EDGE_SIGNAL_PCT ||
+             frame_distance_mm >= TOF_TEST_EDGE_DISTANCE_MM || motion_edge))
+            new_evidence = 1U;
+
+        /* A quiet zone follows slow signal drift without changing its floor
+           distance. Never learn an unphotographed raw candidate as baseline. */
+        if (!latched && !(raw_mask & bit) && s_test_clear[z] >= TOF_TEST_QUIET_FRAMES &&
+            signal_change <= TOF_TEST_QUIET_SIGNAL_PCT &&
+            distance_change <= 3U && motion < VL53L5CX_DET_MOTION_THRESH && base) {
+            int32_t diff = (int32_t)signal - (int32_t)base;
+            s_baseline_signal[z] = (uint32_t)((int32_t)base + diff / 32);
+        }
+
+        /* After the first photograph, a truly stationary offset (such as the
+           empty-box zone 4 plateau) can be re-centered one zone at a time.
+           No zone mask or distance reference is changed. */
+        if (latched && (raw_mask & bit) && motion < VL53L5CX_DET_MOTION_THRESH &&
+            distance_change <= 3U && s_test_prev_valid[z] &&
+            frame_signal_pct <= 2U && frame_distance_mm <= 2U) {
+            if (s_test_stable_since[z] == 0U) {
+                s_test_stable_since[z] = now;
+                s_test_stable_sig[z] = signal;
+            } else {
+                s_test_stable_sig[z] =
+                    (uint32_t)(((uint64_t)s_test_stable_sig[z] * 7U + signal) / 8U);
+                if ((now - s_test_stable_since[z]) >= TOF_TEST_SETTLE_MS &&
+                    signal_change >= VL53L5CX_DET_THRESHOLD_PCT) {
+                    s_baseline_signal[z] = s_test_stable_sig[z];
+                    printf("[ADAPT] Zone %u signal baseline %lu -> %lu (stable 20 s)\n",
+                           (unsigned)z, (unsigned long)base,
+                           (unsigned long)s_baseline_signal[z]);
+                    s_test_stable_since[z] = 0U;
+                    /* Leave the latch set until three clean raw frames. */
+                }
+            }
+        } else {
+            s_test_stable_since[z] = 0U;
+        }
+
+        s_test_prev_sig[z] = signal;
+        s_test_prev_dist[z] = (uint16_t)distance;
+        s_test_prev_motion[z] = motion;
+        s_test_prev_valid[z] = 1U;
+    }
+
+    /* Widespread persistent distance or signal shift is a scene change,
+       unlike a one-zone insect. Request one bounded full baseline refresh. */
+    if (!motion_active && (distance_up >= 12U || distance_down >= 12U ||
+                           signal_up >= 12U || signal_down >= 12U)) {
+        if (s_test_scene_since == 0U) s_test_scene_since = now;
+        if ((now - s_test_scene_since) >= TOF_TEST_SCENE_SETTLE_MS)
+            s_test_refresh_requested = 1U;
+    } else {
+        s_test_scene_since = 0U;
+    }
+
+    if (allow_event && new_evidence) {
+        s_test_latched |= raw_mask;
+        return 1;
+    }
+    return 0;
+}
+
+int VL53L5CX_TestTakeBaselineRefreshRequest(void)
+{
+    if (!s_test_refresh_requested) return 0;
+    s_test_refresh_requested = 0U;
+    return 1;
+}
+#endif
 
 VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void)
 {

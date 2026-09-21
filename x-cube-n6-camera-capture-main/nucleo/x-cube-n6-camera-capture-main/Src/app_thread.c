@@ -592,9 +592,14 @@ void sensor_task(void *arg)
         }
 #endif
 
-        /* Evaluate every fresh frame so rejected stable drift can request one
-           bounded baseline refresh. Never consume that request in cooldown. */
+        /* Evaluate every fresh frame, including cooldown, so persistent raw
+           candidates remain latched across test indications. */
+#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
+    (VL53L5CX_DET_RESOLUTION == 4)
+        const int insect_detected = VL53L5CX_TestDetectionStep(cooldown == 0);
+#else
         const int insect_detected = VL53L5CX_IsInsectDetected();
+#endif
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && \
     (VL53L5CX_DET_RESOLUTION == 4) && \
     (VL53L5CX_DET_ZONE_LOG_INTERVAL_MS > 0)
@@ -605,7 +610,14 @@ void sensor_task(void *arg)
             VL53L5CX_PrintZoneSnapshot("periodic");
         }
 #endif
+#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
+    (VL53L5CX_DET_RESOLUTION == 4)
+        if (cooldown == 0 && !insect_detected &&
+            (VL53L5CX_TakeBaselineRefreshRequest() ||
+             VL53L5CX_TestTakeBaselineRefreshRequest())) {
+#else
         if (cooldown == 0 && VL53L5CX_TakeBaselineRefreshRequest()) {
+#endif
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && \
     (VL53L5CX_DET_RESOLUTION == 4)
             VL53L5CX_PrintZoneSnapshot("drift");

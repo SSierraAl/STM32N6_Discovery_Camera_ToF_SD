@@ -143,6 +143,12 @@ void VL53L5CX_RefreshBaseline_Manual(void);
 int  VL53L5CX_Update(void);
 int  VL53L5CX_IsInsectDetected(void);
 VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void);
+#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
+    (VL53L5CX_DET_RESOLUTION == 4)
+/** Evaluate one already-read frame. allow_event is false during cooldown. */
+int  VL53L5CX_TestDetectionStep(int allow_event);
+int  VL53L5CX_TestTakeBaselineRefreshRequest(void);
+#endif
 
 /* --- Debug / Diagnostics --- */
 void VL53L5CX_PrintAllZoneParams(void);
