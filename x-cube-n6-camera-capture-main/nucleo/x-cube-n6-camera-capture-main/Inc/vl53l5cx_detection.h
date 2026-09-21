@@ -143,11 +143,15 @@ void VL53L5CX_RefreshBaseline_Manual(void);
 int  VL53L5CX_Update(void);
 int  VL53L5CX_IsInsectDetected(void);
 VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void);
-#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
-    (VL53L5CX_DET_RESOLUTION == 4)
-/** Evaluate one already-read frame. allow_event is false during cooldown. */
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
+     (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
+/** Evaluate one already-read frame. allow_event is false during cooldown.
+    Kept across camera captures so a persistent candidate cannot loop. */
 int  VL53L5CX_TestDetectionStep(int allow_event);
 int  VL53L5CX_TestTakeBaselineRefreshRequest(void);
+/** Discard pre-capture comparisons without erasing active zone latches. */
+void VL53L5CX_ZoneDetectorAfterCapture(void);
 #endif
 
 /* --- Debug / Diagnostics --- */

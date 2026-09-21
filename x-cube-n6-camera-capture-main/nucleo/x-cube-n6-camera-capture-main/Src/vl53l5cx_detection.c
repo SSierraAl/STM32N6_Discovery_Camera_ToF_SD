@@ -38,9 +38,10 @@ static uint8_t   s_baseline_ready = 0;
 static VL53L5CX_DetectionResult_t s_last_result = {0};
 static uint8_t s_last_insect_detected = 0;
 
-#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
-    (VL53L5CX_DET_RESOLUTION == 4)
-/* Keep a photographed zone latched while the same signal offset persists.
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
+     (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
+/* Keep a detected zone latched while the same signal offset persists.
    The short edge test still accepts another object in that zone immediately.
    Zone-specific recalibration happens only after a long stationary plateau. */
 #define TOF_TEST_CLEAR_FRAMES       3U
@@ -81,6 +82,18 @@ static void TestResetDetectionState(void)
     memset(s_test_stable_frames, 0, sizeof(s_test_stable_frames));
     s_test_scene_since = 0U;
     s_test_refresh_requested = 0U;
+}
+
+void VL53L5CX_ZoneDetectorAfterCapture(void)
+{
+    /* The sensor task does not read frames while camera/SD work blocks it.
+       The first subsequent frame must not be compared against that stale
+       pre-capture frame. Preserve latches so the same insect does not cause
+       another capture solely because the camera finished. */
+    memset(s_test_prev_valid, 0, sizeof(s_test_prev_valid));
+    memset(s_test_stable_since, 0, sizeof(s_test_stable_since));
+    memset(s_test_stable_frames, 0, sizeof(s_test_stable_frames));
+    s_test_scene_since = 0U;
 }
 #endif
 
@@ -435,8 +448,9 @@ void VL53L5CX_ResetBaseline(void)
     memset(s_baseline_distance, 0, sizeof(s_baseline_distance));
     memset(s_zone_valid, 0, sizeof(s_zone_valid));
     s_baseline_ready = 0;
-#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
-    (VL53L5CX_DET_RESOLUTION == 4)
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
+     (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
     TestResetDetectionState();
 #endif
     printf("[ToF] Baseline reset\n");
@@ -817,8 +831,9 @@ int VL53L5CX_IsInsectDetected(void)
     return s_last_insect_detected;
 }
 
-#if TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST && !VL53L5CX_DUAL_SENSOR && \
-    (VL53L5CX_DET_RESOLUTION == 4)
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
+     (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
 int VL53L5CX_TestDetectionStep(int allow_event)
 {
     const uint32_t now = HAL_GetTick();

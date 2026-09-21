@@ -419,9 +419,10 @@
    1 = TEST MODE: ToF-only build. At boot the CAMERA and the SD CARD
        are never initialized and camera_task / storage_task are never
        created (see main.c), so no photo can be taken and the card is
-       never touched. The ToF loop itself runs exactly like production
-       (init, configure, baseline learning, periodic refresh,
-       detection), but on detection NO photo is taken and NOTHING is
+       never touched. Sensor setup and baseline learning use the normal
+       path. With HIGH_SENS_TEST=1 and HIGH_SENS_CAMERA=1, the same 4x4
+       detector runs in both modes; the legacy camera-activation refresh is
+       disabled for that detector. On detection NO photo is taken and NOTHING is
        saved. Instead:
          - console: list of affected zones
            (zone numbers show WHERE in the FOV the target was, so
@@ -439,10 +440,16 @@
    Before that build, this option did not exist. */
 #define VL53L5CX_DET_ZONE_SURVEY     0
 
-/* Trial detection logic for the single 4x4 ToF in TEST_TOF_MODE only.
+/* Validated single-sensor 4x4 detector in TEST_TOF_MODE.
    Previous value: absent (raw 6% signal / 60 motion, retriggered every cooldown).
-   Production and dual-sensor modes keep their existing detector. */
+   Dual-sensor and 8x8 modes keep their existing detector. */
 #define VL53L5CX_DET_HIGH_SENS_TEST  1
+
+/* Run the same per-zone detector when TEST_TOF_MODE=0 (camera + SD).
+   Set to 0 to select the previous camera-only temporal filter. Previous
+   value: absent; the camera always used that previous filter. This switch
+   has no effect in TEST_TOF_MODE, dual-sensor mode or 8x8. */
+#define VL53L5CX_DET_HIGH_SENS_CAMERA  1
 
 
 /** RED LED indication duration in TEST_TOF_MODE (ms). */
@@ -581,7 +588,11 @@
 #define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   0
 #define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500  /* refresh every N Update() frames */
 
-/* MODE 2: Adaptive refresh (consecutive camera activations) - ENABLED by default */
+/* MODE 2: Consecutive camera activation refresh (legacy camera detector and
+   dual sensor). When HIGH_SENS_CAMERA=1 in single-sensor 4x4, this counter
+   is bypassed: a target still inside the box must not be learned as the
+   background after two photos. The per-zone stable and scene-wide drift
+   recovery of the new detector remain active. Previous values are retained. */
 #define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
 #define VL53L5CX_DET_REFRESH_WINDOW_SECS        5    /* seconds allowed after the previous capture pipeline */
 #define VL53L5CX_DET_MAX_DETECTIONS             2    /* consecutive camera activations before refresh */

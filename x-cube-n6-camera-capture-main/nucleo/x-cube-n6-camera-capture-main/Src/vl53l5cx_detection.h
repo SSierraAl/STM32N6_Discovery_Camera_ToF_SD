@@ -5,10 +5,12 @@
 
 /* Tuning-only diagnostics added while characterizing the robust detector.
    Previous value: 1 (printed NOISEMETRIC/FASTNOISE for every raw candidate).
-   Disable the repeated NOISEMETRIC diagnostic in the ToF-only trial too;
-   ZFRAME and the established telemetry prints remain enabled. */
+   Disable the repeated NOISEMETRIC/FASTNOISE diagnostics when the per-zone
+   detector is active, including camera mode. ZFRAME remains unchanged. */
 #ifndef VL53L5CX_DET_TUNING_DIAGNOSTICS
-#if TEST_TOF_MODE && (VL53L5CX_DET_ZONE_SURVEY || VL53L5CX_DET_HIGH_SENS_TEST)
+#if (TEST_TOF_MODE && (VL53L5CX_DET_ZONE_SURVEY || VL53L5CX_DET_HIGH_SENS_TEST)) || \
+    (!TEST_TOF_MODE && !VL53L5CX_DUAL_SENSOR && \
+     (VL53L5CX_DET_RESOLUTION == 4) && VL53L5CX_DET_HIGH_SENS_CAMERA)
 #define VL53L5CX_DET_TUNING_DIAGNOSTICS  0
 #else
 #define VL53L5CX_DET_TUNING_DIAGNOSTICS  1
