@@ -460,7 +460,9 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
         s_stable_reject_streak = 0U;
         s_stable_refresh_armed = 1U;
         if (s_motion_confirm_pending) {
+#if VL53L5CX_DET_TUNING_DIAGNOSTICS
             printf("TOFDEC,motion_drop,z=%u\r\n", (unsigned)s_motion_pending_zone);
+#endif
             s_motion_confirm_pending = 0U;
         }
         return 0;
@@ -627,13 +629,16 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
             s_stable_refresh_armed && !s_baseline_refresh_requested) {
             s_baseline_refresh_requested = 1U;
             s_stable_refresh_armed = 0U;
+#if VL53L5CX_DET_TUNING_DIAGNOSTICS
             printf("TOFDEC,baseline_refresh_request,stable=%u\r\n",
                    (unsigned)s_stable_reject_streak);
+#endif
         }
     } else {
         s_stable_reject_streak = 0U;
     }
 
+#if VL53L5CX_DET_TUNING_DIAGNOSTICS
     printf("FASTNOISE,Gfd=%ld,MADfd=%lu,cohFd=%u/%u,Rfd=%lu,Gfs=%ld,MADfs=%lu,Fsz=%ld,Rfs=%lu,validFs=%u,neighB=%u/%u,neighF=%u/%u,histRfd=%lu,histRfs=%lu,affEv=%u/%u,streak=%u,srej=%u,mPend=%u,dec=%u,veto=%u\r\n",
            (long)global_delta,
            (unsigned long)mad,
@@ -658,6 +663,7 @@ int VL53L5CX_IsInsectDetectedFiltered(void)
            (unsigned)s_motion_confirm_pending,
            (unsigned)decision,
            (unsigned)vibration_veto);
+#endif
 
     (void)signal_local_valid;
 

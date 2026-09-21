@@ -335,7 +335,7 @@ void sensor_task(void *arg)
     extern volatile int system_ready;
     while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
-    printf("[TOF TEST] sensor_task started\n");
+    printf("[TOF TEST] sensor_task v3 started\n");
 #endif
 
     if (VL53L5CX_Init(&hi2c1) != 0) {

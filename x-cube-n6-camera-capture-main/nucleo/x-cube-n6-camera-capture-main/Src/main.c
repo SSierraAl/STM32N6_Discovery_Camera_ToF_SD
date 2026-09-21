@@ -1023,7 +1023,7 @@ static void main_thread_fct(void *arg)
     vPortSetupTimerInterrupt();
     CONSOLE_Config();
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
-    printf("[BUILD] KAN-36 tof-zones-v2 %s %s maxDet=%u\n",
+    printf("[BUILD] KAN-36 tof-zones-v3 %s %s maxDet=%u\n",
 #else
     printf("[BUILD] KAN-36 drift-reset-v2 %s %s maxDet=%u\n",
 #endif
@@ -1258,6 +1258,9 @@ static void main_thread_fct(void *arg)
     VL53L5CX_I2C_Init();
     VL53L5CX_PowerUp();
     RTC_Init();
+#if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
+    printf("[TOF TEST] RTC finished; releasing sensor task\n");
+#endif
     system_ready = 1;
     vTaskDelete(NULL);
 }

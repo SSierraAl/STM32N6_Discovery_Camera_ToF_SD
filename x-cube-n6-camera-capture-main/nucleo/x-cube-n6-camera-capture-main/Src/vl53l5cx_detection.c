@@ -13,6 +13,8 @@
 #include <stdint.h>
 #include <string.h>
 #include "vl53l5cx_detection.h"
+/* The source wrapper leaves printf intact; baseline and ToF diagnostics
+   remain visible after a clean rebuild. */
 #include "platform.h"
 #include "vl53l5cx_plugin_motion_indicator.h"
 #include "FreeRTOS.h"

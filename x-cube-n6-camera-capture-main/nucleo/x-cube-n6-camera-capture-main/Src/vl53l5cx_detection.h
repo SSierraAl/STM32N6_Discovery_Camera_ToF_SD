@@ -24,12 +24,9 @@
 #include <stdio.h>
 #endif
 
-/* platform.c currently contains only tuning printf() calls (FASTNOISE/TOFDEC).
-   Suppress those at compile time in the production build without changing the
-   detector computations that feed the decision layer. */
-#if defined(_PLATFORM_H_) && !VL53L5CX_DET_TUNING_DIAGNOSTICS
-#define printf(...) ((void)0)
-#endif
+/* Do not redefine printf here: this header is also included by main.c,
+   app_thread.c, and vl53l5cx_detection.c. Individual tuning messages in
+   platform.c are gated at their call sites. */
 
 #if defined(TOF_FAST_NOISE_FILTER_WIRING_REV)
 #include <string.h>
