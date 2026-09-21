@@ -48,7 +48,8 @@ static uint8_t s_last_insect_detected = 0;
 #define TOF_TEST_EDGE_SIGNAL_PCT    3U
 #define TOF_TEST_EDGE_DISTANCE_MM   3U
 #define TOF_TEST_QUIET_SIGNAL_PCT   4U
-#define TOF_TEST_SETTLE_MS          20000U
+#define TOF_TEST_SETTLE_MS          12000U
+#define TOF_TEST_STABLE_MIN_FRAMES      8U
 #define TOF_TEST_SCENE_SETTLE_MS     5000U
 static uint16_t s_test_latched = 0U;
 static uint8_t s_test_clear[16] = {0};
@@ -58,6 +59,7 @@ static uint32_t s_test_prev_motion[16] = {0};
 static uint8_t s_test_prev_valid[16] = {0};
 static uint32_t s_test_stable_since[16] = {0};
 static uint32_t s_test_stable_sig[16] = {0};
+static uint8_t s_test_stable_frames[16] = {0};
 static uint32_t s_test_scene_since = 0U;
 static uint8_t s_test_refresh_requested = 0U;
 
@@ -76,6 +78,7 @@ static void TestResetDetectionState(void)
     memset(s_test_prev_valid, 0, sizeof(s_test_prev_valid));
     memset(s_test_stable_since, 0, sizeof(s_test_stable_since));
     memset(s_test_stable_sig, 0, sizeof(s_test_stable_sig));
+    memset(s_test_stable_frames, 0, sizeof(s_test_stable_frames));
     s_test_scene_since = 0U;
     s_test_refresh_requested = 0U;
 }
@@ -868,6 +871,7 @@ int VL53L5CX_TestDetectionStep(int allow_event)
             s_test_prev_valid[z] = 0U;
             s_test_prev_motion[z] = motion;
             s_test_stable_since[z] = 0U;
+            s_test_stable_frames[z] = 0U;
             continue;
         }
 
@@ -899,8 +903,9 @@ int VL53L5CX_TestDetectionStep(int allow_event)
             s_baseline_signal[z] = (uint32_t)((int32_t)base + diff / 32);
         }
 
-        /* After the first photograph, a truly stationary offset (such as the
-           empty-box zone 4 plateau) can be re-centered one zone at a time.
+        /* After the first event, a stationary offset (such as the empty-box
+           zone plateau) can be re-centered one zone at a time. Require both
+           elapsed time and enough real samples when UART slows the loop.
            No zone mask or distance reference is changed. */
         if (latched && (raw_mask & bit) && motion < VL53L5CX_DET_MOTION_THRESH &&
             distance_change <= 3U && s_test_prev_valid[z] &&
@@ -908,21 +913,27 @@ int VL53L5CX_TestDetectionStep(int allow_event)
             if (s_test_stable_since[z] == 0U) {
                 s_test_stable_since[z] = now;
                 s_test_stable_sig[z] = signal;
+                s_test_stable_frames[z] = 1U;
             } else {
                 s_test_stable_sig[z] =
                     (uint32_t)(((uint64_t)s_test_stable_sig[z] * 7U + signal) / 8U);
+                if (s_test_stable_frames[z] < TOF_TEST_STABLE_MIN_FRAMES)
+                    s_test_stable_frames[z]++;
                 if ((now - s_test_stable_since[z]) >= TOF_TEST_SETTLE_MS &&
+                    s_test_stable_frames[z] >= TOF_TEST_STABLE_MIN_FRAMES &&
                     signal_change >= VL53L5CX_DET_THRESHOLD_PCT) {
                     s_baseline_signal[z] = s_test_stable_sig[z];
-                    printf("[ADAPT] Zone %u signal baseline %lu -> %lu (stable 20 s)\n",
+                    printf("[ADAPT] Zone %u signal baseline %lu -> %lu (stable >=12 s)\n",
                            (unsigned)z, (unsigned long)base,
                            (unsigned long)s_baseline_signal[z]);
                     s_test_stable_since[z] = 0U;
+                    s_test_stable_frames[z] = 0U;
                     /* Leave the latch set until three clean raw frames. */
                 }
             }
         } else {
             s_test_stable_since[z] = 0U;
+            s_test_stable_frames[z] = 0U;
         }
 
         s_test_prev_sig[z] = signal;
