@@ -66,6 +66,8 @@ static uint8_t s_test_refresh_requested = 0U;
 static uint16_t s_test_track_mask = 0U;
 static uint16_t s_test_track_signal_mask = 0U;
 static uint16_t s_test_track_distance_mask = 0U;
+static uint32_t s_test_track_signal_value[16] = {0};
+static uint32_t s_test_track_distance_value[16] = {0};
 static uint32_t s_test_track_since = 0U;
 static uint16_t s_test_weak_active_mask = 0U;
 
@@ -131,6 +133,8 @@ static void TestResetLocalTrack(void)
     s_test_track_mask = 0U;
     s_test_track_signal_mask = 0U;
     s_test_track_distance_mask = 0U;
+    memset(s_test_track_signal_value, 0, sizeof(s_test_track_signal_value));
+    memset(s_test_track_distance_value, 0, sizeof(s_test_track_distance_value));
     s_test_track_since = 0U;
 }
 
@@ -912,6 +916,7 @@ int VL53L5CX_TestDetectionStep(int allow_event)
     uint16_t event_mask = 0U;
     uint16_t event_signal_mask = 0U;
     uint16_t event_distance_mask = 0U;
+    uint16_t track_event_mask = 0U;
     uint16_t raw_mask = 0U;
     uint8_t new_evidence = 0U;
     uint8_t distance_up = 0U, distance_down = 0U;
@@ -994,10 +999,17 @@ int VL53L5CX_TestDetectionStep(int allow_event)
         s_test_track_mask |= new_weak_mask;
         s_test_track_signal_mask |= (uint16_t)(weak_signal_mask & new_weak_mask);
         s_test_track_distance_mask |= (uint16_t)(weak_distance_mask & new_weak_mask);
+        for (uint8_t z = 0U; z < 16U; z++) {
+            const uint16_t bit = (uint16_t)(1U << z);
+            if (!(new_weak_mask & bit)) continue;
+            s_test_track_signal_value[z] = local_signal[z];
+            s_test_track_distance_value[z] = local_distance[z];
+        }
     }
     const uint8_t tracked_zones = TestCountBits16(s_test_track_mask);
     if (tracked_zones >= VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES &&
         (TestHasAdjacentPair(s_test_track_mask) || tracked_zones >= 3U)) {
+        track_event_mask = s_test_track_mask;
         event_mask |= s_test_track_mask;
         event_signal_mask |= s_test_track_signal_mask;
         event_distance_mask |= s_test_track_distance_mask;
@@ -1132,6 +1144,11 @@ int VL53L5CX_TestDetectionStep(int allow_event)
     }
 
     if (allow_event && new_evidence) {
+#if VL53L5CX_DET_EVENT_TRACE > 0
+        const uint16_t strong_event_mask = (uint16_t)(signal_mask |
+                                                       strong_distance_mask);
+        const uint16_t latched_before = s_test_latched;
+#endif
         s_test_latched |= event_mask;
         s_last_insect_detected = 1U;
         s_last_result.insect_detected = 1U;
@@ -1145,11 +1162,40 @@ int VL53L5CX_TestDetectionStep(int allow_event)
         for (uint8_t z = 0U; z < 16U; z++) {
             const uint16_t bit = (uint16_t)(1U << z);
             if (!(event_mask & bit)) continue;
+            uint32_t event_distance = local_distance[z];
+            uint32_t event_signal = local_signal[z];
+            if (s_test_track_distance_value[z] > event_distance)
+                event_distance = s_test_track_distance_value[z];
+            if (s_test_track_signal_value[z] > event_signal)
+                event_signal = s_test_track_signal_value[z];
             const uint8_t k = s_last_result.affected_count++;
             s_last_result.affected_zones[k] = z;
             s_last_result.affected_drop[k] = (event_distance_mask & bit) ?
-                local_distance[z] : local_signal[z];
+                event_distance : event_signal;
         }
+#if VL53L5CX_DET_EVENT_TRACE > 0
+        /* Zone entries are zone:local_distance_mm:local_signal_percent. */
+        printf("TOFEVT,t=%lu,src=%u,v=%u,strong=%04X,track=%04X,raw=%04X,latched=%04X,cd=%ld,cs=%ld,fmt=z:ld_mm:ls_pct,z=",
+               (unsigned long)now, (unsigned)s_last_result.trigger_source,
+               (unsigned)s_last_result.valid_measurements,
+               (unsigned)strong_event_mask, (unsigned)track_event_mask,
+               (unsigned)raw_mask, (unsigned)latched_before,
+               (long)common_distance, (long)common_signal);
+        for (uint8_t i = 0U; i < s_last_result.affected_count; i++) {
+            const uint8_t z = s_last_result.affected_zones[i];
+            uint32_t event_distance = local_distance[z];
+            uint32_t event_signal = local_signal[z];
+            if (s_test_track_distance_value[z] > event_distance)
+                event_distance = s_test_track_distance_value[z];
+            if (s_test_track_signal_value[z] > event_signal)
+                event_signal = s_test_track_signal_value[z];
+            if (i > 0U) printf(";");
+            printf("%u:%lu:%lu", (unsigned)z,
+                   (unsigned long)event_distance,
+                   (unsigned long)event_signal);
+        }
+        printf("\r\n");
+#endif
         TestResetLocalTrack();
         return 1;
     }

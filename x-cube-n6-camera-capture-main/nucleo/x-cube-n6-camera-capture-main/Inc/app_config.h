@@ -568,6 +568,9 @@
 #define VL53L5CX_DET_LOCAL_SIGNAL_WEAK_PCT  2U
 #define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  8000U
 #define VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES  2U
+/* Previous value: absent. One compact TOFEVT line per accepted capture;
+   independent of PERF_DEBUG_LEVEL so production logs expose the trigger. */
+#define VL53L5CX_DET_EVENT_TRACE             1
 
 /* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to
    the SENSOR (via DCI) in VL53L5CX_Configure(). The external guardian
