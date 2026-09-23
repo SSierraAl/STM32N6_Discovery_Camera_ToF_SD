@@ -16,13 +16,20 @@
 #include "stm32n6570_discovery.h"
 #include "main.h"
 
-/* A short camera-activation window can re-learn a baseline while the insect
-   is still present. The 4x4 zone detector handles single-zone persistence
-   and scene-wide drift itself; retain this legacy refresh for other modes. */
-#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0 && \
-    (VL53L5CX_DUAL_SENSOR || TEST_TOF_MODE || \
-     (VL53L5CX_DET_RESOLUTION != 4) || !VL53L5CX_DET_HIGH_SENS_CAMERA)
+/* Bound repeated camera activations in every detector mode. This includes the
+   high-sensitivity 4x4 camera path: after the configured number of photos, a
+   full baseline refresh clears weak-track noise instead of allowing an
+   unbounded capture loop. */
+#if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
 #define TOF_CAPTURE_ACTIVATION_REFRESH 1
+#if !VL53L5CX_DUAL_SENSOR && !TEST_TOF_MODE && \
+    (VL53L5CX_DET_RESOLUTION == 4) && VL53L5CX_DET_HIGH_SENS_CAMERA
+#define TOF_CAPTURE_REFRESH_WINDOW_SECS VL53L5CX_DET_HIGH_SENS_REFRESH_WINDOW_SECS
+#define TOF_CAPTURE_MAX_DETECTIONS      VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS
+#else
+#define TOF_CAPTURE_REFRESH_WINDOW_SECS VL53L5CX_DET_REFRESH_WINDOW_SECS
+#define TOF_CAPTURE_MAX_DETECTIONS      VL53L5CX_DET_MAX_DETECTIONS
+#endif
 #else
 #define TOF_CAPTURE_ACTIVATION_REFRESH 0
 #endif
@@ -477,7 +484,7 @@ void sensor_task(void *arg)
 #if TOF_CAPTURE_ACTIVATION_REFRESH
             if (consecutive_window_active &&
                 (xTaskGetTickCount() - consecutive_window_start) >=
-                    pdMS_TO_TICKS(VL53L5CX_DET_REFRESH_WINDOW_SECS * 1000UL)) {
+                    pdMS_TO_TICKS(TOF_CAPTURE_REFRESH_WINDOW_SECS * 1000UL)) {
                 consecutive_captures = 0;
                 consecutive_window_active = 0;
                 printf("[ADAPT] Window expired, counter reset\n");
@@ -539,7 +546,7 @@ void sensor_task(void *arg)
                 consecutive_window_active = 0;
                 printf("[ADAPT] Camera activation %u/%u\n",
                        (unsigned)consecutive_captures,
-                       (unsigned)VL53L5CX_DET_MAX_DETECTIONS);
+                       (unsigned)TOF_CAPTURE_MAX_DETECTIONS);
 #endif
 
                 PerfTimer_t t;
@@ -548,7 +555,7 @@ void sensor_task(void *arg)
                 PERF_STOP(t);
                 BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
 #if TOF_CAPTURE_ACTIVATION_REFRESH
-                if (consecutive_captures >= VL53L5CX_DET_MAX_DETECTIONS) {
+                if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
                     printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
                     VL53L5CX_StopRanging();
                     vTaskDelay(pdMS_TO_TICKS(50));
@@ -563,7 +570,7 @@ void sensor_task(void *arg)
                     consecutive_window_start = xTaskGetTickCount();
                     consecutive_window_active = 1;
                     printf("[ADAPT] Window opened for %lu s\n",
-                           (unsigned long)VL53L5CX_DET_REFRESH_WINDOW_SECS);
+                           (unsigned long)TOF_CAPTURE_REFRESH_WINDOW_SECS);
                 }
 #else
                 VL53L5CX_StartRanging();
@@ -600,7 +607,7 @@ void sensor_task(void *arg)
 #if TOF_CAPTURE_ACTIVATION_REFRESH
         if (consecutive_window_active &&
             (xTaskGetTickCount() - consecutive_window_start) >=
-                pdMS_TO_TICKS(VL53L5CX_DET_REFRESH_WINDOW_SECS * 1000UL)) {
+                pdMS_TO_TICKS(TOF_CAPTURE_REFRESH_WINDOW_SECS * 1000UL)) {
             consecutive_captures = 0;
             consecutive_window_active = 0;
             printf("[ADAPT] Window expired, counter reset\n");
@@ -720,7 +727,7 @@ void sensor_task(void *arg)
             consecutive_window_active = 0;
             printf("[ADAPT] Camera activation %u/%u\n",
                    (unsigned)consecutive_captures,
-                   (unsigned)VL53L5CX_DET_MAX_DETECTIONS);
+                   (unsigned)TOF_CAPTURE_MAX_DETECTIONS);
 #endif
 
             PerfTimer_t t;
@@ -735,7 +742,7 @@ void sensor_task(void *arg)
             VL53L5CX_ResetDetectionFilterState();
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
 #if TOF_CAPTURE_ACTIVATION_REFRESH
-            if (consecutive_captures >= VL53L5CX_DET_MAX_DETECTIONS) {
+            if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
                 printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
                 VL53L5CX_StopRanging();
                 vTaskDelay(pdMS_TO_TICKS(50));
@@ -750,7 +757,7 @@ void sensor_task(void *arg)
                 consecutive_window_start = xTaskGetTickCount();
                 consecutive_window_active = 1;
                 printf("[ADAPT] Window opened for %lu s\n",
-                       (unsigned long)VL53L5CX_DET_REFRESH_WINDOW_SECS);
+                       (unsigned long)TOF_CAPTURE_REFRESH_WINDOW_SECS);
             }
 #else
             VL53L5CX_StartRanging();

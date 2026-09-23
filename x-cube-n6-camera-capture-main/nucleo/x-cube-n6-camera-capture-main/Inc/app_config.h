@@ -602,14 +602,17 @@
 #define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   0
 #define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500  /* refresh every N Update() frames */
 
-/* MODE 2: Consecutive camera activation refresh (legacy camera detector and
-   dual sensor). When HIGH_SENS_CAMERA=1 in single-sensor 4x4, this counter
-   is bypassed: a target still inside the box must not be learned as the
-   background after two photos. The per-zone stable and scene-wide drift
-   recovery of the new detector remain active. Previous values are retained. */
+/* MODE 2: Consecutive camera activation refresh. The generic values remain
+   unchanged for dual-sensor and legacy detector modes. */
 #define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
-#define VL53L5CX_DET_REFRESH_WINDOW_SECS        5    /* seconds allowed after the previous capture pipeline */
-#define VL53L5CX_DET_MAX_DETECTIONS             2    /* consecutive camera activations before refresh */
+#define VL53L5CX_DET_REFRESH_WINDOW_SECS        5    /* seconds after the previous capture pipeline */
+#define VL53L5CX_DET_MAX_DETECTIONS             2    /* camera activations before refresh */
+
+/* HIGH_SENS_CAMERA 4x4 override. Previous behavior: absent because this mode
+   bypassed the activation counter. Field logs showed recurring weak 2% tracks;
+   three activations inside this rolling window now force one full baseline. */
+#define VL53L5CX_DET_HIGH_SENS_REFRESH_WINDOW_SECS  30
+#define VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS       3
 
 /* UART1 debug output
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
