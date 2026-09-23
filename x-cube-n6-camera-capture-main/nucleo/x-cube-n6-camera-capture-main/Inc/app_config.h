@@ -433,7 +433,7 @@
        at different speeds, calibrating detection thresholds.
        NOTE: requires CAPTURE_MODE != 0 (ToF is disabled in mode 0).
    0 = PRODUCTION: normal capture + SD save on detection. */
-#define TEST_TOF_MODE                1
+#define TEST_TOF_MODE               0
 
 /* Temporary 4x4 zone survey; 0 restores the original ZFRAME records used
    by the telemetry app. Previous value in the survey build: 1.
@@ -553,8 +553,8 @@
 #define VL53L5CX_DET_MOTION_THRESH      200     /* 8x8: higher motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
 #else
-#define VL53L5CX_DET_THRESHOLD_PCT      6      /* 4x4: above observed 4-5% idle noise */
-#define VL53L5CX_DET_MOTION_THRESH      60      /* 4x4: original noise-safe threshold */
+#define VL53L5CX_DET_THRESHOLD_PCT      3     //4 or even 3 /* 4x4: above observed 4-5% idle noise */
+#define VL53L5CX_DET_MOTION_THRESH      35    // 50 can be better  /* 4x4: original noise-safe threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 1       /* 4x4: single zone triggers */
 #endif
 
@@ -611,9 +611,9 @@
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
 #define VL53L5CX_DET_DEBUG_ZFRAME       0
 #else
-#define VL53L5CX_DET_DEBUG_ZFRAME       1  //1 for debug and python interface
+#define VL53L5CX_DET_DEBUG_ZFRAME       0  //1 for debug and python interface
 #endif
-#define VL53L5CX_DET_DEBUG_ZFRAME_INT   1  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
+#define VL53L5CX_DET_DEBUG_ZFRAME_INT   0  //1 for debug and python interface  /* emit ZFRAME every N Update() frames */
 #define VL53L5CX_DET_DEBUG_ALLPARAMS    0
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 
