@@ -73,6 +73,7 @@
 #define VL53L5CX_TRIG_SIGNAL  0x01
 #define VL53L5CX_TRIG_MOTION  0x02
 #define VL53L5CX_TRIG_BOTH    0x03
+#define VL53L5CX_TRIG_DISTANCE 0x04
 
 typedef struct {
     uint8_t  insect_detected;

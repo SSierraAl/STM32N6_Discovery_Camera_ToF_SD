@@ -553,10 +553,21 @@
 #define VL53L5CX_DET_MOTION_THRESH      200     /* 8x8: higher motion threshold */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 2       /* 8x8: require 2 zones */
 #else
-#define VL53L5CX_DET_THRESHOLD_PCT      3     //4 or even 3 /* 4x4: above observed 4-5% idle noise */
-#define VL53L5CX_DET_MOTION_THRESH      35    // 50 can be better  /* 4x4: original noise-safe threshold */
+#define VL53L5CX_DET_THRESHOLD_PCT      3       /* previous 6; field trials: 4, then 3 */
+#define VL53L5CX_DET_MOTION_THRESH      35      /* previous 60; field trial: 50, then 35 */
 #define VL53L5CX_DET_MIN_AFFECTED_ZONES 1       /* 4x4: single zone triggers */
 #endif
+
+/* Single-sensor 4x4 local-event detector (HIGH_SENS_TEST/CAMERA only).
+   Previous values: absent. A common per-frame distance/signal shift is removed
+   before these limits are applied, so coherent trap vibration is not treated
+   as a local insect. Strong local distance evidence triggers immediately;
+   weak evidence is accumulated while a small insect moves between zones. */
+#define VL53L5CX_DET_LOCAL_DIST_STRONG_MM   5U
+#define VL53L5CX_DET_LOCAL_DIST_WEAK_MM     3U
+#define VL53L5CX_DET_LOCAL_SIGNAL_WEAK_PCT  2U
+#define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  8000U
+#define VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES  2U
 
 /* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to
    the SENSOR (via DCI) in VL53L5CX_Configure(). The external guardian

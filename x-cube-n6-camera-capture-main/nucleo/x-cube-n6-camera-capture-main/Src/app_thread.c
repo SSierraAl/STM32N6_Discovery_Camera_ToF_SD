@@ -496,6 +496,10 @@ void sensor_task(void *arg)
                 if (res.trigger_source == 1) trig_str = "SIGNAL";
                 else if (res.trigger_source == 2) trig_str = "MOTION";
                 else if (res.trigger_source == 3) trig_str = "SIGNAL+MOTION";
+                else if (res.trigger_source == 4) trig_str = "DISTANCE";
+                else if (res.trigger_source == 5) trig_str = "SIGNAL+DISTANCE";
+                else if (res.trigger_source == 6) trig_str = "MOTION+DISTANCE";
+                else if (res.trigger_source == 7) trig_str = "SIGNAL+MOTION+DISTANCE";
                 else trig_str = "UNKNOWN";
                 printf(">>> INSECT DETECTED (Primary, woken by external) [%s]!\n", trig_str);
 #endif
@@ -664,6 +668,10 @@ void sensor_task(void *arg)
             if (res.trigger_source == 1) trig_str = "SIGNAL";
             else if (res.trigger_source == 2) trig_str = "MOTION";
             else if (res.trigger_source == 3) trig_str = "SIGNAL+MOTION";
+            else if (res.trigger_source == 4) trig_str = "DISTANCE";
+            else if (res.trigger_source == 5) trig_str = "SIGNAL+DISTANCE";
+            else if (res.trigger_source == 6) trig_str = "MOTION+DISTANCE";
+            else if (res.trigger_source == 7) trig_str = "SIGNAL+MOTION+DISTANCE";
             else trig_str = "UNKNOWN";
             printf(">>> INSECT DETECTED [%s]!\n", trig_str);
 #endif

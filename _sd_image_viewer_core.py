@@ -408,6 +408,10 @@ def zero_fill(path, start_blk, num_blks):
 # Gray-world + percentile protection.
 # Much more stable than pure fixed multipliers.
 
+# Viewer-only correction. Previous value: 0.5. This never changes the camera,
+# ISP, saved YUV data, or the tested WS2812 illumination color.
+VIEWER_WHITE_BALANCE_STRENGTH = 1.0
+
 def apply_robust_white_balance(rgb_img, strength=0.5, stat_step=2):
     """
     Robust white balance for STM32 camera images.
@@ -476,7 +480,9 @@ def decode_image_data(img_data, width, height, pixel_format):
         rgb = cv2.cvtColor(arr, cv2.COLOR_YUV2RGB_YUY2)
 
         # Smart white-balance instead of fixed multipliers
-        rgb = apply_robust_white_balance(rgb, strength=0.5)
+        rgb = apply_robust_white_balance(
+            rgb, strength=VIEWER_WHITE_BALANCE_STRENGTH
+        )
 
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format_RGB888)
