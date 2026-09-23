@@ -613,6 +613,10 @@
    three activations inside this rolling window now force one full baseline. */
 #define VL53L5CX_DET_HIGH_SENS_REFRESH_WINDOW_SECS  30
 #define VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS       3
+/* Previous value: absent. After the forced baseline, keep processing ToF but
+   suppress new camera activations briefly so 2% stochastic tracks cannot
+   immediately start another three-photo cycle. */
+#define VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS    60
 
 /* UART1 debug output
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)

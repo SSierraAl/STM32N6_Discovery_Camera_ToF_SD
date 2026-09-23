@@ -26,12 +26,15 @@
     (VL53L5CX_DET_RESOLUTION == 4) && VL53L5CX_DET_HIGH_SENS_CAMERA
 #define TOF_CAPTURE_REFRESH_WINDOW_SECS VL53L5CX_DET_HIGH_SENS_REFRESH_WINDOW_SECS
 #define TOF_CAPTURE_MAX_DETECTIONS      VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS
+#define TOF_CAPTURE_REARM_HOLDOFF_SECS  VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS
 #else
 #define TOF_CAPTURE_REFRESH_WINDOW_SECS VL53L5CX_DET_REFRESH_WINDOW_SECS
 #define TOF_CAPTURE_MAX_DETECTIONS      VL53L5CX_DET_MAX_DETECTIONS
+#define TOF_CAPTURE_REARM_HOLDOFF_SECS  0
 #endif
 #else
 #define TOF_CAPTURE_ACTIVATION_REFRESH 0
+#define TOF_CAPTURE_REARM_HOLDOFF_SECS  0
 #endif
 
 extern I2C_HandleTypeDef hi2c1;
@@ -420,6 +423,10 @@ void sensor_task(void *arg)
     uint8_t consecutive_window_active = 0;
     TickType_t consecutive_window_start = 0;
 #endif
+#if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
+    uint8_t capture_rearm_holdoff_active = 0;
+    TickType_t capture_rearm_holdoff_start = 0;
+#endif
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && !VL53L5CX_DUAL_SENSOR && \
     (VL53L5CX_DET_RESOLUTION == 4) && \
     (VL53L5CX_DET_ZONE_LOG_INTERVAL_MS > 0)
@@ -604,6 +611,20 @@ void sensor_task(void *arg)
         if (g_debug_frame_count >= 1) g_debug_frame_count = 0;
         if (cooldown > 0) cooldown--;
 
+#if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
+        if (capture_rearm_holdoff_active &&
+            (xTaskGetTickCount() - capture_rearm_holdoff_start) >=
+                pdMS_TO_TICKS(TOF_CAPTURE_REARM_HOLDOFF_SECS * 1000UL)) {
+            capture_rearm_holdoff_active = 0;
+            /* Discard weak evidence accumulated while photos were blocked.
+               Preserve the learned baseline and the currently active weak
+               zones so persistent 2% noise is not treated as a new edge. */
+            VL53L5CX_ZoneDetectorAfterCapture();
+            VL53L5CX_ResetDetectionFilterState();
+            printf("[ADAPT] Camera re-armed; weak track cleared\n");
+        }
+#endif
+
 #if TOF_CAPTURE_ACTIVATION_REFRESH
         if (consecutive_window_active &&
             (xTaskGetTickCount() - consecutive_window_start) >=
@@ -619,7 +640,11 @@ void sensor_task(void *arg)
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
      (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
-        const int insect_detected = VL53L5CX_TestDetectionStep(cooldown == 0);
+        int allow_tof_capture = (cooldown == 0);
+#if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
+        if (capture_rearm_holdoff_active) allow_tof_capture = 0;
+#endif
+        const int insect_detected = VL53L5CX_TestDetectionStep(allow_tof_capture);
 #else
         const int insect_detected = VL53L5CX_IsInsectDetected();
 #endif
@@ -752,6 +777,12 @@ void sensor_task(void *arg)
                 consecutive_captures = 0;
                 consecutive_window_active = 0;
                 printf("[ADAPT] Baseline refresh complete\n");
+#if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
+                capture_rearm_holdoff_start = xTaskGetTickCount();
+                capture_rearm_holdoff_active = 1;
+                printf("[ADAPT] Camera holdoff for %lu s; ToF remains active\n",
+                       (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
+#endif
             } else {
                 VL53L5CX_StartRanging();
                 consecutive_window_start = xTaskGetTickCount();
