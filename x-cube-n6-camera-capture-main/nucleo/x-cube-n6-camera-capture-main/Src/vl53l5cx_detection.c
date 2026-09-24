@@ -73,6 +73,7 @@ static uint16_t s_test_fast_pending_signal = 0U;
 static uint16_t s_test_fast_pending_distance = 0U;
 static uint16_t s_test_floor_pending_mask = 0U;
 static uint8_t s_test_floor_hold_frames[16] = {0};
+static uint8_t s_test_floor_signal_score[16] = {0};
 static uint16_t s_test_blocked_mask = 0U;
 static uint8_t s_test_last_event_class = 0U;
 
@@ -162,6 +163,7 @@ static void TestResetDetectionState(void)
     s_test_fast_pending_distance = 0U;
     s_test_floor_pending_mask = 0U;
     memset(s_test_floor_hold_frames, 0, sizeof(s_test_floor_hold_frames));
+    memset(s_test_floor_signal_score, 0, sizeof(s_test_floor_signal_score));
     s_test_blocked_mask = 0U;
     s_test_last_event_class = 0U;
     TestResetLocalTrack();
@@ -180,6 +182,7 @@ void VL53L5CX_ZoneDetectorAfterCapture(void)
     s_test_fast_pending_distance = 0U;
     s_test_floor_pending_mask = 0U;
     memset(s_test_floor_hold_frames, 0, sizeof(s_test_floor_hold_frames));
+    memset(s_test_floor_signal_score, 0, sizeof(s_test_floor_signal_score));
     s_test_scene_since = 0U;
     TestResetLocalTrack();
 }
@@ -942,6 +945,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     uint16_t floor_mask = 0U;
     uint16_t floor_protrusion_mask = 0U;
     uint16_t floor_hold_mask = 0U;
+    uint16_t floor_signal_hold_mask = 0U;
     uint16_t level_event_mask = 0U;
     uint16_t candidate_event_mask = 0U;
     uint16_t event_mask = 0U;
@@ -1001,6 +1005,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         if (s_test_recent_motion[z] > 0U) s_test_recent_motion[z]--;
         if (!local_valid[z]) {
             s_test_floor_hold_frames[z] = 0U;
+            s_test_floor_signal_score[z] = 0U;
             continue;
         }
         const uint16_t bit = (uint16_t)(1U << z);
@@ -1061,6 +1066,26 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             s_test_floor_hold_frames[z] = 0U;
         }
 
+        /* The 500 ms trace can miss short 2% peaks that the 15 Hz detector
+           sees. Preserve several same-zone floor peaks through short quiet
+           gaps; isolated vibration/noise evidence decays before triggering. */
+        if ((floor_mask & bit) && (weak_signal_mask & bit)) {
+            const uint8_t room = (uint8_t)(
+                VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER -
+                s_test_floor_signal_score[z]);
+            if (room <= VL53L5CX_DET_FLOOR_SIGNAL_SCORE_HIT)
+                s_test_floor_signal_score[z] =
+                    VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER;
+            else
+                s_test_floor_signal_score[z] +=
+                    VL53L5CX_DET_FLOOR_SIGNAL_SCORE_HIT;
+        } else if (s_test_floor_signal_score[z] > 0U) {
+            s_test_floor_signal_score[z]--;
+        }
+        if (s_test_floor_signal_score[z] >=
+            VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER)
+            floor_signal_hold_mask |= bit;
+
         /* Kinematic path: require both a fresh per-zone edge and a local
            baseline residual. Coherent vibration is removed by the common
            median above; slow drift lacks the frame-to-frame edge. */
@@ -1091,15 +1116,16 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         ~(strong_distance_mask | weak_distance_mask));
     fast_edge_mask = (uint16_t)(fast_signal_mask | fast_distance_mask);
     level_event_mask = (uint16_t)(signal_mask | strong_distance_mask |
-                                  floor_hold_mask);
+                                  floor_hold_mask | floor_signal_hold_mask);
     event_mask = level_event_mask;
-    event_signal_mask = (uint16_t)(signal_mask | floor_hold_mask);
+    event_signal_mask = (uint16_t)(signal_mask | floor_hold_mask |
+                                   floor_signal_hold_mask);
     event_distance_mask = (uint16_t)(strong_distance_mask | floor_hold_mask);
 
-    /* Unsustained weak evidence is not enough for a photo by itself. Retain
-       it long enough for a slow tiny insect to cross into another zone. Two
-       neighbouring zones (including diagonals), or any three distinct zones,
-       form a spatial track; repeated one-frame noise in one zone does not. */
+    /* Weak evidence that is neither persistent nor repeated is not enough for
+       a photo by itself. Retain it long enough for a slow tiny insect to cross
+       into another zone. Two neighbouring zones (including diagonals), or any
+       three distinct zones, form a spatial track. */
     if (s_test_track_since != 0U &&
         (now - s_test_track_since) > VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS) {
         TestResetLocalTrack();
