@@ -566,8 +566,25 @@
 #define VL53L5CX_DET_LOCAL_DIST_STRONG_MM   5U
 #define VL53L5CX_DET_LOCAL_DIST_WEAK_MM     3U
 #define VL53L5CX_DET_LOCAL_SIGNAL_WEAK_PCT  2U
-#define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  8000U
+#define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  3000U  /* previous 8000: reject slow drift tracks */
 #define VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES  2U
+/* Fast-edge path for small objects that cross a zone before reaching the
+   normal >3% / >=5 mm level thresholds.  The first pair is frame-to-frame
+   motion; the second pair is the minimum local deviation from the baseline.
+   Previous values: absent. */
+#define VL53L5CX_DET_FAST_EDGE_SIGNAL_PCT       2U
+#define VL53L5CX_DET_FAST_EDGE_DISTANCE_MM      3U
+#define VL53L5CX_DET_FAST_BASELINE_SIGNAL_PCT   1U
+#define VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM  2U
+/* A weak zone may join a spatial track only after recent per-zone movement.
+   At 15 Hz, three frames retain about 200 ms of entry evidence. */
+#define VL53L5CX_DET_WEAK_MOTION_SIGNAL_PCT     1U
+#define VL53L5CX_DET_WEAK_MOTION_DISTANCE_MM    1U
+#define VL53L5CX_DET_WEAK_MOTION_MEMORY_FRAMES  3U
+/* Weak tracks are restricted to baseline zones within this depth of the
+   farthest valid zone (the box floor). Close wall/border zones remain active
+   for strong and fast-edge events. Previous value: absent. */
+#define VL53L5CX_DET_FLOOR_DEPTH_BAND_MM        30U
 /* Previous value: absent. One compact TOFEVT line per accepted capture;
    independent of PERF_DEBUG_LEVEL so production logs expose the trigger. */
 #define VL53L5CX_DET_EVENT_TRACE             1
@@ -613,10 +630,9 @@
    three activations inside this rolling window now force one full baseline. */
 #define VL53L5CX_DET_HIGH_SENS_REFRESH_WINDOW_SECS  30
 #define VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS       3
-/* Previous value: absent. After the forced baseline, keep processing ToF but
-   suppress new camera activations briefly so 2% stochastic tracks cannot
-   immediately start another three-photo cycle. */
-#define VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS    60
+/* Previous value: 60. After a forced baseline, suppress level/weak-track
+   activations briefly, while the fast-edge path remains armed. */
+#define VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS    10
 
 /* UART1 debug output
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
