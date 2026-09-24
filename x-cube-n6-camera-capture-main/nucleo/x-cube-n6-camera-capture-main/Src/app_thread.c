@@ -640,11 +640,14 @@ void sensor_task(void *arg)
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
      (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
-        int allow_tof_capture = (cooldown == 0);
+        uint8_t tof_event_policy = 0U;
+        if (cooldown == 0)
+            tof_event_policy = VL53L5CX_TEST_EVENT_ALLOW_ALL;
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
-        if (capture_rearm_holdoff_active) allow_tof_capture = 0;
+        if (capture_rearm_holdoff_active && cooldown == 0)
+            tof_event_policy = VL53L5CX_TEST_EVENT_ALLOW_FAST;
 #endif
-        const int insect_detected = VL53L5CX_TestDetectionStep(allow_tof_capture);
+        const int insect_detected = VL53L5CX_TestDetectionStep(tof_event_policy);
 #else
         const int insect_detected = VL53L5CX_IsInsectDetected();
 #endif
@@ -685,6 +688,12 @@ void sensor_task(void *arg)
             g_sensor_state = SENSOR_STATE_RUNNING;
             cooldown = 5;
             printf("[ADAPT] Stable-drift baseline refresh complete\n");
+#if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
+            capture_rearm_holdoff_start = xTaskGetTickCount();
+            capture_rearm_holdoff_active = 1;
+            printf("[ADAPT] Fast-edge-only recovery for %lu s; ToF remains active\n",
+                   (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
+#endif
             continue;
         }
 
@@ -732,6 +741,18 @@ void sensor_task(void *arg)
             cooldown = 30;
             continue;
 #else
+            /* Only a pure weak spatial track feeds the 3-in-30-s drift
+               counter. Strong level and fast-edge captures are treated as
+               real objects and cannot force a baseline refresh. */
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    VL53L5CX_DET_HIGH_SENS_CAMERA
+            const uint8_t tof_event_class = VL53L5CX_TestGetLastEventClass();
+            const uint8_t count_for_refresh =
+                (uint8_t)(tof_event_class == VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK);
+#else
+            const uint8_t tof_event_class = 0U;
+            const uint8_t count_for_refresh = 1U;
+#endif
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
 #if WS2812_MODE == 1
             WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
@@ -744,15 +765,20 @@ void sensor_task(void *arg)
 #endif
 
 #if TOF_CAPTURE_ACTIVATION_REFRESH
-            if (consecutive_window_active) {
-                consecutive_captures++;
+            if (count_for_refresh) {
+                if (consecutive_window_active) {
+                    consecutive_captures++;
+                } else {
+                    consecutive_captures = 1;
+                }
+                consecutive_window_active = 0;
+                printf("[ADAPT] Weak-track camera activation %u/%u\n",
+                       (unsigned)consecutive_captures,
+                       (unsigned)TOF_CAPTURE_MAX_DETECTIONS);
             } else {
-                consecutive_captures = 1;
+                printf("[ADAPT] Event class=%u excluded from drift counter\n",
+                       (unsigned)tof_event_class);
             }
-            consecutive_window_active = 0;
-            printf("[ADAPT] Camera activation %u/%u\n",
-                   (unsigned)consecutive_captures,
-                   (unsigned)TOF_CAPTURE_MAX_DETECTIONS);
 #endif
 
             PerfTimer_t t;
@@ -767,7 +793,8 @@ void sensor_task(void *arg)
             VL53L5CX_ResetDetectionFilterState();
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
 #if TOF_CAPTURE_ACTIVATION_REFRESH
-            if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
+            if (count_for_refresh &&
+                consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
                 printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
                 VL53L5CX_StopRanging();
                 vTaskDelay(pdMS_TO_TICKS(50));
@@ -780,15 +807,17 @@ void sensor_task(void *arg)
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
                 capture_rearm_holdoff_start = xTaskGetTickCount();
                 capture_rearm_holdoff_active = 1;
-                printf("[ADAPT] Camera holdoff for %lu s; ToF remains active\n",
+                printf("[ADAPT] Fast-edge-only recovery for %lu s; ToF remains active\n",
                        (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
-            } else {
+            } else if (count_for_refresh) {
                 VL53L5CX_StartRanging();
                 consecutive_window_start = xTaskGetTickCount();
                 consecutive_window_active = 1;
                 printf("[ADAPT] Window opened for %lu s\n",
                        (unsigned long)TOF_CAPTURE_REFRESH_WINDOW_SECS);
+            } else {
+                VL53L5CX_StartRanging();
             }
 #else
             VL53L5CX_StartRanging();
