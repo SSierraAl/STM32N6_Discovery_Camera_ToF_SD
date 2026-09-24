@@ -577,9 +577,9 @@
    motion; the second pair is the minimum local deviation from the baseline.
    Previous values: absent. */
 #define VL53L5CX_DET_FAST_EDGE_SIGNAL_PCT       2U
-#define VL53L5CX_DET_FAST_EDGE_DISTANCE_MM      3U
+#define VL53L5CX_DET_FAST_EDGE_DISTANCE_MM      4U
 #define VL53L5CX_DET_FAST_BASELINE_SIGNAL_PCT   2U
-#define VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM  2U
+#define VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM  3U
 /* A weak zone may join a spatial track only after recent per-zone movement.
    At 15 Hz, three frames retain about 200 ms of entry evidence. */
 #define VL53L5CX_DET_WEAK_MOTION_SIGNAL_PCT     1U
