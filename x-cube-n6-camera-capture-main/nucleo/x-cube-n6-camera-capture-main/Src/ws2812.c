@@ -32,6 +32,9 @@ static uint32_t ws2812_flash_start = 0;
 /** Flash active flag */
 static volatile bool ws2812_flash_active = false;
 
+/** Last successful/bounded OFF transmission, used by the idle watchdog. */
+static uint32_t ws2812_last_off_tick = 0U;
+
 /* ================================================================
    PRIVATE FUNCTION PROTOTYPES
    ================================================================ */
@@ -50,6 +53,7 @@ static void WS2812_LatchOffReliable(void);
 #define WS2812_STROBE_OFF_FRAME_COPIES   3U
 #define WS2812_STROBE_EXTRA_ATTEMPTS     1U
 #define WS2812_STROBE_RETRY_GAP_MS       1U
+#define WS2812_OFF_WATCHDOG_INTERVAL_MS  1000U
 
 /* ================================================================
    DMA CALLBACK (must be linked in stm32n6xx_it.c)
@@ -256,6 +260,7 @@ static void WS2812_LatchOffReliable(void)
     (void)HAL_TIM_PWM_Stop_DMA(&htim1, TIM_CHANNEL_1);
     __HAL_TIM_SET_COMPARE(&htim1, TIM_CHANNEL_1, 0U);
     HAL_Delay(WS2812_STROBE_RETRY_GAP_MS);
+    ws2812_last_off_tick = HAL_GetTick();
 }
 
 /* ================================================================
@@ -383,6 +388,19 @@ void WS2812_FlashStop(void)
     
     WS2812_LatchOffReliable();
     if (was_active) printf("[LIGHT] OFF\n");
+}
+
+void WS2812_OffWatchdog(void)
+{
+    const uint32_t now = HAL_GetTick();
+
+    if (ws2812_flash_active) return;
+    if ((now - ws2812_last_off_tick) < WS2812_OFF_WATCHDOG_INTERVAL_MS) return;
+
+    /* There is no electrical readback from a WS2812. Re-sending complete
+       black frames while idle repairs a pixel that misdecoded the earlier
+       OFF waveform. Keep this silent so normal logs remain usable. */
+    WS2812_LatchOffReliable();
 }
 
 /**

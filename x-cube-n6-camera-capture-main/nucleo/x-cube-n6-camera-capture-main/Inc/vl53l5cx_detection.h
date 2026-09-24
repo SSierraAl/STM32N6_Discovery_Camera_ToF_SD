@@ -159,6 +159,10 @@ VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void);
 #define VL53L5CX_TEST_EVENT_CLASS_LEVEL       0x01U
 #define VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE   0x02U
 #define VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK  0x04U
+/* A new strong zone appeared while another strong zone from the previous
+   capture is still latched. Keep the photo, but count this as a potentially
+   persistent scene expansion for bounded adaptive refresh. */
+#define VL53L5CX_TEST_EVENT_CLASS_LATCHED_SCENE 0x08U
 
 /** Evaluate one already-read frame with the requested event policy. */
 int  VL53L5CX_TestDetectionStep(uint8_t event_policy);

@@ -607,6 +607,12 @@ void sensor_task(void *arg)
         /* Update primary sensor */
         if (!VL53L5CX_Update()) { vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
+#if !TEST_TOF_MODE && (WS2812_MODE == 0 || WS2812_MODE == 1)
+        /* WS2812 has no readback. While the camera is idle, periodically
+           overwrite any misdecoded residual colour with redundant OFF frames. */
+        WS2812_OffWatchdog();
+#endif
+
         g_debug_frame_count++;
         if (g_debug_frame_count >= 1) g_debug_frame_count = 0;
         if (cooldown > 0) cooldown--;
@@ -751,7 +757,8 @@ void sensor_task(void *arg)
             const uint8_t count_for_refresh =
                 (uint8_t)((tof_event_class &
                     (VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE |
-                     VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK)) != 0U);
+                     VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK |
+                     VL53L5CX_TEST_EVENT_CLASS_LATCHED_SCENE)) != 0U);
 #else
             const uint8_t tof_event_class = 0U;
             const uint8_t count_for_refresh = 1U;

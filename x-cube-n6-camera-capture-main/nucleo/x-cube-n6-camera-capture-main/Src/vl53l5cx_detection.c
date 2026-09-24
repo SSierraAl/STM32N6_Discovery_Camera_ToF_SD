@@ -1078,19 +1078,30 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
        only after it has shown a recent edge; clearing the weak level rearms
        that zone for a later insect. */
     s_test_weak_active_mask &= weak_mask;
-    const uint16_t new_weak_mask = (uint16_t)(weak_mask & weak_motion_mask &
-                                               ~s_test_weak_active_mask);
-    s_test_weak_active_mask |= new_weak_mask;
-    if (new_weak_mask != 0U) {
-        if (s_test_track_since == 0U) s_test_track_since = now;
-        s_test_track_mask |= new_weak_mask;
-        s_test_track_signal_mask |= (uint16_t)(weak_signal_mask & new_weak_mask);
-        s_test_track_distance_mask |= (uint16_t)(weak_distance_mask & new_weak_mask);
-        for (uint8_t z = 0U; z < 16U; z++) {
-            const uint16_t bit = (uint16_t)(1U << z);
-            if (!(new_weak_mask & bit)) continue;
-            s_test_track_signal_value[z] = local_signal[z];
-            s_test_track_distance_value[z] = local_distance[z];
+    if (s_test_latched != 0U) {
+        /* After a photo, a stationary insect or vibration can spread weakly
+           into neighbouring zones. Those zones are the same uninterrupted
+           scene, not a second spatial track. Mark every current weak zone as
+           already active and discard the track until the photographed scene
+           has genuinely cleared. Independent >=3 %% signal and >=5 mm level
+           events remain enabled in every zone. */
+        s_test_weak_active_mask |= weak_mask;
+        TestResetLocalTrack();
+    } else {
+        const uint16_t new_weak_mask = (uint16_t)(weak_mask & weak_motion_mask &
+                                                   ~s_test_weak_active_mask);
+        s_test_weak_active_mask |= new_weak_mask;
+        if (new_weak_mask != 0U) {
+            if (s_test_track_since == 0U) s_test_track_since = now;
+            s_test_track_mask |= new_weak_mask;
+            s_test_track_signal_mask |= (uint16_t)(weak_signal_mask & new_weak_mask);
+            s_test_track_distance_mask |= (uint16_t)(weak_distance_mask & new_weak_mask);
+            for (uint8_t z = 0U; z < 16U; z++) {
+                const uint16_t bit = (uint16_t)(1U << z);
+                if (!(new_weak_mask & bit)) continue;
+                s_test_track_signal_value[z] = local_signal[z];
+                s_test_track_distance_value[z] = local_distance[z];
+            }
         }
     }
     const uint8_t tracked_zones = TestCountBits16(s_test_track_mask);
@@ -1273,11 +1284,9 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     s_test_blocked_mask |= blocked_current_mask;
 
     if (new_evidence) {
-#if VL53L5CX_DET_EVENT_TRACE > 0
         const uint16_t strong_event_mask = (uint16_t)(signal_mask |
                                                        strong_distance_mask);
         const uint16_t latched_before = s_test_latched;
-#endif
         s_test_last_event_class = 0U;
         if (event_mask & level_event_mask)
             s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_LEVEL;
@@ -1285,6 +1294,9 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE;
         if (event_mask & track_event_mask)
             s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK;
+        if ((event_mask & level_event_mask) &&
+            (strong_event_mask & latched_before) != 0U)
+            s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_LATCHED_SCENE;
         s_test_latched |= event_mask;
         s_last_insect_detected = 1U;
         s_last_result.insect_detected = 1U;

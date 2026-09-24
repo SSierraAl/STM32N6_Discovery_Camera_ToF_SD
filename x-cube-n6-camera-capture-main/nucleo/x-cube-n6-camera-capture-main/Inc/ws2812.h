@@ -119,6 +119,13 @@ void WS2812_FlashStart(uint32_t color, uint8_t brightness);
 void WS2812_FlashStop(void);
 
 /**
+ * @brief Periodically retransmit OFF while no flash is active.
+ * @note  Call from one application task during idle monitoring. The function
+ *        is rate-limited internally and never interrupts an active flash.
+ */
+void WS2812_OffWatchdog(void);
+
+/**
  * @brief Auto-stop flash if duration elapsed.
  * @param duration_ms Maximum flash duration
  * @return 0 if flash still on, 1 if flash was stopped
