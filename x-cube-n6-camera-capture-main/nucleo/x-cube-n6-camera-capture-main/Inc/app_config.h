@@ -585,6 +585,9 @@
 #define VL53L5CX_DET_WEAK_MOTION_SIGNAL_PCT     1U
 #define VL53L5CX_DET_WEAK_MOTION_DISTANCE_MM    1U
 #define VL53L5CX_DET_WEAK_MOTION_MEMORY_FRAMES  3U
+/* Slow floor insects may lack a sharp frame edge. Confirm a weak zone across
+   two frames when it protrudes toward the opposite-mounted sensor. */
+#define VL53L5CX_DET_FLOOR_PROTRUSION_MIN_MM    1U
 /* Weak tracks are restricted to baseline zones within this depth of the
    farthest valid zone (the box floor). Close wall/border zones remain active
    for strong and fast-edge events. Previous value: absent. */

@@ -71,6 +71,7 @@ static uint16_t s_test_weak_active_mask = 0U;
 static uint8_t s_test_recent_motion[16] = {0};
 static uint16_t s_test_fast_pending_signal = 0U;
 static uint16_t s_test_fast_pending_distance = 0U;
+static uint16_t s_test_floor_pending_mask = 0U;
 static uint16_t s_test_blocked_mask = 0U;
 static uint8_t s_test_last_event_class = 0U;
 
@@ -158,6 +159,7 @@ static void TestResetDetectionState(void)
     memset(s_test_recent_motion, 0, sizeof(s_test_recent_motion));
     s_test_fast_pending_signal = 0U;
     s_test_fast_pending_distance = 0U;
+    s_test_floor_pending_mask = 0U;
     s_test_blocked_mask = 0U;
     s_test_last_event_class = 0U;
     TestResetLocalTrack();
@@ -174,6 +176,7 @@ void VL53L5CX_ZoneDetectorAfterCapture(void)
     memset(s_test_stable_frames, 0, sizeof(s_test_stable_frames));
     s_test_fast_pending_signal = 0U;
     s_test_fast_pending_distance = 0U;
+    s_test_floor_pending_mask = 0U;
     s_test_scene_since = 0U;
     TestResetLocalTrack();
 }
@@ -934,6 +937,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     uint16_t weak_distance_mask = 0U;
     uint16_t weak_motion_mask = 0U;
     uint16_t floor_mask = 0U;
+    uint16_t floor_protrusion_mask = 0U;
     uint16_t level_event_mask = 0U;
     uint16_t candidate_event_mask = 0U;
     uint16_t event_mask = 0U;
@@ -951,6 +955,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     int32_t distance_values[16];
     int32_t signal_values[16];
     uint32_t local_distance[16] = {0};
+    int32_t signed_local_distance[16] = {0};
     uint32_t local_signal[16] = {0};
     uint32_t frame_distance[16] = {0};
     uint32_t frame_signal[16] = {0};
@@ -994,7 +999,8 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         const uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         const uint32_t signal = s_results.signal_per_spad[idx];
         const uint16_t distance = (uint16_t)s_results.distance_mm[idx];
-        local_distance[z] = TestAbsI32(distance_delta[z] - common_distance);
+        signed_local_distance[z] = distance_delta[z] - common_distance;
+        local_distance[z] = TestAbsI32(signed_local_distance[z]);
         local_signal[z] = TestAbsI32(signal_delta_pct[z] - common_signal);
         if ((uint32_t)s_baseline_distance[z] +
                 VL53L5CX_DET_FLOOR_DEPTH_BAND_MM >=
@@ -1028,6 +1034,14 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             weak_distance_mask |= bit;
         if (local_distance[z] >= VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM)
             fast_distance_support_mask |= bit;
+
+        /* An insect on the calibrated floor shortens the distance to the
+           opposite-mounted sensor. Keep this direction; absolute deltas alone
+           cannot separate a slow protrusion from arbitrary vibration. */
+        if ((floor_mask & bit) && (weak_signal_mask & bit) &&
+            signed_local_distance[z] <=
+                -(int32_t)VL53L5CX_DET_FLOOR_PROTRUSION_MIN_MM)
+            floor_protrusion_mask |= bit;
 
         /* Kinematic path: require both a fresh per-zone edge and a local
            baseline residual. Coherent vibration is removed by the common
@@ -1074,6 +1088,11 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     }
     const uint16_t weak_mask = (uint16_t)((weak_signal_mask |
                                             weak_distance_mask) & floor_mask);
+    /* A slow floor protrusion is admitted after two consecutive frames even
+       when its frame-to-frame edge is too small for recent_motion. */
+    const uint16_t confirmed_floor_mask = (uint16_t)(floor_protrusion_mask &
+                                                       s_test_floor_pending_mask);
+    s_test_floor_pending_mask = floor_protrusion_mask;
     /* A stationary weak deviation is drift, not a track. Keep a zone active
        only after it has shown a recent edge; clearing the weak level rearms
        that zone for a later insect. */
@@ -1088,7 +1107,9 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         s_test_weak_active_mask |= weak_mask;
         TestResetLocalTrack();
     } else {
-        const uint16_t new_weak_mask = (uint16_t)(weak_mask & weak_motion_mask &
+        const uint16_t track_admission_mask = (uint16_t)(weak_motion_mask |
+                                                          confirmed_floor_mask);
+        const uint16_t new_weak_mask = (uint16_t)(weak_mask & track_admission_mask &
                                                    ~s_test_weak_active_mask);
         s_test_weak_active_mask |= new_weak_mask;
         if (new_weak_mask != 0U) {
@@ -1108,30 +1129,32 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     if (tracked_zones >= VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES &&
         (TestHasAdjacentPair(s_test_track_mask) || tracked_zones >= 3U)) {
         track_event_mask = s_test_track_mask;
-        event_mask |= s_test_track_mask;
-        event_signal_mask |= s_test_track_signal_mask;
-        event_distance_mask |= s_test_track_distance_mask;
     }
 
-    /* Apply independent gates. During post-baseline recovery LEVEL is off,
-       but FAST remains armed so a short real object is never hidden for the
-       whole holdoff. */
-    candidate_event_mask = (uint16_t)(event_mask | fast_edge_mask);
-    const uint16_t level_track_mask = event_mask;
-    const uint16_t level_track_signal_mask = event_signal_mask;
-    const uint16_t level_track_distance_mask = event_distance_mask;
+    /* Apply independent gates. In recovery, strong levels and fast edges stay
+       armed while weak tracks are withheld until the sensor settles. */
+    candidate_event_mask = (uint16_t)(event_mask | fast_edge_mask |
+                                       track_event_mask);
+    const uint16_t level_mask = event_mask;
+    const uint16_t level_signal_mask = event_signal_mask;
+    const uint16_t level_distance_mask = event_distance_mask;
     event_mask = 0U;
     event_signal_mask = 0U;
     event_distance_mask = 0U;
     if (event_policy & VL53L5CX_TEST_EVENT_ALLOW_LEVEL) {
-        event_mask |= level_track_mask;
-        event_signal_mask |= level_track_signal_mask;
-        event_distance_mask |= level_track_distance_mask;
+        event_mask |= level_mask;
+        event_signal_mask |= level_signal_mask;
+        event_distance_mask |= level_distance_mask;
     }
     if (event_policy & VL53L5CX_TEST_EVENT_ALLOW_FAST) {
         event_mask |= fast_edge_mask;
         event_signal_mask |= fast_signal_mask;
         event_distance_mask |= fast_distance_mask;
+    }
+    if (event_policy & VL53L5CX_TEST_EVENT_ALLOW_TRACK) {
+        event_mask |= track_event_mask;
+        event_signal_mask |= s_test_track_signal_mask;
+        event_distance_mask |= s_test_track_distance_mask;
     }
 
     /* A zone may generate one capture per uninterrupted evidence episode.

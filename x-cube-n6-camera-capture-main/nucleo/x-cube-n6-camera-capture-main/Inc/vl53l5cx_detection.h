@@ -147,13 +147,13 @@ VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void);
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
      (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
-/* Event policy for the high-sensitivity 4x4 detector.  LEVEL includes the
-   normal strong level and weak spatial-track paths; FAST is the independent
-   frame-to-frame edge path. */
+/* Independent gates for strong levels, fast edges and weak spatial tracks. */
 #define VL53L5CX_TEST_EVENT_ALLOW_LEVEL  0x01U
 #define VL53L5CX_TEST_EVENT_ALLOW_FAST   0x02U
+#define VL53L5CX_TEST_EVENT_ALLOW_TRACK  0x04U
 #define VL53L5CX_TEST_EVENT_ALLOW_ALL    (VL53L5CX_TEST_EVENT_ALLOW_LEVEL | \
-                                          VL53L5CX_TEST_EVENT_ALLOW_FAST)
+                                          VL53L5CX_TEST_EVENT_ALLOW_FAST | \
+                                          VL53L5CX_TEST_EVENT_ALLOW_TRACK)
 
 /* Classification of the last accepted event. */
 #define VL53L5CX_TEST_EVENT_CLASS_LEVEL       0x01U

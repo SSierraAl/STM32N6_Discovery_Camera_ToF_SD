@@ -651,7 +651,8 @@ void sensor_task(void *arg)
             tof_event_policy = VL53L5CX_TEST_EVENT_ALLOW_ALL;
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
         if (capture_rearm_holdoff_active && cooldown == 0)
-            tof_event_policy = VL53L5CX_TEST_EVENT_ALLOW_LEVEL;
+            tof_event_policy = (VL53L5CX_TEST_EVENT_ALLOW_LEVEL |
+                                VL53L5CX_TEST_EVENT_ALLOW_FAST);
 #endif
         const int insect_detected = VL53L5CX_TestDetectionStep(tof_event_policy);
 #else
