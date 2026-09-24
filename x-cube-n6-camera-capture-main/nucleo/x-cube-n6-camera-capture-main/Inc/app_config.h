@@ -34,6 +34,7 @@
                  Used with ToF enabled.
      2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
                      then writes to SD sequentially. FASTEST capture, max data collection.
+
                      NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
      4 = CALLBACK-BATCH — Camera init+warmup ONCE at boot, stays in standby between triggers.
                      On ToF trigger: wake → start continuous pipe → warmup using FRAME EVENT CALLBACK
