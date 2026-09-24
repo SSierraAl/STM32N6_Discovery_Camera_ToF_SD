@@ -607,11 +607,12 @@
    an isolated vibration/noise sample. */
 #define VL53L5CX_DET_FLOOR_HOLD_FRAMES           4U
 /* A floor insect can produce reliable 2% signal peaks while its millimetre
-   distance residual remains inside the noise. Field trials prioritize recall:
-   accept the first 2% floor peak, but never lower this to the measured 1%
-   empty-box noise floor. A saturated score also survives a blocked interval. */
+   distance residual changes sign. Integrate repeated same-zone peaks instead
+   of lowering the signal threshold to the measured 1% empty-box noise floor.
+   Two consecutive hits already use the fast path; this score also admits
+   three nearby non-consecutive hits (hit +4, quiet frame -1, trigger at 8). */
 #define VL53L5CX_DET_FLOOR_SIGNAL_SCORE_HIT       4U
-#define VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER   4U
+#define VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER   8U
 /* Weak tracks are restricted to baseline zones within this depth of the
    farthest valid zone (the box floor). Close wall/border zones remain active
    for strong and fast-edge events. Previous value: absent. */
