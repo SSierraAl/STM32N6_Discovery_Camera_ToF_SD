@@ -428,10 +428,12 @@ void VL53L5CX_PowerDown(void)
 
 void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
 {
+    uint8_t active_target_order = 0U;
     vl53l5cx_set_resolution(&s_dev, resolution);
     vl53l5cx_set_integration_time_ms(&s_dev, integration_ms);
     vl53l5cx_set_ranging_frequency_hz(&s_dev, freq_hz);
-    vl53l5cx_set_target_order(&s_dev, VL53L5CX_TARGET_ORDER_STRONGEST);
+    int target_st = vl53l5cx_set_target_order(&s_dev,
+                                               VL53L5CX_DET_TARGET_ORDER);
     vl53l5cx_set_sharpener_percent(&s_dev, 10);
     /* VL53L5CX_RANGING_MODE (app_config.h): 1 = CONTINUOUS (integration
        forced to sensor maximum), 3 = AUTONOMOUS (precise integration). */
@@ -463,8 +465,13 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
     s_motion_initialized = 0;
 #endif
 
-    printf("[ToF] Configured: res=%d, int=%dms, freq=%dHz, mode=%d\n",
-           resolution, integration_ms, freq_hz, (int)VL53L5CX_RANGING_MODE);
+    target_st |= vl53l5cx_get_target_order(&s_dev, &active_target_order);
+    printf("[ToF] Configured: res=%d, int=%dms, freq=%dHz, mode=%d, target=%s(%u), target_st=%d\n",
+           resolution, integration_ms, freq_hz, (int)VL53L5CX_RANGING_MODE,
+           active_target_order == VL53L5CX_TARGET_ORDER_CLOSEST ?
+               "CLOSEST" : (active_target_order == VL53L5CX_TARGET_ORDER_STRONGEST ?
+                   "STRONGEST" : "UNKNOWN"),
+           (unsigned)active_target_order, target_st);
 }
 
 void VL53L5CX_StartRanging(void)

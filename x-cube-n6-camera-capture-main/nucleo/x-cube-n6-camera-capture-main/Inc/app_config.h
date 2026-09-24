@@ -539,6 +539,14 @@
 #endif
 #define VL53L5CX_DET_RANGING_FREQ_HZ  15
 
+/** Primary target returned when more than one reflection is present in a
+    zone: 1 = CLOSEST, 2 = STRONGEST. A tiny floor insect is closer but can
+    reflect less light than the floor, so use CLOSEST for this geometry. */
+#define VL53L5CX_DET_TARGET_ORDER      1
+#if (VL53L5CX_DET_TARGET_ORDER != 1) && (VL53L5CX_DET_TARGET_ORDER != 2)
+#error "VL53L5CX_DET_TARGET_ORDER must be 1 (CLOSEST) or 2 (STRONGEST)"
+#endif
+
 /* Resolution-specific baseline samples */
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_BASELINE_SAMPLES 60
