@@ -147,9 +147,22 @@ VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void);
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
      (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
-/** Evaluate one already-read frame. allow_event is false during cooldown.
-    Kept across camera captures so a persistent candidate cannot loop. */
-int  VL53L5CX_TestDetectionStep(int allow_event);
+/* Event policy for the high-sensitivity 4x4 detector.  LEVEL includes the
+   normal strong level and weak spatial-track paths; FAST is the independent
+   frame-to-frame edge path. */
+#define VL53L5CX_TEST_EVENT_ALLOW_LEVEL  0x01U
+#define VL53L5CX_TEST_EVENT_ALLOW_FAST   0x02U
+#define VL53L5CX_TEST_EVENT_ALLOW_ALL    (VL53L5CX_TEST_EVENT_ALLOW_LEVEL | \
+                                          VL53L5CX_TEST_EVENT_ALLOW_FAST)
+
+/* Classification of the last accepted event. */
+#define VL53L5CX_TEST_EVENT_CLASS_LEVEL       0x01U
+#define VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE   0x02U
+#define VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK  0x04U
+
+/** Evaluate one already-read frame with the requested event policy. */
+int  VL53L5CX_TestDetectionStep(uint8_t event_policy);
+uint8_t VL53L5CX_TestGetLastEventClass(void);
 int  VL53L5CX_TestTakeBaselineRefreshRequest(void);
 /** Discard pre-capture comparisons without erasing active zone latches. */
 void VL53L5CX_ZoneDetectorAfterCapture(void);
