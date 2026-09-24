@@ -535,15 +535,14 @@
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_INTEGRATION_MS   30
 #else
-#define VL53L5CX_DET_INTEGRATION_MS   60
+#define VL53L5CX_DET_INTEGRATION_MS   30
 #endif
-#define VL53L5CX_DET_RANGING_FREQ_HZ  10
+#define VL53L5CX_DET_RANGING_FREQ_HZ  15
 
 /** Primary target returned when more than one reflection is present in a
-    zone: 1 = CLOSEST, 2 = STRONGEST. The CLOSEST floor trial did not improve
-    insect separation and admitted weak false events, so retain STRONGEST and
-    improve signal-to-noise with longer integration instead. */
-#define VL53L5CX_DET_TARGET_ORDER      2
+    zone: 1 = CLOSEST, 2 = STRONGEST. A tiny floor insect is closer but can
+    reflect less light than the floor, so use CLOSEST for this geometry. */
+#define VL53L5CX_DET_TARGET_ORDER      1
 #if (VL53L5CX_DET_TARGET_ORDER != 1) && (VL53L5CX_DET_TARGET_ORDER != 2)
 #error "VL53L5CX_DET_TARGET_ORDER must be 1 (CLOSEST) or 2 (STRONGEST)"
 #endif
@@ -579,7 +578,7 @@
 #define VL53L5CX_DET_LOCAL_DIST_STRONG_MM   5U
 #define VL53L5CX_DET_LOCAL_DIST_WEAK_MM     3U
 #define VL53L5CX_DET_LOCAL_SIGNAL_WEAK_PCT  2U
-#define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  3000U  /* reject accidental weak-zone pairs */
+#define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  5000U  /* calibrated for slow tiny-insect travel */
 #define VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES  2U
 #define VL53L5CX_DET_LOCAL_TRACK_MAX_ZONES  3U  /* 4-zone trial was broad vibration */
 /* Fast-edge path for small objects that cross a zone before reaching the
@@ -591,7 +590,7 @@
 #define VL53L5CX_DET_FAST_BASELINE_SIGNAL_PCT   2U
 #define VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM  3U
 /* A weak zone may join a spatial track only after recent per-zone movement.
-   At 10 Hz, three frames retain about 300 ms of entry evidence. */
+   At 15 Hz, three frames retain about 200 ms of entry evidence. */
 #define VL53L5CX_DET_WEAK_MOTION_SIGNAL_PCT     1U
 #define VL53L5CX_DET_WEAK_MOTION_DISTANCE_MM    1U
 #define VL53L5CX_DET_WEAK_MOTION_MEMORY_FRAMES  3U
@@ -599,7 +598,7 @@
    two frames when it protrudes toward the opposite-mounted sensor. */
 #define VL53L5CX_DET_FLOOR_PROTRUSION_MIN_MM    1U
 /* The empty-box survey reached 1 mm or 1% independently, but never sustained
-   the combined >=2% signal and >=1 mm toward-sensor residual. Four 10 Hz
+   the combined >=2% signal and >=1 mm toward-sensor residual. Four 15 Hz
    frames admit a tiny insect that remains inside one zone without admitting
    an isolated vibration/noise sample. */
 #define VL53L5CX_DET_FLOOR_HOLD_FRAMES           4U

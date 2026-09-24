@@ -1073,7 +1073,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             s_test_floor_hold_frames[z] = 0U;
         }
 
-        /* The 500 ms trace can miss short 2% peaks that the 10 Hz detector
+        /* The 500 ms trace can miss short 2% peaks that the 15 Hz detector
            sees. Preserve several same-zone floor peaks through short quiet
            gaps; isolated vibration/noise evidence decays before triggering. */
         if ((floor_mask & bit) && (weak_signal_mask & bit)) {
