@@ -581,10 +581,14 @@
 #define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  5000U  /* calibrated for slow tiny-insect travel */
 #define VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES  2U
 #define VL53L5CX_DET_LOCAL_TRACK_MAX_ZONES  3U  /* 4-zone trial was broad vibration */
+/* Field logs showed weak spatial tracks firing from unrelated 2% noise in
+   several zones. The validated same-zone floor score remains enabled for a
+   stationary/slow insect; disable only the legacy cross-zone trigger. */
+#define VL53L5CX_DET_WEAK_TRACK_ENABLED     0
 /* Fast-edge path for small objects that cross a zone before reaching the
-   normal >3% / >=5 mm level thresholds.  The first pair is frame-to-frame
-   motion; the second pair is the minimum local deviation from the baseline.
-   Previous values: absent. */
+   normal >3% / >=5 mm level thresholds. Both signal and 3-4 mm distance
+   evidence require confirmation in the following frame. Previous values:
+   absent. */
 #define VL53L5CX_DET_FAST_EDGE_SIGNAL_PCT       2U
 #define VL53L5CX_DET_FAST_EDGE_DISTANCE_MM      4U
 #define VL53L5CX_DET_FAST_BASELINE_SIGNAL_PCT   2U

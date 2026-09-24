@@ -1106,21 +1106,20 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 
     /* The normal level path accepts a 3 %% local signal change in one frame.
        The more sensitive 2 %% fast-signal path must still be present in the
-       following frame. Distance-only residuals of 3-4 mm are indistinguishable
-       from the observed ToF noise, so admit them only when the same zone also
-       carries >=2 %% signal evidence. A local >=5 mm residual remains strong
-       and immediate. */
+       following frame. Distance residuals of 3-4 mm are indistinguishable
+       from the observed ToF noise, so admit them only when a following frame
+       retains both >=3 mm distance and >=2 %% same-zone signal evidence. A
+       local >=5 mm residual remains strong and immediate. */
     const uint16_t signal_support_mask = (uint16_t)(signal_mask |
                                                      weak_signal_mask);
     weak_distance_mask &= signal_support_mask;
     fast_signal_mask = (uint16_t)(s_test_fast_pending_signal & weak_signal_mask);
-    fast_distance_mask = (uint16_t)(
-        (fast_distance_candidate_mask & weak_distance_mask) |
-        (s_test_fast_pending_distance & fast_distance_support_mask &
-         signal_support_mask & ~strong_distance_mask));
+    fast_distance_mask = (uint16_t)(s_test_fast_pending_distance &
+        fast_distance_support_mask & signal_support_mask &
+        ~strong_distance_mask);
     s_test_fast_pending_signal = (uint16_t)(fast_signal_candidate_mask & weak_signal_mask);
     s_test_fast_pending_distance = (uint16_t)(fast_distance_candidate_mask &
-        ~(strong_distance_mask | weak_distance_mask));
+                                               ~strong_distance_mask);
     fast_edge_mask = (uint16_t)(fast_signal_mask | fast_distance_mask);
     level_event_mask = (uint16_t)(signal_mask | strong_distance_mask |
                                   floor_hold_mask | floor_signal_hold_mask);
@@ -1177,7 +1176,8 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         }
     }
     const uint8_t tracked_zones = TestCountBits16(s_test_track_mask);
-    if (tracked_zones >= VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES &&
+    if (VL53L5CX_DET_WEAK_TRACK_ENABLED > 0 &&
+        tracked_zones >= VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES &&
         tracked_zones <= VL53L5CX_DET_LOCAL_TRACK_MAX_ZONES &&
         (TestHasAdjacentPair(s_test_track_mask) || tracked_zones >= 3U)) {
         track_event_mask = s_test_track_mask;
