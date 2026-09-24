@@ -46,8 +46,6 @@ static uint8_t s_last_insect_detected = 0;
    Zone-specific recalibration happens only after a long stationary plateau. */
 #define TOF_TEST_CLEAR_FRAMES       3U
 #define TOF_TEST_QUIET_FRAMES      15U
-#define TOF_TEST_EDGE_SIGNAL_PCT    3U
-#define TOF_TEST_EDGE_DISTANCE_MM   3U
 #define TOF_TEST_QUIET_SIGNAL_PCT   4U
 #define TOF_TEST_SETTLE_MS          12000U
 #define TOF_TEST_STABLE_MIN_FRAMES      8U
@@ -56,10 +54,10 @@ static uint16_t s_test_latched = 0U;
 static uint8_t s_test_clear[16] = {0};
 static uint32_t s_test_prev_sig[16] = {0};
 static uint16_t s_test_prev_dist[16] = {0};
-static uint32_t s_test_prev_motion[16] = {0};
 static uint8_t s_test_prev_valid[16] = {0};
 static uint32_t s_test_stable_since[16] = {0};
 static uint32_t s_test_stable_sig[16] = {0};
+static uint32_t s_test_stable_dist[16] = {0};
 static uint8_t s_test_stable_frames[16] = {0};
 static uint32_t s_test_scene_since = 0U;
 static uint8_t s_test_refresh_requested = 0U;
@@ -71,6 +69,8 @@ static uint32_t s_test_track_distance_value[16] = {0};
 static uint32_t s_test_track_since = 0U;
 static uint16_t s_test_weak_active_mask = 0U;
 static uint8_t s_test_recent_motion[16] = {0};
+static uint16_t s_test_fast_pending_signal = 0U;
+static uint16_t s_test_fast_pending_distance = 0U;
 static uint16_t s_test_blocked_mask = 0U;
 static uint8_t s_test_last_event_class = 0U;
 
@@ -147,15 +147,17 @@ static void TestResetDetectionState(void)
     memset(s_test_clear, 0, sizeof(s_test_clear));
     memset(s_test_prev_sig, 0, sizeof(s_test_prev_sig));
     memset(s_test_prev_dist, 0, sizeof(s_test_prev_dist));
-    memset(s_test_prev_motion, 0, sizeof(s_test_prev_motion));
     memset(s_test_prev_valid, 0, sizeof(s_test_prev_valid));
     memset(s_test_stable_since, 0, sizeof(s_test_stable_since));
     memset(s_test_stable_sig, 0, sizeof(s_test_stable_sig));
+    memset(s_test_stable_dist, 0, sizeof(s_test_stable_dist));
     memset(s_test_stable_frames, 0, sizeof(s_test_stable_frames));
     s_test_scene_since = 0U;
     s_test_refresh_requested = 0U;
     s_test_weak_active_mask = 0U;
     memset(s_test_recent_motion, 0, sizeof(s_test_recent_motion));
+    s_test_fast_pending_signal = 0U;
+    s_test_fast_pending_distance = 0U;
     s_test_blocked_mask = 0U;
     s_test_last_event_class = 0U;
     TestResetLocalTrack();
@@ -170,6 +172,8 @@ void VL53L5CX_ZoneDetectorAfterCapture(void)
     memset(s_test_prev_valid, 0, sizeof(s_test_prev_valid));
     memset(s_test_stable_since, 0, sizeof(s_test_stable_since));
     memset(s_test_stable_frames, 0, sizeof(s_test_stable_frames));
+    s_test_fast_pending_signal = 0U;
+    s_test_fast_pending_distance = 0U;
     s_test_scene_since = 0U;
     TestResetLocalTrack();
 }
@@ -538,7 +542,7 @@ void VL53L5CX_LearnBaseline(void)
 {
     VL53L5CX_ResetBaseline();
     const uint8_t baseline_samples = VL53L5CX_DET_BASELINE_SAMPLES;
-    const uint8_t settle_frames = 5;
+    const uint8_t settle_frames = VL53L5CX_DET_BASELINE_SETTLE_FRAMES;
     const uint16_t min_valid_frames = baseline_samples / 2;
 
     /* Per-zone accumulation with per-zone OK-frame counts.
@@ -560,6 +564,17 @@ void VL53L5CX_LearnBaseline(void)
 
     printf("[BASELINE] Learning %d samples + %d settle frames...\n",
            baseline_samples, settle_frames);
+
+    /* Let the ranging engine converge before measuring the reference. This
+       used to run after accumulation, which made every restart vulnerable to
+       the 2-10 %% warm-up offsets observed in field logs. */
+    for (uint8_t i = 0; i < settle_frames; i++) {
+        if (!VL53L5CX_WaitForDataReady(1000)) continue;
+        if (VL53L5CX_GetData() != 0) continue;
+#if !(TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY)
+        printf("  [SETTLE %d/%d]\r", i + 1, settle_frames);
+#endif
+    }
 
     for (uint8_t i = 0; i < baseline_samples; i++) {
         if (!VL53L5CX_WaitForDataReady(1000)) continue;
@@ -595,14 +610,6 @@ void VL53L5CX_LearnBaseline(void)
             s_zone_valid[z] = 1;
             valid_count++;
         }
-    }
-
-    for (uint8_t i = 0; i < settle_frames; i++) {
-        if (!VL53L5CX_WaitForDataReady(1000)) continue;
-        if (VL53L5CX_GetData() != 0) continue;
-#if !(TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY)
-        printf("  [SETTLE %d/%d]\r", i + 1, settle_frames);
-#endif
     }
 
     s_baseline_ready = 1;
@@ -919,6 +926,9 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     uint16_t strong_distance_mask = 0U;
     uint16_t fast_signal_mask = 0U;
     uint16_t fast_distance_mask = 0U;
+    uint16_t fast_signal_candidate_mask = 0U;
+    uint16_t fast_distance_candidate_mask = 0U;
+    uint16_t fast_distance_support_mask = 0U;
     uint16_t fast_edge_mask = 0U;
     uint16_t weak_signal_mask = 0U;
     uint16_t weak_distance_mask = 0U;
@@ -1007,7 +1017,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 
         /* Preserve the tested single-zone signal sensitivity, but apply it
            to the local residual instead of a trap-wide common change. */
-        if (local_signal[z] > VL53L5CX_DET_THRESHOLD_PCT)
+        if (local_signal[z] >= VL53L5CX_DET_THRESHOLD_PCT)
             signal_mask |= bit;
         else if (local_signal[z] >= VL53L5CX_DET_LOCAL_SIGNAL_WEAK_PCT)
             weak_signal_mask |= bit;
@@ -1016,18 +1026,32 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             strong_distance_mask |= bit;
         else if (local_distance[z] >= VL53L5CX_DET_LOCAL_DIST_WEAK_MM)
             weak_distance_mask |= bit;
+        if (local_distance[z] >= VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM)
+            fast_distance_support_mask |= bit;
 
         /* Kinematic path: require both a fresh per-zone edge and a local
            baseline residual. Coherent vibration is removed by the common
            median above; slow drift lacks the frame-to-frame edge. */
         if (frame_signal[z] >= VL53L5CX_DET_FAST_EDGE_SIGNAL_PCT &&
             local_signal[z] >= VL53L5CX_DET_FAST_BASELINE_SIGNAL_PCT)
-            fast_signal_mask |= bit;
+            fast_signal_candidate_mask |= bit;
         if (frame_distance[z] >= VL53L5CX_DET_FAST_EDGE_DISTANCE_MM &&
             local_distance[z] >= VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM)
-            fast_distance_mask |= bit;
+            fast_distance_candidate_mask |= bit;
     }
 
+    /* The normal level path now accepts a 3 %% local signal change in one
+       frame. The more sensitive 2 %% fast-signal path must still be present
+       in the following frame, rejecting isolated glitches at a cost of one
+       15 Hz frame. A local >=3 mm distance edge remains immediate. */
+    fast_signal_mask = (uint16_t)(s_test_fast_pending_signal & weak_signal_mask);
+    fast_distance_mask = (uint16_t)(
+        (fast_distance_candidate_mask & weak_distance_mask) |
+        (s_test_fast_pending_distance & fast_distance_support_mask &
+         ~strong_distance_mask));
+    s_test_fast_pending_signal = (uint16_t)(fast_signal_candidate_mask & weak_signal_mask);
+    s_test_fast_pending_distance = (uint16_t)(fast_distance_candidate_mask &
+        ~(strong_distance_mask | weak_distance_mask));
     fast_edge_mask = (uint16_t)(fast_signal_mask | fast_distance_mask);
     level_event_mask = (uint16_t)(signal_mask | strong_distance_mask);
     event_mask = level_event_mask;
@@ -1094,6 +1118,14 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         event_distance_mask |= fast_distance_mask;
     }
 
+    /* A zone may generate one capture per uninterrupted evidence episode.
+       Previously fast_edge_now bypassed the latch, so small oscillations on a
+       persistent 10 %% plateau re-fired the camera forever. A zone must now
+       produce TOF_TEST_CLEAR_FRAMES clean frames before it can trigger again. */
+    event_mask &= (uint16_t)~s_test_latched;
+    event_signal_mask &= event_mask;
+    event_distance_mask &= event_mask;
+
     /* raw_mask keeps the anti-loop/adaptation state aware of all current
        local evidence, while event_mask contains only evidence strong enough
        to request a new photo now. Motion-only candidates are deliberately
@@ -1130,16 +1162,10 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             s_test_clear[z] = 0U;
         }
         const uint8_t latched = (uint8_t)((s_test_latched & bit) != 0U);
-        const uint8_t fast_edge_now = (uint8_t)((fast_edge_mask & bit) != 0U);
-        const uint8_t motion_edge = (uint8_t)(motion >= VL53L5CX_DET_MOTION_THRESH &&
-            (s_test_prev_motion[z] < VL53L5CX_DET_MOTION_THRESH ||
-             motion >= s_test_prev_motion[z] + 40U));
 
         if (!valid) {
-            if ((event_mask & bit) && (!latched || fast_edge_now || motion_edge))
-                new_evidence = 1U;
+            if (event_mask & bit) new_evidence = 1U;
             s_test_prev_valid[z] = 0U;
-            s_test_prev_motion[z] = motion;
             s_test_stable_since[z] = 0U;
             s_test_stable_frames[z] = 0U;
             continue;
@@ -1155,11 +1181,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 
         const uint32_t frame_signal_pct = frame_signal[z];
         const uint32_t frame_distance_mm = frame_distance[z];
-        if ((event_mask & bit) &&
-            (!latched || fast_edge_now ||
-             frame_signal_pct >= TOF_TEST_EDGE_SIGNAL_PCT ||
-             frame_distance_mm >= TOF_TEST_EDGE_DISTANCE_MM || motion_edge))
-            new_evidence = 1U;
+        if (event_mask & bit) new_evidence = 1U;
 
         /* A quiet zone follows slow signal drift without changing its floor
            distance. Never learn an unphotographed raw candidate as baseline. */
@@ -1170,32 +1192,43 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             s_baseline_signal[z] = (uint32_t)((int32_t)base + diff / 32);
         }
 
-        /* After the first event, a stationary offset (such as the empty-box
-           zone plateau) can be re-centered one zone at a time. Require both
-           elapsed time and enough real samples when UART slows the loop.
-           No zone mask or distance reference is changed. */
-        if (latched && (raw_mask & bit) && motion < VL53L5CX_DET_MOTION_THRESH &&
-            distance_change <= 3U && s_test_prev_valid[z] &&
-            frame_signal_pct <= 2U && frame_distance_mm <= 2U) {
+        /* Re-center any stationary per-zone plateau, including a persistent
+           2 %% weak candidate that never produced a photo. Entry movement is
+           still detected first; only twelve seconds of frame-level stability
+           may become the new empty-box reference. */
+        if ((raw_mask & bit) && motion < VL53L5CX_DET_MOTION_THRESH &&
+            s_test_prev_valid[z] && frame_signal_pct <= 1U &&
+            frame_distance_mm <= 1U) {
             if (s_test_stable_since[z] == 0U) {
                 s_test_stable_since[z] = now;
                 s_test_stable_sig[z] = signal;
+                s_test_stable_dist[z] = (uint32_t)distance;
                 s_test_stable_frames[z] = 1U;
             } else {
                 s_test_stable_sig[z] =
                     (uint32_t)(((uint64_t)s_test_stable_sig[z] * 7U + signal) / 8U);
+                s_test_stable_dist[z] =
+                    (uint32_t)((s_test_stable_dist[z] * 7U + (uint32_t)distance) / 8U);
                 if (s_test_stable_frames[z] < TOF_TEST_STABLE_MIN_FRAMES)
                     s_test_stable_frames[z]++;
                 if ((now - s_test_stable_since[z]) >= TOF_TEST_SETTLE_MS &&
-                    s_test_stable_frames[z] >= TOF_TEST_STABLE_MIN_FRAMES &&
-                    signal_change >= VL53L5CX_DET_THRESHOLD_PCT) {
-                    s_baseline_signal[z] = s_test_stable_sig[z];
-                    printf("[ADAPT] Zone %u signal baseline %lu -> %lu (stable >=12 s)\n",
-                           (unsigned)z, (unsigned long)base,
-                           (unsigned long)s_baseline_signal[z]);
+                    s_test_stable_frames[z] >= TOF_TEST_STABLE_MIN_FRAMES) {
+                    const uint32_t old_signal = s_baseline_signal[z];
+                    const uint16_t old_distance = s_baseline_distance[z];
+                    if (signal_change >= VL53L5CX_DET_LOCAL_SIGNAL_WEAK_PCT)
+                        s_baseline_signal[z] = s_test_stable_sig[z];
+                    if (distance_change >= VL53L5CX_DET_LOCAL_DIST_WEAK_MM)
+                        s_baseline_distance[z] = (uint16_t)s_test_stable_dist[z];
+                    printf("[ADAPT] Zone %u baseline sig %lu->%lu dist %u->%u (stable >=12 s)\n",
+                           (unsigned)z, (unsigned long)old_signal,
+                           (unsigned long)s_baseline_signal[z],
+                           (unsigned)old_distance,
+                           (unsigned)s_baseline_distance[z]);
+                    s_test_latched &= (uint16_t)~bit;
+                    s_test_weak_active_mask &= (uint16_t)~bit;
+                    s_test_blocked_mask &= (uint16_t)~bit;
                     s_test_stable_since[z] = 0U;
                     s_test_stable_frames[z] = 0U;
-                    /* Leave the latch set until three clean raw frames. */
                 }
             }
         } else {
@@ -1205,7 +1238,6 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 
         s_test_prev_sig[z] = signal;
         s_test_prev_dist[z] = (uint16_t)distance;
-        s_test_prev_motion[z] = motion;
         s_test_prev_valid[z] = 1U;
     }
 
