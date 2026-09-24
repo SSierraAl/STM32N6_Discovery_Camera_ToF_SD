@@ -645,7 +645,7 @@ void sensor_task(void *arg)
             tof_event_policy = VL53L5CX_TEST_EVENT_ALLOW_ALL;
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
         if (capture_rearm_holdoff_active && cooldown == 0)
-            tof_event_policy = VL53L5CX_TEST_EVENT_ALLOW_FAST;
+            tof_event_policy = VL53L5CX_TEST_EVENT_ALLOW_LEVEL;
 #endif
         const int insect_detected = VL53L5CX_TestDetectionStep(tof_event_policy);
 #else
@@ -691,7 +691,7 @@ void sensor_task(void *arg)
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
             capture_rearm_holdoff_start = xTaskGetTickCount();
             capture_rearm_holdoff_active = 1;
-            printf("[ADAPT] Fast-edge-only recovery for %lu s; ToF remains active\n",
+            printf("[ADAPT] Level/track recovery for %lu s; ToF remains active\n",
                    (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
             continue;
@@ -741,14 +741,17 @@ void sensor_task(void *arg)
             cooldown = 30;
             continue;
 #else
-            /* Only a pure weak spatial track feeds the 3-in-30-s drift
-               counter. Strong level and fast-edge captures are treated as
-               real objects and cannot force a baseline refresh. */
+            /* Fast-edge and weak-track evidence are the noise-sensitive
+               classes. Count them even when combined with a strong level;
+               the previous equality test excluded classes 2, 3, 6 and 7 and
+               therefore allowed exactly the observed false-trigger loop. */
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     VL53L5CX_DET_HIGH_SENS_CAMERA
             const uint8_t tof_event_class = VL53L5CX_TestGetLastEventClass();
             const uint8_t count_for_refresh =
-                (uint8_t)(tof_event_class == VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK);
+                (uint8_t)((tof_event_class &
+                    (VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE |
+                     VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK)) != 0U);
 #else
             const uint8_t tof_event_class = 0U;
             const uint8_t count_for_refresh = 1U;
@@ -772,9 +775,10 @@ void sensor_task(void *arg)
                     consecutive_captures = 1;
                 }
                 consecutive_window_active = 0;
-                printf("[ADAPT] Weak-track camera activation %u/%u\n",
+                printf("[ADAPT] Drift-sensitive camera activation %u/%u class=%u\n",
                        (unsigned)consecutive_captures,
-                       (unsigned)TOF_CAPTURE_MAX_DETECTIONS);
+                       (unsigned)TOF_CAPTURE_MAX_DETECTIONS,
+                       (unsigned)tof_event_class);
             } else {
                 printf("[ADAPT] Event class=%u excluded from drift counter\n",
                        (unsigned)tof_event_class);
@@ -807,7 +811,7 @@ void sensor_task(void *arg)
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
                 capture_rearm_holdoff_start = xTaskGetTickCount();
                 capture_rearm_holdoff_active = 1;
-                printf("[ADAPT] Fast-edge-only recovery for %lu s; ToF remains active\n",
+                printf("[ADAPT] Level/track recovery for %lu s; ToF remains active\n",
                        (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
             } else if (count_for_refresh) {
