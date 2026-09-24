@@ -611,7 +611,7 @@
    accept the first 2% floor peak, but never lower this to the measured 1%
    empty-box noise floor. A saturated score also survives a blocked interval. */
 #define VL53L5CX_DET_FLOOR_SIGNAL_SCORE_HIT       4U
-#define VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER   4U
+#define VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER   12U
 /* Weak tracks are restricted to baseline zones within this depth of the
    farthest valid zone (the box floor). Close wall/border zones remain active
    for strong and fast-edge events. Previous value: absent. */
@@ -624,8 +624,8 @@
     it only reports the signed local residual used by the detector for every
     valid zone. Keep it enabled while collecting the final calibration logs,
     then set it to 0 for production. */
-#define VL53L5CX_DET_CAL_TRACE               0
-#define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   500U
+#define VL53L5CX_DET_CAL_TRACE               1
+#define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   300U
 
 /* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to
    the SENSOR (via DCI) in VL53L5CX_Configure(). The external guardian
