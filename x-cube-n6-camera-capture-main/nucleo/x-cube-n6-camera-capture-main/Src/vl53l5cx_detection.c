@@ -1074,8 +1074,11 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         }
 
         /* The 500 ms trace can miss short 2% peaks that the 15 Hz detector
-           sees. Preserve several same-zone floor peaks through short quiet
-           gaps; isolated vibration/noise evidence decays before triggering. */
+           sees. A score already saturated in a policy-blocked frame remains
+           eligible for this frame before its normal quiet-frame decay. */
+        if (s_test_floor_signal_score[z] >=
+            VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER)
+            floor_signal_hold_mask |= bit;
         if ((floor_mask & bit) && (weak_signal_mask & bit)) {
             const uint8_t room = (uint8_t)(
                 VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER -
@@ -1086,7 +1089,8 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             else
                 s_test_floor_signal_score[z] +=
                     VL53L5CX_DET_FLOOR_SIGNAL_SCORE_HIT;
-        } else if (s_test_floor_signal_score[z] > 0U) {
+        } else if (s_test_floor_signal_score[z] > 0U &&
+                   (event_policy & VL53L5CX_TEST_EVENT_ALLOW_LEVEL)) {
             s_test_floor_signal_score[z]--;
         }
         if (s_test_floor_signal_score[z] >=
