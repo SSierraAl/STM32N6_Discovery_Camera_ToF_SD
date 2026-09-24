@@ -545,6 +545,10 @@
 #else
 #define VL53L5CX_DET_BASELINE_SAMPLES 20
 #endif
+/* Discard live frames before collecting the baseline. The previous code
+   collected the baseline first and discarded five frames afterwards, so a
+   restart could permanently learn the sensor's warm-up transient. */
+#define VL53L5CX_DET_BASELINE_SETTLE_FRAMES  15U
 
 /* Resolution-specific detection thresholds
    (8x8 zones are smaller and noisier, so they need higher thresholds) */
@@ -574,7 +578,7 @@
    Previous values: absent. */
 #define VL53L5CX_DET_FAST_EDGE_SIGNAL_PCT       2U
 #define VL53L5CX_DET_FAST_EDGE_DISTANCE_MM      3U
-#define VL53L5CX_DET_FAST_BASELINE_SIGNAL_PCT   1U
+#define VL53L5CX_DET_FAST_BASELINE_SIGNAL_PCT   2U
 #define VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM  2U
 /* A weak zone may join a spatial track only after recent per-zone movement.
    At 15 Hz, three frames retain about 200 ms of entry evidence. */
@@ -630,9 +634,10 @@
    three activations inside this rolling window now force one full baseline. */
 #define VL53L5CX_DET_HIGH_SENS_REFRESH_WINDOW_SECS  30
 #define VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS       3
-/* Previous value: 60. After a forced baseline, suppress level/weak-track
-   activations briefly, while the fast-edge path remains armed. */
-#define VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS    10
+/* Previous values: 60, then 10. The corrected baseline now settles before
+   learning; keep only a short recovery interval and reject fast-only
+   transients while normal level/track evidence remains active. */
+#define VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS    3
 
 /* UART1 debug output
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)
