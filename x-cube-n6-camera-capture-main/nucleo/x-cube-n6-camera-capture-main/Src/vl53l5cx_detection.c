@@ -1040,15 +1040,20 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             fast_distance_candidate_mask |= bit;
     }
 
-    /* The normal level path now accepts a 3 %% local signal change in one
-       frame. The more sensitive 2 %% fast-signal path must still be present
-       in the following frame, rejecting isolated glitches at a cost of one
-       15 Hz frame. A local >=3 mm distance edge remains immediate. */
+    /* The normal level path accepts a 3 %% local signal change in one frame.
+       The more sensitive 2 %% fast-signal path must still be present in the
+       following frame. Distance-only residuals of 3-4 mm are indistinguishable
+       from the observed ToF noise, so admit them only when the same zone also
+       carries >=2 %% signal evidence. A local >=5 mm residual remains strong
+       and immediate. */
+    const uint16_t signal_support_mask = (uint16_t)(signal_mask |
+                                                     weak_signal_mask);
+    weak_distance_mask &= signal_support_mask;
     fast_signal_mask = (uint16_t)(s_test_fast_pending_signal & weak_signal_mask);
     fast_distance_mask = (uint16_t)(
         (fast_distance_candidate_mask & weak_distance_mask) |
         (s_test_fast_pending_distance & fast_distance_support_mask &
-         ~strong_distance_mask));
+         signal_support_mask & ~strong_distance_mask));
     s_test_fast_pending_signal = (uint16_t)(fast_signal_candidate_mask & weak_signal_mask);
     s_test_fast_pending_distance = (uint16_t)(fast_distance_candidate_mask &
         ~(strong_distance_mask | weak_distance_mask));
