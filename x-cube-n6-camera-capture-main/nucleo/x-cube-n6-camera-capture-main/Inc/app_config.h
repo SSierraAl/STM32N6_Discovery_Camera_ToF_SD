@@ -596,6 +596,13 @@
    independent of PERF_DEBUG_LEVEL so production logs expose the trigger. */
 #define VL53L5CX_DET_EVENT_TRACE             1
 
+/** Temporary tiny-insect calibration trace. This never requests a capture;
+    it only reports the signed local residual used by the detector for every
+    valid zone. Keep it enabled while collecting the final calibration logs,
+    then set it to 0 for production. */
+#define VL53L5CX_DET_CAL_TRACE               1
+#define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   500U
+
 /* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to
    the SENSOR (via DCI) in VL53L5CX_Configure(). The external guardian
    uses its own VL53L5CX_EXT_MOTION_* defines (EXT block below). The

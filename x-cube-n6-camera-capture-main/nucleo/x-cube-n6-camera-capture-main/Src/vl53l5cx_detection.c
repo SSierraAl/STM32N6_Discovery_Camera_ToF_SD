@@ -957,6 +957,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     uint32_t local_distance[16] = {0};
     int32_t signed_local_distance[16] = {0};
     uint32_t local_signal[16] = {0};
+    int32_t signed_local_signal[16] = {0};
     uint32_t frame_distance[16] = {0};
     uint32_t frame_signal[16] = {0};
     uint8_t local_valid[16] = {0};
@@ -1001,7 +1002,8 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         const uint16_t distance = (uint16_t)s_results.distance_mm[idx];
         signed_local_distance[z] = distance_delta[z] - common_distance;
         local_distance[z] = TestAbsI32(signed_local_distance[z]);
-        local_signal[z] = TestAbsI32(signal_delta_pct[z] - common_signal);
+        signed_local_signal[z] = signal_delta_pct[z] - common_signal;
+        local_signal[z] = TestAbsI32(signed_local_signal[z]);
         if ((uint32_t)s_baseline_distance[z] +
                 VL53L5CX_DET_FLOOR_DEPTH_BAND_MM >=
             (uint32_t)farthest_baseline_distance) {
@@ -1305,6 +1307,34 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     }
 #endif
     s_test_blocked_mask |= blocked_current_mask;
+
+#if VL53L5CX_DET_CAL_TRACE > 0
+    /* Diagnostic only: expose values below the event thresholds so a tiny
+       insect can be calibrated from evidence rather than by lowering limits
+       blindly. Negative sd means the zone moved toward the opposite-mounted
+       sensor. No mask or detector state is changed by this trace. */
+    static uint32_t cal_trace_tick = 0U;
+    if (cal_trace_tick == 0U ||
+        (now - cal_trace_tick) >= VL53L5CX_DET_CAL_TRACE_INTERVAL_MS) {
+        cal_trace_tick = now;
+        printf("TOFCAL,t=%lu,policy=%u,cd=%ld,cs=%ld,floor=%04X,fmt=z:sd_mm:ss_pct:fd_mm:fs_pct,z=",
+               (unsigned long)now, (unsigned)event_policy,
+               (long)common_distance, (long)common_signal,
+               (unsigned)floor_mask);
+        uint8_t printed = 0U;
+        for (uint8_t z = 0U; z < 16U; z++) {
+            if (!local_valid[z]) continue;
+            if (printed != 0U) printf(";");
+            printf("%u:%ld:%ld:%lu:%lu", (unsigned)z,
+                   (long)signed_local_distance[z],
+                   (long)signed_local_signal[z],
+                   (unsigned long)frame_distance[z],
+                   (unsigned long)frame_signal[z]);
+            printed = 1U;
+        }
+        printf("\r\n");
+    }
+#endif
 
     if (new_evidence) {
         const uint16_t strong_event_mask = (uint16_t)(signal_mask |
