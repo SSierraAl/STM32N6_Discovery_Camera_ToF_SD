@@ -570,8 +570,9 @@
 #define VL53L5CX_DET_LOCAL_DIST_STRONG_MM   5U
 #define VL53L5CX_DET_LOCAL_DIST_WEAK_MM     3U
 #define VL53L5CX_DET_LOCAL_SIGNAL_WEAK_PCT  2U
-#define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  3000U  /* previous 8000: reject slow drift tracks */
+#define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  5000U  /* calibrated for slow tiny-insect travel */
 #define VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES  2U
+#define VL53L5CX_DET_LOCAL_TRACK_MAX_ZONES  3U  /* 4-zone trial was broad vibration */
 /* Fast-edge path for small objects that cross a zone before reaching the
    normal >3% / >=5 mm level thresholds.  The first pair is frame-to-frame
    motion; the second pair is the minimum local deviation from the baseline.
@@ -588,6 +589,11 @@
 /* Slow floor insects may lack a sharp frame edge. Confirm a weak zone across
    two frames when it protrudes toward the opposite-mounted sensor. */
 #define VL53L5CX_DET_FLOOR_PROTRUSION_MIN_MM    1U
+/* The empty-box survey reached 1 mm or 1% independently, but never sustained
+   the combined >=2% signal and >=1 mm toward-sensor residual. Four 15 Hz
+   frames admit a tiny insect that remains inside one zone without admitting
+   an isolated vibration/noise sample. */
+#define VL53L5CX_DET_FLOOR_HOLD_FRAMES           4U
 /* Weak tracks are restricted to baseline zones within this depth of the
    farthest valid zone (the box floor). Close wall/border zones remain active
    for strong and fast-edge events. Previous value: absent. */
@@ -600,7 +606,7 @@
     it only reports the signed local residual used by the detector for every
     valid zone. Keep it enabled while collecting the final calibration logs,
     then set it to 0 for production. */
-#define VL53L5CX_DET_CAL_TRACE               1
+#define VL53L5CX_DET_CAL_TRACE               0
 #define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   500U
 
 /* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to

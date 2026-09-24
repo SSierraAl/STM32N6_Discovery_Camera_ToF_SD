@@ -72,6 +72,7 @@ static uint8_t s_test_recent_motion[16] = {0};
 static uint16_t s_test_fast_pending_signal = 0U;
 static uint16_t s_test_fast_pending_distance = 0U;
 static uint16_t s_test_floor_pending_mask = 0U;
+static uint8_t s_test_floor_hold_frames[16] = {0};
 static uint16_t s_test_blocked_mask = 0U;
 static uint8_t s_test_last_event_class = 0U;
 
@@ -160,6 +161,7 @@ static void TestResetDetectionState(void)
     s_test_fast_pending_signal = 0U;
     s_test_fast_pending_distance = 0U;
     s_test_floor_pending_mask = 0U;
+    memset(s_test_floor_hold_frames, 0, sizeof(s_test_floor_hold_frames));
     s_test_blocked_mask = 0U;
     s_test_last_event_class = 0U;
     TestResetLocalTrack();
@@ -177,6 +179,7 @@ void VL53L5CX_ZoneDetectorAfterCapture(void)
     s_test_fast_pending_signal = 0U;
     s_test_fast_pending_distance = 0U;
     s_test_floor_pending_mask = 0U;
+    memset(s_test_floor_hold_frames, 0, sizeof(s_test_floor_hold_frames));
     s_test_scene_since = 0U;
     TestResetLocalTrack();
 }
@@ -938,6 +941,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     uint16_t weak_motion_mask = 0U;
     uint16_t floor_mask = 0U;
     uint16_t floor_protrusion_mask = 0U;
+    uint16_t floor_hold_mask = 0U;
     uint16_t level_event_mask = 0U;
     uint16_t candidate_event_mask = 0U;
     uint16_t event_mask = 0U;
@@ -995,7 +999,10 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 
     for (uint8_t z = 0U; z < 16U; z++) {
         if (s_test_recent_motion[z] > 0U) s_test_recent_motion[z]--;
-        if (!local_valid[z]) continue;
+        if (!local_valid[z]) {
+            s_test_floor_hold_frames[z] = 0U;
+            continue;
+        }
         const uint16_t bit = (uint16_t)(1U << z);
         const uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         const uint32_t signal = s_results.signal_per_spad[idx];
@@ -1045,6 +1052,15 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
                 -(int32_t)VL53L5CX_DET_FLOOR_PROTRUSION_MIN_MM)
             floor_protrusion_mask |= bit;
 
+        if (floor_protrusion_mask & bit) {
+            if (s_test_floor_hold_frames[z] < VL53L5CX_DET_FLOOR_HOLD_FRAMES)
+                s_test_floor_hold_frames[z]++;
+            if (s_test_floor_hold_frames[z] >= VL53L5CX_DET_FLOOR_HOLD_FRAMES)
+                floor_hold_mask |= bit;
+        } else {
+            s_test_floor_hold_frames[z] = 0U;
+        }
+
         /* Kinematic path: require both a fresh per-zone edge and a local
            baseline residual. Coherent vibration is removed by the common
            median above; slow drift lacks the frame-to-frame edge. */
@@ -1074,16 +1090,16 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     s_test_fast_pending_distance = (uint16_t)(fast_distance_candidate_mask &
         ~(strong_distance_mask | weak_distance_mask));
     fast_edge_mask = (uint16_t)(fast_signal_mask | fast_distance_mask);
-    level_event_mask = (uint16_t)(signal_mask | strong_distance_mask);
+    level_event_mask = (uint16_t)(signal_mask | strong_distance_mask |
+                                  floor_hold_mask);
     event_mask = level_event_mask;
-    event_signal_mask = signal_mask;
-    event_distance_mask = strong_distance_mask;
+    event_signal_mask = (uint16_t)(signal_mask | floor_hold_mask);
+    event_distance_mask = (uint16_t)(strong_distance_mask | floor_hold_mask);
 
-    /* Weak evidence is intentionally not enough for a photo by itself.
-       Retain it long enough for a slow tiny insect to cross into another
-       zone. Two neighbouring zones (including diagonals), or any three
-       distinct zones, form a spatial track; repeated noise in one zone does
-       not. */
+    /* Unsustained weak evidence is not enough for a photo by itself. Retain
+       it long enough for a slow tiny insect to cross into another zone. Two
+       neighbouring zones (including diagonals), or any three distinct zones,
+       form a spatial track; repeated one-frame noise in one zone does not. */
     if (s_test_track_since != 0U &&
         (now - s_test_track_since) > VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS) {
         TestResetLocalTrack();
@@ -1129,6 +1145,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     }
     const uint8_t tracked_zones = TestCountBits16(s_test_track_mask);
     if (tracked_zones >= VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES &&
+        tracked_zones <= VL53L5CX_DET_LOCAL_TRACK_MAX_ZONES &&
         (TestHasAdjacentPair(s_test_track_mask) || tracked_zones >= 3U)) {
         track_event_mask = s_test_track_mask;
     }
