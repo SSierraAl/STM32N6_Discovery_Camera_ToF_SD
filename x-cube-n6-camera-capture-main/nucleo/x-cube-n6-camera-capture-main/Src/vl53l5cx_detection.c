@@ -70,6 +70,9 @@ static uint32_t s_test_track_signal_value[16] = {0};
 static uint32_t s_test_track_distance_value[16] = {0};
 static uint32_t s_test_track_since = 0U;
 static uint16_t s_test_weak_active_mask = 0U;
+static uint8_t s_test_recent_motion[16] = {0};
+static uint16_t s_test_blocked_mask = 0U;
+static uint8_t s_test_last_event_class = 0U;
 
 static uint32_t TestAbsDiff(uint32_t a, uint32_t b)
 {
@@ -152,6 +155,9 @@ static void TestResetDetectionState(void)
     s_test_scene_since = 0U;
     s_test_refresh_requested = 0U;
     s_test_weak_active_mask = 0U;
+    memset(s_test_recent_motion, 0, sizeof(s_test_recent_motion));
+    s_test_blocked_mask = 0U;
+    s_test_last_event_class = 0U;
     TestResetLocalTrack();
 }
 
@@ -906,13 +912,20 @@ int VL53L5CX_IsInsectDetected(void)
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
      (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
-int VL53L5CX_TestDetectionStep(int allow_event)
+int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 {
     const uint32_t now = HAL_GetTick();
     uint16_t signal_mask = 0U;
     uint16_t strong_distance_mask = 0U;
+    uint16_t fast_signal_mask = 0U;
+    uint16_t fast_distance_mask = 0U;
+    uint16_t fast_edge_mask = 0U;
     uint16_t weak_signal_mask = 0U;
     uint16_t weak_distance_mask = 0U;
+    uint16_t weak_motion_mask = 0U;
+    uint16_t floor_mask = 0U;
+    uint16_t level_event_mask = 0U;
+    uint16_t candidate_event_mask = 0U;
     uint16_t event_mask = 0U;
     uint16_t event_signal_mask = 0U;
     uint16_t event_distance_mask = 0U;
@@ -929,9 +942,12 @@ int VL53L5CX_TestDetectionStep(int allow_event)
     int32_t signal_values[16];
     uint32_t local_distance[16] = {0};
     uint32_t local_signal[16] = {0};
+    uint32_t frame_distance[16] = {0};
+    uint32_t frame_signal[16] = {0};
     uint8_t local_valid[16] = {0};
     uint8_t distance_count = 0U;
     uint8_t signal_count = 0U;
+    uint16_t farthest_baseline_distance = 0U;
 
     /* Build robust common-mode references from this same frame. A vibration
        or slow scene shift moves most zones together; a small insect changes
@@ -942,6 +958,8 @@ int VL53L5CX_TestDetectionStep(int allow_event)
         const int16_t distance = s_results.distance_mm[idx];
         const uint32_t base = s_baseline_signal[z];
         const uint16_t base_dist = s_baseline_distance[z];
+        if (s_zone_valid[z] && base > 0U && base_dist > farthest_baseline_distance)
+            farthest_baseline_distance = base_dist;
         const uint8_t valid = (uint8_t)(s_zone_valid[z] &&
             VL53L5CX_STATUS_OK_FILT(s_results.target_status[idx]) &&
             signal >= VL53L5CX_DET_MIN_SIGNAL && distance > 0 &&
@@ -960,10 +978,32 @@ int VL53L5CX_TestDetectionStep(int allow_event)
     const int32_t common_signal = TestMedianI32(signal_values, signal_count);
 
     for (uint8_t z = 0U; z < 16U; z++) {
+        if (s_test_recent_motion[z] > 0U) s_test_recent_motion[z]--;
         if (!local_valid[z]) continue;
         const uint16_t bit = (uint16_t)(1U << z);
+        const uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
+        const uint32_t signal = s_results.signal_per_spad[idx];
+        const uint16_t distance = (uint16_t)s_results.distance_mm[idx];
         local_distance[z] = TestAbsI32(distance_delta[z] - common_distance);
         local_signal[z] = TestAbsI32(signal_delta_pct[z] - common_signal);
+        if ((uint32_t)s_baseline_distance[z] +
+                VL53L5CX_DET_FLOOR_DEPTH_BAND_MM >=
+            (uint32_t)farthest_baseline_distance) {
+            floor_mask |= bit;
+        }
+
+        if (s_test_prev_valid[z]) {
+            frame_signal[z] = (s_test_prev_sig[z] > 0U) ?
+                (uint32_t)(((uint64_t)TestAbsDiff(signal, s_test_prev_sig[z]) * 100U) /
+                           s_test_prev_sig[z]) : 0U;
+            frame_distance[z] = TestAbsDiff((uint32_t)distance,
+                                             (uint32_t)s_test_prev_dist[z]);
+            if (frame_signal[z] >= VL53L5CX_DET_WEAK_MOTION_SIGNAL_PCT ||
+                frame_distance[z] >= VL53L5CX_DET_WEAK_MOTION_DISTANCE_MM) {
+                s_test_recent_motion[z] = VL53L5CX_DET_WEAK_MOTION_MEMORY_FRAMES;
+            }
+        }
+        if (s_test_recent_motion[z] > 0U) weak_motion_mask |= bit;
 
         /* Preserve the tested single-zone signal sensitivity, but apply it
            to the local residual instead of a trap-wide common change. */
@@ -976,9 +1016,21 @@ int VL53L5CX_TestDetectionStep(int allow_event)
             strong_distance_mask |= bit;
         else if (local_distance[z] >= VL53L5CX_DET_LOCAL_DIST_WEAK_MM)
             weak_distance_mask |= bit;
+
+        /* Kinematic path: require both a fresh per-zone edge and a local
+           baseline residual. Coherent vibration is removed by the common
+           median above; slow drift lacks the frame-to-frame edge. */
+        if (frame_signal[z] >= VL53L5CX_DET_FAST_EDGE_SIGNAL_PCT &&
+            local_signal[z] >= VL53L5CX_DET_FAST_BASELINE_SIGNAL_PCT)
+            fast_signal_mask |= bit;
+        if (frame_distance[z] >= VL53L5CX_DET_FAST_EDGE_DISTANCE_MM &&
+            local_distance[z] >= VL53L5CX_DET_FAST_BASELINE_DISTANCE_MM)
+            fast_distance_mask |= bit;
     }
 
-    event_mask = (uint16_t)(signal_mask | strong_distance_mask);
+    fast_edge_mask = (uint16_t)(fast_signal_mask | fast_distance_mask);
+    level_event_mask = (uint16_t)(signal_mask | strong_distance_mask);
+    event_mask = level_event_mask;
     event_signal_mask = signal_mask;
     event_distance_mask = strong_distance_mask;
 
@@ -991,9 +1043,15 @@ int VL53L5CX_TestDetectionStep(int allow_event)
         (now - s_test_track_since) > VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS) {
         TestResetLocalTrack();
     }
-    const uint16_t weak_mask = (uint16_t)(weak_signal_mask | weak_distance_mask);
-    const uint16_t new_weak_mask = (uint16_t)(weak_mask & ~s_test_weak_active_mask);
-    s_test_weak_active_mask = weak_mask;
+    const uint16_t weak_mask = (uint16_t)((weak_signal_mask |
+                                            weak_distance_mask) & floor_mask);
+    /* A stationary weak deviation is drift, not a track. Keep a zone active
+       only after it has shown a recent edge; clearing the weak level rearms
+       that zone for a later insect. */
+    s_test_weak_active_mask &= weak_mask;
+    const uint16_t new_weak_mask = (uint16_t)(weak_mask & weak_motion_mask &
+                                               ~s_test_weak_active_mask);
+    s_test_weak_active_mask |= new_weak_mask;
     if (new_weak_mask != 0U) {
         if (s_test_track_since == 0U) s_test_track_since = now;
         s_test_track_mask |= new_weak_mask;
@@ -1015,13 +1073,35 @@ int VL53L5CX_TestDetectionStep(int allow_event)
         event_distance_mask |= s_test_track_distance_mask;
     }
 
+    /* Apply independent gates. During post-baseline recovery LEVEL is off,
+       but FAST remains armed so a short real object is never hidden for the
+       whole holdoff. */
+    candidate_event_mask = (uint16_t)(event_mask | fast_edge_mask);
+    const uint16_t level_track_mask = event_mask;
+    const uint16_t level_track_signal_mask = event_signal_mask;
+    const uint16_t level_track_distance_mask = event_distance_mask;
+    event_mask = 0U;
+    event_signal_mask = 0U;
+    event_distance_mask = 0U;
+    if (event_policy & VL53L5CX_TEST_EVENT_ALLOW_LEVEL) {
+        event_mask |= level_track_mask;
+        event_signal_mask |= level_track_signal_mask;
+        event_distance_mask |= level_track_distance_mask;
+    }
+    if (event_policy & VL53L5CX_TEST_EVENT_ALLOW_FAST) {
+        event_mask |= fast_edge_mask;
+        event_signal_mask |= fast_signal_mask;
+        event_distance_mask |= fast_distance_mask;
+    }
+
     /* raw_mask keeps the anti-loop/adaptation state aware of all current
        local evidence, while event_mask contains only evidence strong enough
        to request a new photo now. Motion-only candidates are deliberately
        excluded: the ST motion plugin's supported range starts at 400 mm,
        outside this 40-110 mm box geometry. */
-    raw_mask = (uint16_t)(signal_mask | strong_distance_mask |
+    raw_mask = (uint16_t)(signal_mask | strong_distance_mask | fast_edge_mask |
                           weak_signal_mask | weak_distance_mask);
+    s_test_blocked_mask &= raw_mask;
 
     for (uint8_t z = 0U; z < 16U; z++) {
         const uint16_t bit = (uint16_t)(1U << z);
@@ -1050,12 +1130,13 @@ int VL53L5CX_TestDetectionStep(int allow_event)
             s_test_clear[z] = 0U;
         }
         const uint8_t latched = (uint8_t)((s_test_latched & bit) != 0U);
+        const uint8_t fast_edge_now = (uint8_t)((fast_edge_mask & bit) != 0U);
         const uint8_t motion_edge = (uint8_t)(motion >= VL53L5CX_DET_MOTION_THRESH &&
             (s_test_prev_motion[z] < VL53L5CX_DET_MOTION_THRESH ||
              motion >= s_test_prev_motion[z] + 40U));
 
         if (!valid) {
-            if (allow_event && (event_mask & bit) && (!latched || motion_edge))
+            if ((event_mask & bit) && (!latched || fast_edge_now || motion_edge))
                 new_evidence = 1U;
             s_test_prev_valid[z] = 0U;
             s_test_prev_motion[z] = motion;
@@ -1072,14 +1153,11 @@ int VL53L5CX_TestDetectionStep(int allow_event)
         if (base > 0U && signal >= base && signal_change >= 7U) signal_up++;
         if (base > 0U && signal < base && signal_change >= 7U) signal_down++;
 
-        const uint32_t frame_signal_pct = (s_test_prev_valid[z] &&
-            s_test_prev_sig[z] > 0U) ?
-            (uint32_t)(((uint64_t)TestAbsDiff(signal, s_test_prev_sig[z]) * 100U) /
-                       s_test_prev_sig[z]) : 0U;
-        const uint32_t frame_distance_mm = s_test_prev_valid[z] ?
-            TestAbsDiff((uint32_t)distance, s_test_prev_dist[z]) : 0U;
-        if (allow_event && (event_mask & bit) &&
-            (!latched || frame_signal_pct >= TOF_TEST_EDGE_SIGNAL_PCT ||
+        const uint32_t frame_signal_pct = frame_signal[z];
+        const uint32_t frame_distance_mm = frame_distance[z];
+        if ((event_mask & bit) &&
+            (!latched || fast_edge_now ||
+             frame_signal_pct >= TOF_TEST_EDGE_SIGNAL_PCT ||
              frame_distance_mm >= TOF_TEST_EDGE_DISTANCE_MM || motion_edge))
             new_evidence = 1U;
 
@@ -1143,12 +1221,33 @@ int VL53L5CX_TestDetectionStep(int allow_event)
         s_test_scene_since = 0U;
     }
 
-    if (allow_event && new_evidence) {
+    const uint16_t blocked_current_mask = (uint16_t)(
+        (candidate_event_mask & ~event_mask) & raw_mask);
+#if VL53L5CX_DET_EVENT_TRACE > 0
+    const uint16_t newly_blocked_mask = (uint16_t)(blocked_current_mask &
+                                                   ~s_test_blocked_mask);
+    if (newly_blocked_mask != 0U) {
+        printf("TOFMISS,t=%lu,policy=%u,strong=%04X,fast=%04X,track=%04X,blocked=%04X\r\n",
+               (unsigned long)now, (unsigned)event_policy,
+               (unsigned)level_event_mask, (unsigned)fast_edge_mask,
+               (unsigned)track_event_mask, (unsigned)newly_blocked_mask);
+    }
+#endif
+    s_test_blocked_mask |= blocked_current_mask;
+
+    if (new_evidence) {
 #if VL53L5CX_DET_EVENT_TRACE > 0
         const uint16_t strong_event_mask = (uint16_t)(signal_mask |
                                                        strong_distance_mask);
         const uint16_t latched_before = s_test_latched;
 #endif
+        s_test_last_event_class = 0U;
+        if (event_mask & level_event_mask)
+            s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_LEVEL;
+        if (event_mask & fast_edge_mask)
+            s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE;
+        if (event_mask & track_event_mask)
+            s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK;
         s_test_latched |= event_mask;
         s_last_insect_detected = 1U;
         s_last_result.insect_detected = 1U;
@@ -1203,7 +1302,13 @@ int VL53L5CX_TestDetectionStep(int allow_event)
     s_last_result.insect_detected = 0U;
     s_last_result.trigger_source = 0U;
     s_last_result.affected_count = 0U;
+    s_test_last_event_class = 0U;
     return 0;
+}
+
+uint8_t VL53L5CX_TestGetLastEventClass(void)
+{
+    return s_test_last_event_class;
 }
 
 int VL53L5CX_TestTakeBaselineRefreshRequest(void)
