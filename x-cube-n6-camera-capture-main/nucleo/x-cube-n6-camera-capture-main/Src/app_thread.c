@@ -626,7 +626,6 @@ void sensor_task(void *arg)
                Preserve the learned baseline and the currently active weak
                zones so persistent 2% noise is not treated as a new edge. */
             VL53L5CX_ZoneDetectorAfterCapture();
-            VL53L5CX_ResetDetectionFilterState();
             printf("[ADAPT] Camera re-armed; weak track cleared\n");
         }
 #endif
@@ -748,21 +747,14 @@ void sensor_task(void *arg)
             cooldown = 30;
             continue;
 #else
-            /* Fast-edge and weak-track evidence are the noise-sensitive
-               classes. Count them even when combined with a strong level;
-               the previous equality test excluded classes 2, 3, 6 and 7 and
-               therefore allowed exactly the observed false-trigger loop. */
+            /* Keep the event class for diagnostics, but count every completed
+               camera activation. Three captures with no 30 s quiet gap force
+               a baseline refresh, regardless of which detector path fired. */
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     VL53L5CX_DET_HIGH_SENS_CAMERA
             const uint8_t tof_event_class = VL53L5CX_TestGetLastEventClass();
-            const uint8_t count_for_refresh =
-                (uint8_t)((tof_event_class &
-                    (VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE |
-                     VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK |
-                     VL53L5CX_TEST_EVENT_CLASS_LATCHED_SCENE)) != 0U);
 #else
             const uint8_t tof_event_class = 0U;
-            const uint8_t count_for_refresh = 1U;
 #endif
             BSP_LED_Off(LED_GREEN); BSP_LED_On(LED_RED);
 #if WS2812_MODE == 1
@@ -776,21 +768,16 @@ void sensor_task(void *arg)
 #endif
 
 #if TOF_CAPTURE_ACTIVATION_REFRESH
-            if (count_for_refresh) {
-                if (consecutive_window_active) {
-                    consecutive_captures++;
-                } else {
-                    consecutive_captures = 1;
-                }
-                consecutive_window_active = 0;
-                printf("[ADAPT] Drift-sensitive camera activation %u/%u class=%u\n",
-                       (unsigned)consecutive_captures,
-                       (unsigned)TOF_CAPTURE_MAX_DETECTIONS,
-                       (unsigned)tof_event_class);
+            if (consecutive_window_active) {
+                consecutive_captures++;
             } else {
-                printf("[ADAPT] Event class=%u excluded from drift counter\n",
-                       (unsigned)tof_event_class);
+                consecutive_captures = 1;
             }
+            consecutive_window_active = 0;
+            printf("[ADAPT] Camera activation %u/%u class=%u\n",
+                   (unsigned)consecutive_captures,
+                   (unsigned)TOF_CAPTURE_MAX_DETECTIONS,
+                   (unsigned)tof_event_class);
 #endif
 
             PerfTimer_t t;
@@ -801,12 +788,13 @@ void sensor_task(void *arg)
             VL53L5CX_ZoneDetectorAfterCapture();
 #endif
             /* sensor_task was blocked throughout camera/SD work. Do not compare
-               the first new ToF sample with stale pre-capture history. */
-            VL53L5CX_ResetDetectionFilterState();
+               the first new ToF sample with stale pre-capture history.
+               ZoneDetectorAfterCapture already clears those comparisons while
+               preserving active latches; a full reset here caused the same
+               persistent evidence to trigger again after every photo. */
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
 #if TOF_CAPTURE_ACTIVATION_REFRESH
-            if (count_for_refresh &&
-                consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
+            if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
                 printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
                 VL53L5CX_StopRanging();
                 vTaskDelay(pdMS_TO_TICKS(50));
@@ -822,14 +810,12 @@ void sensor_task(void *arg)
                 printf("[ADAPT] Level/track recovery for %lu s; ToF remains active\n",
                        (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
-            } else if (count_for_refresh) {
+            } else {
                 VL53L5CX_StartRanging();
                 consecutive_window_start = xTaskGetTickCount();
                 consecutive_window_active = 1;
                 printf("[ADAPT] Window opened for %lu s\n",
                        (unsigned long)TOF_CAPTURE_REFRESH_WINDOW_SECS);
-            } else {
-                VL53L5CX_StartRanging();
             }
 #else
             VL53L5CX_StartRanging();
