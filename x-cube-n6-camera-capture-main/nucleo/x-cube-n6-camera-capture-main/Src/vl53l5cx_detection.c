@@ -57,6 +57,10 @@ static uint8_t s_last_insect_detected = 0;
 #define TOF_TEST_STABLE_WINDOW_FRAMES 180U
 #define TOF_TEST_SCENE_SETTLE_MS     5000U
 static uint16_t s_test_latched = 0U;
+/* A weak capture may escalate once to a strong capture in the same zone.
+   Strong captures remain one-per-evidence-episode. */
+static uint16_t s_test_latched_strong = 0U;
+static uint16_t s_test_strong_escalation_pending = 0U;
 static uint32_t s_test_latched_since[16] = {0};
 static uint8_t s_test_clear[16] = {0};
 static uint32_t s_test_prev_sig[16] = {0};
@@ -155,6 +159,8 @@ static void TestResetLocalTrack(void)
 static void TestResetDetectionState(void)
 {
     s_test_latched = 0U;
+    s_test_latched_strong = 0U;
+    s_test_strong_escalation_pending = 0U;
     memset(s_test_latched_since, 0, sizeof(s_test_latched_since));
     memset(s_test_clear, 0, sizeof(s_test_clear));
     memset(s_test_prev_sig, 0, sizeof(s_test_prev_sig));
@@ -1273,11 +1279,23 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         event_distance_mask |= s_test_track_distance_mask;
     }
 
-    /* A zone may generate one capture per uninterrupted evidence episode.
-       Previously fast_edge_now bypassed the latch, so small oscillations on a
-       persistent 10 %% plateau re-fired the camera forever. A zone must now
-       produce TOF_TEST_CLEAR_FRAMES clean frames before it can trigger again. */
-    event_mask &= (uint16_t)~s_test_latched;
+    /* A zone normally generates one capture per uninterrupted evidence
+       episode. Permit exactly one escalation when a zone photographed from
+       weak evidence later becomes independently strong. This recovers a real
+       insect entering a noise-latched zone without re-opening the periodic
+       strong-plateau loop. Require the escalation in two consecutive frames;
+       policy-blocked frames may establish the first one. */
+    const uint16_t strong_level_mask = (uint16_t)(signal_mask |
+                                                   strong_distance_mask);
+    const uint16_t strong_escalation_candidate = (uint16_t)(
+        strong_level_mask & s_test_latched &
+        (uint16_t)~s_test_latched_strong);
+    const uint16_t strong_escalation_mask = (uint16_t)(
+        event_mask & strong_escalation_candidate &
+        s_test_strong_escalation_pending);
+    s_test_strong_escalation_pending = strong_escalation_candidate;
+    event_mask = (uint16_t)((event_mask & (uint16_t)~s_test_latched) |
+                            strong_escalation_mask);
     event_signal_mask &= event_mask;
     event_distance_mask &= event_mask;
 
@@ -1320,13 +1338,16 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
            be photographed again. A static object is instead absorbed by
            the 12 s stable-plateau recentering (bounded to 2 photos). */
         if ((s_test_latched & bit) != 0U && s_test_latched_since[z] != 0U &&
-            (now - s_test_latched_since[z]) >= VL53L5CX_DET_REARM_INTERVAL_MS)
+            (now - s_test_latched_since[z]) >= VL53L5CX_DET_REARM_INTERVAL_MS) {
             s_test_latched = (uint16_t)(s_test_latched & (uint16_t)~bit);
+            s_test_latched_strong &= (uint16_t)~bit;
+        }
 #endif
         if (!(raw_mask & bit)) {
             if (s_test_clear[z] < TOF_TEST_QUIET_FRAMES) s_test_clear[z]++;
             if (s_test_clear[z] >= TOF_TEST_CLEAR_FRAMES) {
                 s_test_latched = (uint16_t)(s_test_latched & (uint16_t)~bit);
+                s_test_latched_strong &= (uint16_t)~bit;
                 s_test_latched_since[z] = 0U;
             }
         } else {
@@ -1397,6 +1418,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
                            (unsigned)s_baseline_distance[z],
                            (unsigned)s_test_stable_frames[z]);
                     s_test_latched = (uint16_t)(s_test_latched & (uint16_t)~bit);
+                    s_test_latched_strong &= (uint16_t)~bit;
                     s_test_latched_since[z] = 0U;
                     s_test_weak_active_mask &= (uint16_t)~bit;
                     s_test_blocked_mask &= (uint16_t)~bit;
@@ -1469,8 +1491,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 #endif
 
     if (new_evidence) {
-        const uint16_t strong_event_mask = (uint16_t)(signal_mask |
-                                                       strong_distance_mask);
+        const uint16_t strong_event_mask = strong_level_mask;
         const uint16_t latched_before = s_test_latched;
         s_test_last_event_class = 0U;
         if (event_mask & level_event_mask)
@@ -1479,10 +1500,11 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE;
         if (event_mask & track_event_mask)
             s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_WEAK_TRACK;
-        if ((event_mask & level_event_mask) &&
-            (strong_event_mask & latched_before) != 0U)
+        if ((event_mask & level_event_mask & strong_event_mask &
+             latched_before) != 0U)
             s_test_last_event_class |= VL53L5CX_TEST_EVENT_CLASS_LATCHED_SCENE;
         s_test_latched |= event_mask;
+        s_test_latched_strong |= (uint16_t)(event_mask & strong_event_mask);
         s_last_insect_detected = 1U;
         s_last_result.insect_detected = 1U;
         s_last_result.trigger_source = 0U;
