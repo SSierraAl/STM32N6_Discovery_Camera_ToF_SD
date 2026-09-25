@@ -645,6 +645,34 @@
    farthest valid zone (the box floor). Close wall/border zones remain active
    for strong and fast-edge events. Previous value: absent. */
 #define VL53L5CX_DET_FLOOR_DEPTH_BAND_MM        30U
+
+/* Single-sensor 4x4 HIGH_SENS_TEST / HIGH_SENS_CAMERA: slow adaptation and
+   re-arm. These defaults reproduce the previously hardcoded detector values.
+   Count thresholds are FRAMES at the actual sensor rate, not milliseconds. */
+#define VL53L5CX_DET_ZONE_CLEAR_FRAMES           3U   /* release latch after raw evidence clears */
+#define VL53L5CX_DET_ZONE_QUIET_FRAMES          15U   /* wait before adjusting quiet-zone signal */
+#define VL53L5CX_DET_ZONE_QUIET_SIGNAL_PCT       4U
+#define VL53L5CX_DET_ZONE_QUIET_DISTANCE_MM      3U
+#define VL53L5CX_DET_ZONE_DRIFT_DIVISOR         32U  /* larger = slower quiet-zone signal tracking */
+#define VL53L5CX_DET_STABLE_PLATEAU_MS       12000UL /* stationary raw evidence before recentering */
+#define VL53L5CX_DET_STABLE_MIN_FRAMES           8U
+#define VL53L5CX_DET_STABLE_WINDOW_FRAMES      180U  /* capped by uint8_t counter: <=255 */
+#define VL53L5CX_DET_STABLE_MAX_SIGNAL_JITTER_PCT 1U
+#define VL53L5CX_DET_STABLE_MAX_DISTANCE_JITTER_MM 1U
+#define VL53L5CX_DET_SCENE_SETTLE_MS         5000UL /* coherent scene change before full refresh */
+#define VL53L5CX_DET_SCENE_MIN_ZONES           12U  /* 12/15 valid zones in this box */
+#define VL53L5CX_DET_SCENE_DISTANCE_MM          4U
+#define VL53L5CX_DET_SCENE_SIGNAL_PCT           7U
+/* For minutes: e.g. (2UL * 60UL * 1000UL). Raising a settle time makes
+   learning slower; raising a quiet-zone threshold can increase false photos. */
+#if (VL53L5CX_DET_ZONE_DRIFT_DIVISOR == 0U) || \
+    (VL53L5CX_DET_ZONE_CLEAR_FRAMES > 255U) || \
+    (VL53L5CX_DET_ZONE_QUIET_FRAMES > 255U) || \
+    (VL53L5CX_DET_STABLE_WINDOW_FRAMES > 255U) || \
+    (VL53L5CX_DET_STABLE_MIN_FRAMES > VL53L5CX_DET_STABLE_WINDOW_FRAMES)
+#error "Invalid ToF zone adaptation configuration"
+#endif
+
 /* Previous value: absent. One compact TOFEVT line per accepted capture;
    independent of PERF_DEBUG_LEVEL so production logs expose the trigger. */
 #define VL53L5CX_DET_EVENT_TRACE             1
@@ -679,14 +707,22 @@
 /* In single-sensor 4x4 high-sensitivity camera mode, periodic and adaptive
    baseline refreshes both run. The periodic timer starts at the completion
    of every full baseline, including the adaptive three-photo refresh. It
-   expires after N / ranging frequency seconds (~67 s at 1000 / 15 Hz),
+   expires after PERIODIC_CAMERA_INTERVAL_MS (~67 s by default),
    even if a zone is latched or blocked. This can learn an insect or ongoing
    vibration as background; a later refresh can restore the quiet baseline
    when the scene settles. Each refresh interrupts ranging for the settle
    frames and baseline samples. Other modes retain the existing frame-based
-   counter and its quiet gate. */
+   counter and its quiet gate. Set the camera interval to e.g.
+   (5UL * 60UL * 1000UL) for 5 minutes; do not edit the legacy frame count
+   to tune this mode. Keep the interval below 2^32 ms (about 49 days). */
 #define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   1
-#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  1000 /* N frames at configured Hz in high-sensitivity camera mode */
+#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  1000 /* N frames: other modes and default below */
+#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
+    ((1000UL * VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) / VL53L5CX_DET_RANGING_FREQ_HZ)
+#if VL53L5CX_DET_PERIODIC_RESTART_ENABLED && \
+    (VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS == 0UL)
+#error "Periodic ToF camera interval must be greater than zero"
+#endif
 
 /* MODE 2: Consecutive camera activation refresh. The generic values remain
    unchanged for dual-sensor and legacy detector modes. */
@@ -703,6 +739,9 @@
    learning; keep only a short recovery interval and reject fast-only
    transients while normal level/track evidence remains active. */
 #define VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS    3
+/* Fresh frames skipped for photo requests after camera/SD returns or a
+   stable-scene baseline completes; detector/latches still update per frame. */
+#define VL53L5CX_DET_HIGH_SENS_CAPTURE_COOLDOWN_FRAMES 5U
 
 /* UART1 debug output
    DEBUG MODE 1: ZFRAME   - compact per-zone data every N frames (zone_monitor.py)

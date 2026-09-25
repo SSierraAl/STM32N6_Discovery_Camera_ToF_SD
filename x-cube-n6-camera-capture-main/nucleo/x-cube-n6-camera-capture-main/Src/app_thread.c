@@ -27,14 +27,17 @@
 #define TOF_CAPTURE_REFRESH_WINDOW_SECS VL53L5CX_DET_HIGH_SENS_REFRESH_WINDOW_SECS
 #define TOF_CAPTURE_MAX_DETECTIONS      VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS
 #define TOF_CAPTURE_REARM_HOLDOFF_SECS  VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS
+#define TOF_CAPTURE_COOLDOWN_FRAMES      VL53L5CX_DET_HIGH_SENS_CAPTURE_COOLDOWN_FRAMES
 #else
 #define TOF_CAPTURE_REFRESH_WINDOW_SECS VL53L5CX_DET_REFRESH_WINDOW_SECS
 #define TOF_CAPTURE_MAX_DETECTIONS      VL53L5CX_DET_MAX_DETECTIONS
 #define TOF_CAPTURE_REARM_HOLDOFF_SECS  0
+#define TOF_CAPTURE_COOLDOWN_FRAMES      5U
 #endif
 #else
 #define TOF_CAPTURE_ACTIVATION_REFRESH 0
 #define TOF_CAPTURE_REARM_HOLDOFF_SECS  0
+#define TOF_CAPTURE_COOLDOWN_FRAMES      5U
 #endif
 
 extern I2C_HandleTypeDef hi2c1;
@@ -692,7 +695,7 @@ void sensor_task(void *arg)
             consecutive_window_active = 0;
 #endif
             g_sensor_state = SENSOR_STATE_RUNNING;
-            cooldown = 5;
+            cooldown = TOF_CAPTURE_COOLDOWN_FRAMES;
             printf("[ADAPT] Stable-drift baseline refresh complete\n");
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
             capture_rearm_holdoff_start = xTaskGetTickCount();
@@ -822,7 +825,7 @@ void sensor_task(void *arg)
 #endif
             g_sensor_state = SENSOR_STATE_RUNNING;
             g_capture_busy = 0;
-            cooldown = 5;
+            cooldown = TOF_CAPTURE_COOLDOWN_FRAMES;
 
             if (rc == 0) {
                 capture_count++;
