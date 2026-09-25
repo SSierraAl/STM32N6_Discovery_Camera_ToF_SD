@@ -581,6 +581,39 @@
 #define VL53L5CX_DET_LOCAL_TRACK_WINDOW_MS  5000U  /* calibrated for slow tiny-insect travel */
 #define VL53L5CX_DET_LOCAL_TRACK_MIN_ZONES  2U
 #define VL53L5CX_DET_LOCAL_TRACK_MAX_ZONES  3U  /* 4-zone trial was broad vibration */
+
+/* Optional photo-trigger zone filter for the single-sensor 4x4 high-
+   sensitivity detector. Disabled by default: all 16 zones behave exactly as
+   in the validated build. When enabled, a set bit allows that zone to request
+   a photo. All zones still participate in baseline learning, common-mode
+   vibration rejection and environmental/scene adaptation.
+
+   4x4 row-major zone/bit map:
+       row 0: zones  0  1  2  3  -> 0x000F
+       row 1: zones  4  5  6  7  -> 0x00F0
+       row 2: zones  8  9 10 11  -> 0x0F00
+       row 3: zones 12 13 14 15  -> 0xF000
+
+   Examples:
+       all zones       : 0xFFFFU
+       central rows 1+2: 0x0FF0U
+       only row 1      : 0x00F0U
+       zones 5 and 10  : ((1U << 5) | (1U << 10))
+
+   Confirm the physical orientation with TOFCAL/zone survey before excluding
+   zones: sensor rows may not match the displayed camera orientation. */
+#define VL53L5CX_DET_TRIGGER_ZONE_FILTER_ENABLED  0
+#define VL53L5CX_DET_TRIGGER_ZONE_MASK            0x0FF0U
+#if (VL53L5CX_DET_TRIGGER_ZONE_FILTER_ENABLED != 0) && \
+    (VL53L5CX_DET_TRIGGER_ZONE_FILTER_ENABLED != 1)
+#error "VL53L5CX_DET_TRIGGER_ZONE_FILTER_ENABLED must be 0 or 1"
+#endif
+#if VL53L5CX_DET_TRIGGER_ZONE_FILTER_ENABLED && \
+    ((VL53L5CX_DET_TRIGGER_ZONE_MASK == 0U) || \
+     (VL53L5CX_DET_TRIGGER_ZONE_MASK > 0xFFFFU))
+#error "VL53L5CX_DET_TRIGGER_ZONE_MASK must select at least one 4x4 zone"
+#endif
+
 /* Field logs showed weak spatial tracks firing from unrelated 2% noise in
    several zones. The validated same-zone floor score remains enabled for a
    stationary/slow insect; disable only the legacy cross-zone trigger. */

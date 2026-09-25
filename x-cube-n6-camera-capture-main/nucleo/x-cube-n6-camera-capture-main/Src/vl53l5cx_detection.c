@@ -698,19 +698,9 @@ int VL53L5CX_Update(void)
 #endif
 
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
-
-
-        // IT IS POSSIBLE TO DELETE THE FOLLOWING BLOCK OF CODE IF YOU WANT TO TRIGGER ON ALL ZONES, NOT JUST THE MIDDLE ROWS
-        //Test to explore the trigger based only on the middle rows
-        /*const int zone_row = z / VL53L5CX_DET_RESOLUTION;
-        const int center_row_1 = (VL53L5CX_DET_RESOLUTION / 2) - 1;
-        const int center_row_2 =  VL53L5CX_DET_RESOLUTION / 2;
-
-        if ((zone_row != center_row_1) &&
-            (zone_row != center_row_2)) {
-            continue;
-        }*/
-        // End of snippet
+        /* Do not filter zones here: HIGH_SENS_CAMERA makes its final decision
+           in VL53L5CX_TestDetectionStep(). Use the trigger-zone mask in
+           app_config.h so baseline/common-mode calculations keep all zones. */
 
         uint8_t idx = VL53L5CX_NB_TARGET_PER_ZONE * z;
         uint8_t status = s_results.target_status[idx];
@@ -1277,6 +1267,25 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         track_event_mask = s_test_track_mask;
     }
 
+    /* Keep unfiltered fast evidence available to anti-loop and adaptation
+       state even when that zone is not allowed to request a photo. */
+    const uint16_t raw_fast_edge_mask = fast_edge_mask;
+#if VL53L5CX_DET_TRIGGER_ZONE_FILTER_ENABLED
+    /* Limit only evidence that may request a photo. Measurements from every
+       valid zone remain available above for baseline learning, common-mode
+       subtraction, drift tracking and coherent-scene detection. */
+    const uint16_t trigger_zone_mask =
+        (uint16_t)VL53L5CX_DET_TRIGGER_ZONE_MASK;
+    level_event_mask &= trigger_zone_mask;
+    event_mask &= trigger_zone_mask;
+    event_signal_mask &= trigger_zone_mask;
+    event_distance_mask &= trigger_zone_mask;
+    fast_signal_mask &= trigger_zone_mask;
+    fast_distance_mask &= trigger_zone_mask;
+    fast_edge_mask &= trigger_zone_mask;
+    track_event_mask &= trigger_zone_mask;
+#endif
+
     /* Apply independent gates. In recovery, strong levels and fast edges stay
        armed while weak tracks are withheld until the sensor settles. */
     candidate_event_mask = (uint16_t)(event_mask | fast_edge_mask |
@@ -1309,8 +1318,11 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
        insect entering a noise-latched zone without re-opening the periodic
        strong-plateau loop. Require the escalation in two consecutive frames;
        policy-blocked frames may establish the first one. */
-    const uint16_t strong_level_mask = (uint16_t)(signal_mask |
-                                                   strong_distance_mask);
+    uint16_t strong_level_mask = (uint16_t)(signal_mask |
+                                             strong_distance_mask);
+#if VL53L5CX_DET_TRIGGER_ZONE_FILTER_ENABLED
+    strong_level_mask &= (uint16_t)VL53L5CX_DET_TRIGGER_ZONE_MASK;
+#endif
     const uint16_t strong_escalation_candidate = (uint16_t)(
         strong_level_mask & s_test_latched &
         (uint16_t)~s_test_latched_strong);
@@ -1328,7 +1340,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
        to request a new photo now. Motion-only candidates are deliberately
        excluded: the ST motion plugin's supported range starts at 400 mm,
        outside this 40-110 mm box geometry. */
-    raw_mask = (uint16_t)(signal_mask | strong_distance_mask | fast_edge_mask |
+    raw_mask = (uint16_t)(signal_mask | strong_distance_mask | raw_fast_edge_mask |
                           weak_signal_mask | weak_distance_mask);
 #if VL53L5CX_DET_MICRO_PERSIST_ENABLED
     /* Micro evidence keeps a settling insect out of quiet baseline drift
