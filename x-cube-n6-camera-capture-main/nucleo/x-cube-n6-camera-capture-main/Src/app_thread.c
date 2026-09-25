@@ -16,8 +16,10 @@
 #include "stm32n6570_discovery.h"
 #include "main.h"
 
-/* Count camera activations; in the 4x4 camera path three distinct captures
-   request a baseline refresh only after the scene has become quiet. */
+/* Bound repeated camera activations in every detector mode. This includes the
+   high-sensitivity 4x4 camera path: after the configured number of photos, a
+   full baseline refresh clears weak-track noise instead of allowing an
+   unbounded capture loop. */
 #if VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED > 0
 #define TOF_CAPTURE_ACTIVATION_REFRESH 1
 #if !VL53L5CX_DUAL_SENSOR && !TEST_TOF_MODE && \
@@ -29,28 +31,6 @@
 #define TOF_CAPTURE_REFRESH_WINDOW_SECS VL53L5CX_DET_REFRESH_WINDOW_SECS
 #define TOF_CAPTURE_MAX_DETECTIONS      VL53L5CX_DET_MAX_DETECTIONS
 #define TOF_CAPTURE_REARM_HOLDOFF_SECS  0
-#endif
-
-#if !VL53L5CX_DUAL_SENSOR && !TEST_TOF_MODE && \
-    (VL53L5CX_DET_RESOLUTION == 4) && VL53L5CX_DET_HIGH_SENS_CAMERA
-#define TOF_SCENE_GROUPING 1
-/* Include the event zone and its immediate neighbours in the same scene. */
-static uint16_t ToFSceneNeighbours(uint16_t mask)
-{
-    uint16_t nearby = mask;
-    for (uint8_t z = 0U; z < 16U; z++) {
-        if ((mask & (uint16_t)(1U << z)) == 0U) continue;
-        for (uint8_t n = 0U; n < 16U; n++) {
-            int row = (int)(z / 4U) - (int)(n / 4U);
-            int col = (int)(z % 4U) - (int)(n % 4U);
-            if (row >= -1 && row <= 1 && col >= -1 && col <= 1)
-                nearby |= (uint16_t)(1U << n);
-        }
-    }
-    return nearby;
-}
-#else
-#define TOF_SCENE_GROUPING 0
 #endif
 #else
 #define TOF_CAPTURE_ACTIVATION_REFRESH 0
@@ -443,11 +423,6 @@ void sensor_task(void *arg)
     uint8_t consecutive_window_active = 0;
     TickType_t consecutive_window_start = 0;
 #endif
-#if TOF_SCENE_GROUPING
-    uint16_t captured_scene_mask = 0U;
-    uint8_t scene_quiet_frames = 0U;
-    uint8_t adaptive_refresh_pending = 0U;
-#endif
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
     uint8_t capture_rearm_holdoff_active = 0;
     TickType_t capture_rearm_holdoff_start = 0;
@@ -679,15 +654,6 @@ void sensor_task(void *arg)
                                 VL53L5CX_TEST_EVENT_ALLOW_FAST);
 #endif
         const int insect_detected = VL53L5CX_TestDetectionStep(tof_event_policy);
-#if TOF_SCENE_GROUPING
-        /* A scene ends only after six fresh frames without raw evidence or
-           latches; camera/SD time does not count as a quiet observation. */
-        if (VL53L5CX_TestSceneEvidenceMask() == 0U) {
-            if (++scene_quiet_frames >= 6U) captured_scene_mask = 0U;
-        } else {
-            scene_quiet_frames = 0U;
-        }
-#endif
 #else
         const int insect_detected = VL53L5CX_IsInsectDetected();
 #endif
@@ -705,11 +671,7 @@ void sensor_task(void *arg)
     ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
      (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
         if (cooldown == 0 && !insect_detected &&
-            VL53L5CX_TestBaselineRefreshReady() &&
-#if TOF_SCENE_GROUPING
-            (adaptive_refresh_pending ||
-#endif
-             VL53L5CX_TakeBaselineRefreshRequest() ||
+            (VL53L5CX_TakeBaselineRefreshRequest() ||
              VL53L5CX_TestTakeBaselineRefreshRequest())) {
 #else
         if (cooldown == 0 && VL53L5CX_TakeBaselineRefreshRequest()) {
@@ -718,29 +680,20 @@ void sensor_task(void *arg)
     (VL53L5CX_DET_RESOLUTION == 4)
             VL53L5CX_PrintZoneSnapshot("drift");
 #endif
-            printf("[ADAPT] Scene quiet; checking baseline candidate\n");
+            printf("[ADAPT] Persistent stable drift, refreshing baseline\n");
             g_sensor_state = SENSOR_STATE_PAUSED;
             VL53L5CX_StopRanging();
             vTaskDelay(pdMS_TO_TICKS(50));
             VL53L5CX_StartRanging();
             vTaskDelay(pdMS_TO_TICKS(200));
-            const int baseline_accepted = VL53L5CX_LearnBaseline();
-#if TOF_SCENE_GROUPING
-            if (!baseline_accepted) VL53L5CX_ZoneDetectorAfterCapture();
-#endif
+            VL53L5CX_LearnBaseline();
 #if TOF_CAPTURE_ACTIVATION_REFRESH
-            if (baseline_accepted) {
-                consecutive_captures = 0;
-                consecutive_window_active = 0;
-            }
-#endif
-#if TOF_SCENE_GROUPING
-            adaptive_refresh_pending = (uint8_t)!baseline_accepted;
+            consecutive_captures = 0;
+            consecutive_window_active = 0;
 #endif
             g_sensor_state = SENSOR_STATE_RUNNING;
             cooldown = 5;
-            printf(baseline_accepted ? "[ADAPT] Baseline refresh complete\n" :
-                   "[ADAPT] Baseline rejected; retry after a quiet interval\n");
+            printf("[ADAPT] Stable-drift baseline refresh complete\n");
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
             capture_rearm_holdoff_start = xTaskGetTickCount();
             capture_rearm_holdoff_active = 1;
@@ -753,22 +706,6 @@ void sensor_task(void *arg)
         /* Check primary sensor detection */
         if (insect_detected && cooldown == 0) {
             if (g_capture_busy) continue;
-#if TOF_SCENE_GROUPING
-            VL53L5CX_DetectionResult_t scene_result = VL53L5CX_GetResult();
-            const uint16_t previous_scene_mask = captured_scene_mask;
-            uint16_t event_zones = 0U;
-            for (uint8_t i = 0U; i < scene_result.affected_count; i++)
-                event_zones |= (uint16_t)(1U << scene_result.affected_zones[i]);
-            if (captured_scene_mask != 0U && event_zones != 0U &&
-                (VL53L5CX_TestGetLastEventClass() &
-                 VL53L5CX_TEST_EVENT_CLASS_FAST_EDGE) == 0U &&
-                (event_zones & (uint16_t)~ToFSceneNeighbours(captured_scene_mask)) == 0U) {
-                printf("[ADAPT] Same scene %04X; photo already captured\n",
-                       (unsigned)event_zones);
-                continue;
-            }
-            captured_scene_mask |= event_zones;
-#endif
             g_capture_busy = 1;
             g_sensor_state = SENSOR_STATE_PAUSED;
             VL53L5CX_DetectionResult_t res = VL53L5CX_GetResult();
@@ -810,8 +747,9 @@ void sensor_task(void *arg)
             cooldown = 30;
             continue;
 #else
-            /* Count completed activations across event classes. In the 4x4
-               camera path, a third capture requests a safe refresh. */
+            /* Keep the event class for diagnostics, but count every completed
+               camera activation. Three captures with no 30 s quiet gap force
+               a baseline refresh, regardless of which detector path fired. */
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     VL53L5CX_DET_HIGH_SENS_CAMERA
             const uint8_t tof_event_class = VL53L5CX_TestGetLastEventClass();
@@ -846,9 +784,6 @@ void sensor_task(void *arg)
             PERF_START(t);
             int rc = Capture_RequestSnapshot(60000);
             PERF_STOP(t);
-#if TOF_SCENE_GROUPING
-            if (rc != 0) captured_scene_mask = previous_scene_mask;
-#endif
 #if VL53L5CX_DET_HIGH_SENS_CAMERA && (VL53L5CX_DET_RESOLUTION == 4)
             VL53L5CX_ZoneDetectorAfterCapture();
 #endif
@@ -860,11 +795,6 @@ void sensor_task(void *arg)
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
 #if TOF_CAPTURE_ACTIVATION_REFRESH
             if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
-#if TOF_SCENE_GROUPING
-                adaptive_refresh_pending = 1U;
-                printf("[ADAPT] Maximum activations reached; baseline pending quiet scene\n");
-                VL53L5CX_StartRanging();
-#else
                 printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
                 VL53L5CX_StopRanging();
                 vTaskDelay(pdMS_TO_TICKS(50));
@@ -880,7 +810,6 @@ void sensor_task(void *arg)
                 printf("[ADAPT] Level/track recovery for %lu s; ToF remains active\n",
                        (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
-#endif /* TOF_SCENE_GROUPING */
             } else {
                 VL53L5CX_StartRanging();
                 consecutive_window_start = xTaskGetTickCount();

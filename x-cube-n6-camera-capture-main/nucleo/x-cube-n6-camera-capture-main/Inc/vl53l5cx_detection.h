@@ -114,8 +114,7 @@ int  VL53L5CX_IsZoneValid(uint8_t zone);
 int  VL53L5CX_IsBaselineReady(void);
 
 /* --- Baseline Management --- */
-/** Returns 1 if a new baseline was accepted; keeps the old one on rejection. */
-int VL53L5CX_LearnBaseline(void);
+void VL53L5CX_LearnBaseline(void);
 void VL53L5CX_ResetBaseline(void);
 
 /** Clear temporal detector history after a baseline change or a long capture
@@ -169,10 +168,6 @@ VL53L5CX_DetectionResult_t VL53L5CX_GetResult(void);
 int  VL53L5CX_TestDetectionStep(uint8_t event_policy);
 uint8_t VL53L5CX_TestGetLastEventClass(void);
 int  VL53L5CX_TestTakeBaselineRefreshRequest(void);
-/** True only after 15 consecutive fresh, valid frames without scene evidence. */
-int  VL53L5CX_TestBaselineRefreshReady(void);
-/** Current local evidence plus active latches, for camera episode grouping. */
-uint16_t VL53L5CX_TestSceneEvidenceMask(void);
 /** Discard pre-capture comparisons without erasing active zone latches. */
 void VL53L5CX_ZoneDetectorAfterCapture(void);
 #endif
