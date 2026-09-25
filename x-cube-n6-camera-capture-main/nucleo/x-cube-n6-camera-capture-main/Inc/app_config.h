@@ -718,9 +718,12 @@
 #define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   1
 #define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  1000 /* N frames: other modes and default below */
 // time between baselines and refresh periodic!!! time between automatic baselines!!!!!!
-#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
+//#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
     ((1000UL * VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) / VL53L5CX_DET_RANGING_FREQ_HZ)
-#if VL53L5CX_DET_PERIODIC_RESTART_ENABLED && \
+
+#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS (2UL * 60UL * 1000UL)
+
+    #if VL53L5CX_DET_PERIODIC_RESTART_ENABLED && \
     (VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS == 0UL)
 #error "Periodic ToF camera interval must be greater than zero"
 #endif
