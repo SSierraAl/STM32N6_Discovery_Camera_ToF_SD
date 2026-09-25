@@ -535,7 +535,7 @@
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_INTEGRATION_MS   30
 #else
-#define VL53L5CX_DET_INTEGRATION_MS   30
+#define VL53L5CX_DET_INTEGRATION_MS   45
 #endif
 #define VL53L5CX_DET_RANGING_FREQ_HZ  15
 
@@ -654,7 +654,7 @@
     valid zone. Keep it enabled while collecting the final calibration logs,
     then set it to 0 for production. */
 #define VL53L5CX_DET_CAL_TRACE               0
-#define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   200U
+#define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   100U
 
 /* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to
    the SENSOR (via DCI) in VL53L5CX_Configure(). The external guardian
