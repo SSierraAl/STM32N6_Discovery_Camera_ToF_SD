@@ -88,6 +88,9 @@ static uint8_t s_test_floor_signal_score[16] = {0};
 static uint16_t s_test_blocked_mask = 0U;
 static uint8_t s_test_micro_score[16] = {0};
 static uint8_t s_test_last_event_class = 0U;
+static uint16_t s_test_live_mask = 0U;
+static uint16_t s_test_occupancy_mask = 0U;
+static uint8_t s_test_quiet_frames = 0U;
 
 static uint32_t TestAbsDiff(uint32_t a, uint32_t b)
 {
@@ -182,6 +185,9 @@ static void TestResetDetectionState(void)
     memset(s_test_micro_score, 0, sizeof(s_test_micro_score));
     s_test_blocked_mask = 0U;
     s_test_last_event_class = 0U;
+    s_test_live_mask = 0U;
+    s_test_occupancy_mask = 0U;
+    s_test_quiet_frames = 0U;
     TestResetLocalTrack();
 }
 
@@ -571,9 +577,10 @@ void VL53L5CX_ResetBaseline(void)
     printf("[ToF] Baseline reset\n");
 }
 
-void VL53L5CX_LearnBaseline(void)
+int VL53L5CX_LearnBaseline(void)
 {
-    VL53L5CX_ResetBaseline();
+    /* Keep the previous reference and detector latches until the replacement
+       has enough valid zones and no isolated, object-sized change. */
     const uint8_t baseline_samples = VL53L5CX_DET_BASELINE_SAMPLES;
     const uint8_t settle_frames = VL53L5CX_DET_BASELINE_SETTLE_FRAMES;
     const uint16_t min_valid_frames = baseline_samples / 2;
@@ -588,6 +595,9 @@ void VL53L5CX_LearnBaseline(void)
     uint32_t sum_signal[VL53L5CX_DET_NUM_ZONES] = {0};
     uint32_t sum_distance[VL53L5CX_DET_NUM_ZONES] = {0};
     uint16_t ok_frames[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint32_t candidate_signal[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint16_t candidate_distance[VL53L5CX_DET_NUM_ZONES] = {0};
+    uint8_t candidate_valid[VL53L5CX_DET_NUM_ZONES] = {0};
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
     int16_t min_distance[VL53L5CX_DET_NUM_ZONES];
     int16_t max_distance[VL53L5CX_DET_NUM_ZONES] = {0};
@@ -638,14 +648,58 @@ void VL53L5CX_LearnBaseline(void)
     uint8_t valid_count = 0;
     for (int z = 0; z < VL53L5CX_DET_NUM_ZONES; z++) {
         if (ok_frames[z] >= min_valid_frames) {
-            s_baseline_signal[z]   = sum_signal[z] / ok_frames[z];
-            s_baseline_distance[z] = (uint16_t)(sum_distance[z] / ok_frames[z]);
-            s_zone_valid[z] = 1;
+            candidate_signal[z] = sum_signal[z] / ok_frames[z];
+            candidate_distance[z] = (uint16_t)(sum_distance[z] / ok_frames[z]);
+            candidate_valid[z] = 1U;
             valid_count++;
         }
     }
 
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
+     (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
+    if (s_baseline_ready) {
+        int32_t sig_shift[16], dist_shift[16];
+        uint8_t common_count = 0U;
+        uint8_t old_count = 0U;
+        for (uint8_t z = 0U; z < 16U; z++) {
+            if (s_zone_valid[z]) old_count++;
+            if (!s_zone_valid[z] || !candidate_valid[z] ||
+                s_baseline_signal[z] == 0U) continue;
+            sig_shift[common_count] = (int32_t)(
+                ((int64_t)candidate_signal[z] - s_baseline_signal[z]) * 100LL /
+                s_baseline_signal[z]);
+            dist_shift[common_count] = (int32_t)candidate_distance[z] -
+                                       (int32_t)s_baseline_distance[z];
+            common_count++;
+        }
+        if (valid_count < 12U || valid_count + 1U < old_count ||
+            common_count < 12U) {
+            s_test_quiet_frames = 0U;
+            printf("\n[BASELINE] Rejected: insufficient valid zones; previous baseline kept\n");
+            return 0;
+        }
+        const int32_t common_sig = TestMedianI32(sig_shift, common_count);
+        const int32_t common_dist = TestMedianI32(dist_shift, common_count);
+        for (uint8_t i = 0U; i < common_count; i++) {
+            if (TestAbsI32(sig_shift[i] - common_sig) >= 5U ||
+                TestAbsI32(dist_shift[i] - common_dist) >= 5U) {
+                s_test_quiet_frames = 0U;
+                printf("\n[BASELINE] Rejected: localized change; previous baseline kept\n");
+                return 0;
+            }
+        }
+    }
+#endif
+    memcpy(s_baseline_signal, candidate_signal, sizeof(candidate_signal));
+    memcpy(s_baseline_distance, candidate_distance, sizeof(candidate_distance));
+    memcpy(s_zone_valid, candidate_valid, sizeof(candidate_valid));
     s_baseline_ready = 1;
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
+     (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
+    TestResetDetectionState();
+#endif
     /* Baseline samples and settle frames must never remain in either temporal
        detector history. The next live frames will prime fresh history. */
     VL53L5CX_ResetDetectionFilterState();
@@ -664,6 +718,7 @@ void VL53L5CX_LearnBaseline(void)
     }
     printf("\r\n");
 #endif
+    return 1;
 }
 
 /* ================================================================
@@ -910,6 +965,14 @@ int VL53L5CX_Update(void)
         static uint32_t frame_counter = 0;
         frame_counter++;
         if (frame_counter >= VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) {
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
+     (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
+            /* Update runs BEFORE the detector sees this frame. Defer the
+               refresh to sensor_task, after its fresh-frame quiet gate. */
+            frame_counter = 0;
+            s_test_refresh_requested = 1U;
+#else
             /* Quiet gate: never re-learn while an insect event or a
                latched/blocked candidate zone is active, or the animal gets
                baked into the baseline. The counter is not reset on skip,
@@ -930,6 +993,7 @@ int VL53L5CX_Update(void)
                 VL53L5CX_LearnBaseline();
                 printf("[ToF] Periodic refresh done.\n");
             }
+#endif
         }
     }
 #endif
@@ -1311,6 +1375,25 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
        and holds its zone latch until the insect leaves. */
     raw_mask = (uint16_t)(raw_mask | micro_evidence_mask);
 #endif
+    s_test_live_mask = raw_mask;
+    /* A single noisy 1% micro frame may occur in an empty box. Require
+       repeated same-zone micro evidence, but block the final refresh on
+       ANY evidence in the most recent frame. */
+#if VL53L5CX_DET_MICRO_PERSIST_ENABLED
+    s_test_occupancy_mask = (uint16_t)(raw_mask & ~micro_evidence_mask);
+    for (uint8_t z = 0U; z < 16U; z++) {
+        if (s_test_micro_score[z] >= 4U)
+            s_test_occupancy_mask |= (uint16_t)(1U << z);
+    }
+#else
+    s_test_occupancy_mask = raw_mask;
+#endif
+    if (s_test_occupancy_mask == 0U && s_test_latched == 0U &&
+        distance_count >= 12U) {
+        if (s_test_quiet_frames < 15U) s_test_quiet_frames++;
+    } else {
+        s_test_quiet_frames = 0U;
+    }
     s_test_blocked_mask &= raw_mask;
 
     for (uint8_t z = 0U; z < 16U; z++) {
@@ -1579,9 +1662,20 @@ uint8_t VL53L5CX_TestGetLastEventClass(void)
 
 int VL53L5CX_TestTakeBaselineRefreshRequest(void)
 {
-    if (!s_test_refresh_requested) return 0;
+    if (!s_test_refresh_requested || !VL53L5CX_TestBaselineRefreshReady()) return 0;
     s_test_refresh_requested = 0U;
     return 1;
+}
+
+int VL53L5CX_TestBaselineRefreshReady(void)
+{
+    return s_test_quiet_frames >= 15U && s_test_live_mask == 0U &&
+           s_test_latched == 0U && s_test_blocked_mask == 0U;
+}
+
+uint16_t VL53L5CX_TestSceneEvidenceMask(void)
+{
+    return (uint16_t)(s_test_occupancy_mask | s_test_latched);
 }
 #endif
 
