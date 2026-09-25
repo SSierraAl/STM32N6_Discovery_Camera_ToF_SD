@@ -612,6 +612,37 @@
    empty-box noise floor. A saturated score also survives a blocked interval. */
 #define VL53L5CX_DET_FLOOR_SIGNAL_SCORE_HIT       4U
 #define VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER   12U
+/* Sub-threshold MICRO-PERSISTENCE level (calibrated from an empty-box
+   TOFCAL trace): empty-box noise is 1-frame 1% / 1-2 mm spikes that hop
+   between RANDOM zones, while a small insect that settles into the trap
+   holds ~1% / 1-2 mm in the SAME floor zone for seconds. A slow
+   same-zone accumulator separates the two without touching any existing
+   threshold:
+     evidence : floor zone with local_signal >= MICRO_SIGNAL_PCT
+                      OR local_distance >= MICRO_DISTANCE_MM
+     update   : +MICRO_HIT per evidence frame, -MICRO_DECAY per quiet
+                frame (frozen while the LEVEL policy is off, e.g. cooldown)
+     trigger  : score reaches MICRO_TRIGGER -> level event, SIGNAL source
+   A settled insect (evidence in ~90% of frames) nets ~+1.7/frame and
+   fires in ~1.3 s. Random noise (evidence in ~20% of a zone's frames)
+   nets ~-0.4/frame and is pinned near 0. The per-frame evidence bit is
+   OR-ed into raw_mask, so a present insect is never quietly re-baselined
+   (diff/32 drift needs 15 raw-free frames) and its zone latch holds;
+   the 12 s stable-plateau recentering remains the self-correction for
+   truly static objects (at most one photo). */
+#define VL53L5CX_DET_MICRO_PERSIST_ENABLED      1
+#define VL53L5CX_DET_MICRO_SIGNAL_PCT           1U
+#define VL53L5CX_DET_MICRO_DISTANCE_MM          2U
+#define VL53L5CX_DET_MICRO_HIT                  2U
+#define VL53L5CX_DET_MICRO_DECAY                1U
+#define VL53L5CX_DET_MICRO_TRIGGER              32U
+/* Bounded re-arm: a photographed zone may trigger again while its level
+   evidence persists, so an insect that stays in the trap keeps being
+   detected (one photo per interval instead of one per episode). Zones
+   that never fired can never re-arm, and a truly static object is
+   absorbed by the 12 s stable-plateau recentering, so a lens artifact
+   costs at most 2 photos. 0 disables re-arm (one-photo-per-episode). */
+#define VL53L5CX_DET_REARM_INTERVAL_MS          10000U
 /* Weak tracks are restricted to baseline zones within this depth of the
    farthest valid zone (the box floor). Close wall/border zones remain active
    for strong and fast-edge events. Previous value: absent. */

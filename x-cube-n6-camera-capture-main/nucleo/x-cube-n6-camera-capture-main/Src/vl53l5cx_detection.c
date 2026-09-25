@@ -51,6 +51,7 @@ static uint8_t s_last_insect_detected = 0;
 #define TOF_TEST_STABLE_MIN_FRAMES      8U
 #define TOF_TEST_SCENE_SETTLE_MS     5000U
 static uint16_t s_test_latched = 0U;
+static uint32_t s_test_latched_since[16] = {0};
 static uint8_t s_test_clear[16] = {0};
 static uint32_t s_test_prev_sig[16] = {0};
 static uint16_t s_test_prev_dist[16] = {0};
@@ -75,6 +76,7 @@ static uint16_t s_test_floor_pending_mask = 0U;
 static uint8_t s_test_floor_hold_frames[16] = {0};
 static uint8_t s_test_floor_signal_score[16] = {0};
 static uint16_t s_test_blocked_mask = 0U;
+static uint8_t s_test_micro_score[16] = {0};
 static uint8_t s_test_last_event_class = 0U;
 
 static uint32_t TestAbsDiff(uint32_t a, uint32_t b)
@@ -147,6 +149,7 @@ static void TestResetLocalTrack(void)
 static void TestResetDetectionState(void)
 {
     s_test_latched = 0U;
+    memset(s_test_latched_since, 0, sizeof(s_test_latched_since));
     memset(s_test_clear, 0, sizeof(s_test_clear));
     memset(s_test_prev_sig, 0, sizeof(s_test_prev_sig));
     memset(s_test_prev_dist, 0, sizeof(s_test_prev_dist));
@@ -164,6 +167,7 @@ static void TestResetDetectionState(void)
     s_test_floor_pending_mask = 0U;
     memset(s_test_floor_hold_frames, 0, sizeof(s_test_floor_hold_frames));
     memset(s_test_floor_signal_score, 0, sizeof(s_test_floor_signal_score));
+    memset(s_test_micro_score, 0, sizeof(s_test_micro_score));
     s_test_blocked_mask = 0U;
     s_test_last_event_class = 0U;
     TestResetLocalTrack();
@@ -183,6 +187,7 @@ void VL53L5CX_ZoneDetectorAfterCapture(void)
     s_test_floor_pending_mask = 0U;
     memset(s_test_floor_hold_frames, 0, sizeof(s_test_floor_hold_frames));
     memset(s_test_floor_signal_score, 0, sizeof(s_test_floor_signal_score));
+    memset(s_test_micro_score, 0, sizeof(s_test_micro_score));
     s_test_scene_since = 0U;
     TestResetLocalTrack();
 }
@@ -953,6 +958,10 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     uint16_t floor_protrusion_mask = 0U;
     uint16_t floor_hold_mask = 0U;
     uint16_t floor_signal_hold_mask = 0U;
+#if VL53L5CX_DET_MICRO_PERSIST_ENABLED
+    uint16_t micro_evidence_mask = 0U;
+    uint16_t micro_hold_mask = 0U;
+#endif
     uint16_t level_event_mask = 0U;
     uint16_t candidate_event_mask = 0U;
     uint16_t event_mask = 0U;
@@ -1097,6 +1106,33 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
             VL53L5CX_DET_FLOOR_SIGNAL_SCORE_TRIGGER)
             floor_signal_hold_mask |= bit;
 
+#if VL53L5CX_DET_MICRO_PERSIST_ENABLED
+        /* Sub-threshold micro-persistence: a settled insect holds ~1% /
+           1-2 mm in one floor zone for seconds, while empty-box noise is a
+           1-frame spike that hops zones. Evidence feeds raw_mask (baseline
+           protection + latch hold); only the slow same-zone score may fire.
+           The score freezes while LEVEL is policy-blocked, like the floor
+           score above. */
+        if ((floor_mask & bit) &&
+            (local_signal[z] >= VL53L5CX_DET_MICRO_SIGNAL_PCT ||
+             local_distance[z] >= VL53L5CX_DET_MICRO_DISTANCE_MM)) {
+            micro_evidence_mask |= bit;
+            const uint8_t room = (uint8_t)(VL53L5CX_DET_MICRO_TRIGGER -
+                                           s_test_micro_score[z]);
+            if (room <= VL53L5CX_DET_MICRO_HIT)
+                s_test_micro_score[z] = VL53L5CX_DET_MICRO_TRIGGER;
+            else
+                s_test_micro_score[z] = (uint8_t)(s_test_micro_score[z] +
+                                                  VL53L5CX_DET_MICRO_HIT);
+        } else if (s_test_micro_score[z] > 0U &&
+                   (event_policy & VL53L5CX_TEST_EVENT_ALLOW_LEVEL)) {
+            s_test_micro_score[z] = (uint8_t)(s_test_micro_score[z] -
+                                              VL53L5CX_DET_MICRO_DECAY);
+        }
+        if (s_test_micro_score[z] >= VL53L5CX_DET_MICRO_TRIGGER)
+            micro_hold_mask |= bit;
+#endif
+
         /* Kinematic path: require both a fresh per-zone edge and a local
            baseline residual. Coherent vibration is removed by the common
            median above; slow drift lacks the frame-to-frame edge. */
@@ -1127,10 +1163,16 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
     fast_edge_mask = (uint16_t)(fast_signal_mask | fast_distance_mask);
     level_event_mask = (uint16_t)(signal_mask | strong_distance_mask |
                                   floor_hold_mask | floor_signal_hold_mask);
+#if VL53L5CX_DET_MICRO_PERSIST_ENABLED
+    level_event_mask = (uint16_t)(level_event_mask | micro_hold_mask);
+#endif
     event_mask = level_event_mask;
     event_signal_mask = (uint16_t)(signal_mask | floor_hold_mask |
                                    floor_signal_hold_mask);
     event_distance_mask = (uint16_t)(strong_distance_mask | floor_hold_mask);
+#if VL53L5CX_DET_MICRO_PERSIST_ENABLED
+    event_signal_mask = (uint16_t)(event_signal_mask | micro_hold_mask);
+#endif
 
     /* Weak evidence that is neither persistent nor repeated is not enough for
        a photo by itself. Retain it long enough for a slow tiny insect to cross
@@ -1228,6 +1270,11 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
        outside this 40-110 mm box geometry. */
     raw_mask = (uint16_t)(signal_mask | strong_distance_mask | fast_edge_mask |
                           weak_signal_mask | weak_distance_mask);
+#if VL53L5CX_DET_MICRO_PERSIST_ENABLED
+    /* Micro evidence keeps a settling insect out of quiet baseline drift
+       and holds its zone latch until the insect leaves. */
+    raw_mask = (uint16_t)(raw_mask | micro_evidence_mask);
+#endif
     s_test_blocked_mask &= raw_mask;
 
     for (uint8_t z = 0U; z < 16U; z++) {
@@ -1249,10 +1296,21 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 
         /* Clear an old event even if the target becomes temporarily invalid.
            Motion is allowed to trigger on invalid ranging zones. */
+#if VL53L5CX_DET_REARM_INTERVAL_MS > 0
+        /* Bounded re-arm: release the zone latch once the interval has
+           elapsed while the insect's level evidence persists, so it can
+           be photographed again. A static object is instead absorbed by
+           the 12 s stable-plateau recentering (bounded to 2 photos). */
+        if ((s_test_latched & bit) != 0U && s_test_latched_since[z] != 0U &&
+            (now - s_test_latched_since[z]) >= VL53L5CX_DET_REARM_INTERVAL_MS)
+            s_test_latched = (uint16_t)(s_test_latched & (uint16_t)~bit);
+#endif
         if (!(raw_mask & bit)) {
             if (s_test_clear[z] < TOF_TEST_QUIET_FRAMES) s_test_clear[z]++;
-            if (s_test_clear[z] >= TOF_TEST_CLEAR_FRAMES)
-                s_test_latched &= (uint16_t)~bit;
+            if (s_test_clear[z] >= TOF_TEST_CLEAR_FRAMES) {
+                s_test_latched = (uint16_t)(s_test_latched & (uint16_t)~bit);
+                s_test_latched_since[z] = 0U;
+            }
         } else {
             s_test_clear[z] = 0U;
         }
@@ -1319,7 +1377,8 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
                            (unsigned long)s_baseline_signal[z],
                            (unsigned)old_distance,
                            (unsigned)s_baseline_distance[z]);
-                    s_test_latched &= (uint16_t)~bit;
+                    s_test_latched = (uint16_t)(s_test_latched & (uint16_t)~bit);
+                    s_test_latched_since[z] = 0U;
                     s_test_weak_active_mask &= (uint16_t)~bit;
                     s_test_blocked_mask &= (uint16_t)~bit;
                     s_test_stable_since[z] = 0U;
@@ -1417,6 +1476,9 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         for (uint8_t z = 0U; z < 16U; z++) {
             const uint16_t bit = (uint16_t)(1U << z);
             if (!(event_mask & bit)) continue;
+            /* Stamp (and restart, on a re-arm re-fire) the per-zone latch
+               timer used by the bounded re-arm. */
+            s_test_latched_since[z] = now;
             uint32_t event_distance = local_distance[z];
             uint32_t event_signal = local_signal[z];
             if (s_test_track_distance_value[z] > event_distance)
@@ -1430,12 +1492,19 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
         }
 #if VL53L5CX_DET_EVENT_TRACE > 0
         /* Zone entries are zone:local_distance_mm:local_signal_percent. */
-        printf("TOFEVT,t=%lu,src=%u,v=%u,strong=%04X,track=%04X,raw=%04X,latched=%04X,cd=%ld,cs=%ld,fmt=z:ld_mm:ls_pct,z=",
+        printf("TOFEVT,t=%lu,src=%u,v=%u,strong=%04X,track=%04X,raw=%04X,latched=%04X"
+#if VL53L5CX_DET_MICRO_PERSIST_ENABLED
+               ",micro=%04X"
+#endif
+               ",cd=%ld,cs=%ld,fmt=z:ld_mm:ls_pct,z=",
                (unsigned long)now, (unsigned)s_last_result.trigger_source,
                (unsigned)s_last_result.valid_measurements,
                (unsigned)strong_event_mask, (unsigned)track_event_mask,
-               (unsigned)raw_mask, (unsigned)latched_before,
-               (long)common_distance, (long)common_signal);
+               (unsigned)raw_mask, (unsigned)latched_before
+#if VL53L5CX_DET_MICRO_PERSIST_ENABLED
+              , (unsigned)micro_hold_mask
+#endif
+              , (long)common_distance, (long)common_signal);
         for (uint8_t i = 0U; i < s_last_result.affected_count; i++) {
             const uint8_t z = s_last_result.affected_zones[i];
             uint32_t event_distance = local_distance[z];
