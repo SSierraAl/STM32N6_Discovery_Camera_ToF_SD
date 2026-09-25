@@ -38,6 +38,14 @@ static uint8_t   s_baseline_ready = 0;
 static VL53L5CX_DetectionResult_t s_last_result = {0};
 static uint8_t s_last_insect_detected = 0;
 
+#if VL53L5CX_DET_PERIODIC_RESTART_ENABLED > 0 && !VL53L5CX_DUAL_SENSOR && \
+    !TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4) && \
+    VL53L5CX_DET_HIGH_SENS_CAMERA
+/* Schedule the next full refresh from the completion of ANY full baseline,
+   including one requested after three camera activations. */
+static uint32_t s_last_full_baseline_tick = 0U;
+#endif
+
 #if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
     ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
      (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
@@ -646,6 +654,11 @@ void VL53L5CX_LearnBaseline(void)
     }
 
     s_baseline_ready = 1;
+#if VL53L5CX_DET_PERIODIC_RESTART_ENABLED > 0 && !VL53L5CX_DUAL_SENSOR && \
+    !TEST_TOF_MODE && (VL53L5CX_DET_RESOLUTION == 4) && \
+    VL53L5CX_DET_HIGH_SENS_CAMERA
+    s_last_full_baseline_tick = HAL_GetTick();
+#endif
     /* Baseline samples and settle frames must never remain in either temporal
        detector history. The next live frames will prime fresh history. */
     VL53L5CX_ResetDetectionFilterState();
@@ -906,6 +919,30 @@ int VL53L5CX_Update(void)
 
     /* BASELINE REFRESH */
 #if VL53L5CX_DET_PERIODIC_RESTART_ENABLED > 0
+#if !VL53L5CX_DUAL_SENSOR && !TEST_TOF_MODE && \
+    (VL53L5CX_DET_RESOLUTION == 4) && VL53L5CX_DET_HIGH_SENS_CAMERA
+    /* Restore sensitivity after an adaptive baseline learned a vibrating
+       scene. A latch can persist indefinitely, so it must not postpone this
+       maintenance refresh. The existing sample count defines the same ~67 s
+       interval at 15 Hz, now measured since the LAST full baseline. */
+    const uint32_t refresh_interval_ms =
+        (1000UL * VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) /
+        VL53L5CX_DET_RANGING_FREQ_HZ;
+    if (s_baseline_ready &&
+        (uint32_t)(HAL_GetTick() - s_last_full_baseline_tick) >=
+            refresh_interval_ms) {
+        printf("[ToF] Periodic refresh since last baseline...\n");
+        vl53l5cx_stop_ranging(&s_dev);
+        vTaskDelay(pdMS_TO_TICKS(50));
+        vl53l5cx_start_ranging(&s_dev);
+        vTaskDelay(pdMS_TO_TICKS(200));
+        VL53L5CX_LearnBaseline();
+        printf("[ToF] Periodic refresh done.\n");
+        /* The latest s_results belongs to baseline learning. Wait for a
+           fresh ranging frame before running the camera detector. */
+        return 0;
+    }
+#else
     {
         static uint32_t frame_counter = 0;
         frame_counter++;
@@ -932,6 +969,7 @@ int VL53L5CX_Update(void)
             }
         }
     }
+#endif
 #endif
 
     /* Debug output */

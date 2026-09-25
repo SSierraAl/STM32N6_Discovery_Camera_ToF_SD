@@ -676,23 +676,17 @@
    and detection. Prevents false triggers from noisy/blind zones. */
 #define VL53L5CX_DET_MIN_SIGNAL 500
 
-/* Baseline refresh - pick ONE mode at a time:
-   MODE 1 periodic:  PERIODIC_RESTART_ENABLED=1,  ADAPTIVE_REFRESH_ENABLED=0
-   MODE 2 adaptive:  PERIODIC_RESTART_ENABLED=0,  ADAPTIVE_REFRESH_ENABLED=1
-   (adaptive counts consecutive camera activations after completed capture
-    pipelines; periodic uses a static frame counter in VL53L5CX_Update()) */
-
-/* MODE 1: Periodic restart (frame-based) - ENABLED ("recursive baseline").
-   Every N Update() frames (~66 s at 15 Hz) the sensor restarts and
-   re-learns all zones. VL53L5CX_Update() skips the refresh while an insect
-   event or a latched/blocked zone is active (quiet gate) and retries on
-   the next frame, so an insect is never baked into the baseline. Cost:
-   ~5 s of ToF blindness per refresh; in return, slowly drifting per-zone
-   biases (field: weakest corner zone 8, one photo per episode every
-   1-2 min) are re-baselined before they can re-trigger. Shorten the
-   interval (e.g. 500) to re-learn faster at the price of more blind time. */
+/* In single-sensor 4x4 high-sensitivity camera mode, periodic and adaptive
+   baseline refreshes both run. The periodic timer starts at the completion
+   of every full baseline, including the adaptive three-photo refresh. It
+   expires after N / ranging frequency seconds (~67 s at 1000 / 15 Hz),
+   even if a zone is latched or blocked. This can learn an insect or ongoing
+   vibration as background; a later refresh can restore the quiet baseline
+   when the scene settles. Each refresh interrupts ranging for the settle
+   frames and baseline samples. Other modes retain the existing frame-based
+   counter and its quiet gate. */
 #define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   1
-#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  1000 /* refresh every N Update() frames */
+#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  1000 /* N frames at configured Hz in high-sensitivity camera mode */
 
 /* MODE 2: Consecutive camera activation refresh. The generic values remain
    unchanged for dual-sensor and legacy detector modes. */
