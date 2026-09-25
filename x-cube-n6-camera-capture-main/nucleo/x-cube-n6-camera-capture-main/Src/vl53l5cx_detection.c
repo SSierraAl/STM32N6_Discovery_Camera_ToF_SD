@@ -49,6 +49,12 @@ static uint8_t s_last_insect_detected = 0;
 #define TOF_TEST_QUIET_SIGNAL_PCT   4U
 #define TOF_TEST_SETTLE_MS          12000U
 #define TOF_TEST_STABLE_MIN_FRAMES      8U
+/* Recentering counts stable frames inside this window instead of requiring
+   TOF_TEST_SETTLE_MS of unbroken stability: a static plateau with normal
+   1 %/1 mm sensor jitter (field: zones 10, 8) still reaches the count,
+   while a moving insect breaks the per-frame gate. The window must stay
+   below any re-arm interval or a biased zone re-photographs forever. */
+#define TOF_TEST_STABLE_WINDOW_FRAMES 180U
 #define TOF_TEST_SCENE_SETTLE_MS     5000U
 static uint16_t s_test_latched = 0U;
 static uint32_t s_test_latched_since[16] = {0};
@@ -898,14 +904,26 @@ int VL53L5CX_Update(void)
         static uint32_t frame_counter = 0;
         frame_counter++;
         if (frame_counter >= VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) {
-            frame_counter = 0;
-            printf("[ToF] Periodic refresh...\n");
-            vl53l5cx_stop_ranging(&s_dev);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            vl53l5cx_start_ranging(&s_dev);
-            vTaskDelay(pdMS_TO_TICKS(200));
-            VL53L5CX_LearnBaseline();
-            printf("[ToF] Periodic refresh done.\n");
+            /* Quiet gate: never re-learn while an insect event or a
+               latched/blocked candidate zone is active, or the animal gets
+               baked into the baseline. The counter is not reset on skip,
+               so the refresh retries on the very next frame. */
+            uint8_t tof_busy = (uint8_t)(s_last_insect_detected != 0);
+#if !VL53L5CX_DUAL_SENSOR && (VL53L5CX_DET_RESOLUTION == 4) && \
+    ((TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_TEST) || \
+     (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
+            tof_busy |= (s_test_latched != 0U) || (s_test_blocked_mask != 0U);
+#endif
+            if (!tof_busy) {
+                frame_counter = 0;
+                printf("[ToF] Periodic refresh...\n");
+                vl53l5cx_stop_ranging(&s_dev);
+                vTaskDelay(pdMS_TO_TICKS(50));
+                vl53l5cx_start_ranging(&s_dev);
+                vTaskDelay(pdMS_TO_TICKS(200));
+                VL53L5CX_LearnBaseline();
+                printf("[ToF] Periodic refresh done.\n");
+            }
         }
     }
 #endif
@@ -1347,7 +1365,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
 
         /* Re-center any stationary per-zone plateau, including a persistent
            2 %% weak candidate that never produced a photo. Entry movement is
-           still detected first; only twelve seconds of frame-level stability
+           still detected first; a stable-frame count inside the settle window
            may become the new empty-box reference. */
         if ((raw_mask & bit) && motion < VL53L5CX_DET_MOTION_THRESH &&
             s_test_prev_valid[z] && frame_signal_pct <= 1U &&
@@ -1362,7 +1380,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
                     (uint32_t)(((uint64_t)s_test_stable_sig[z] * 7U + signal) / 8U);
                 s_test_stable_dist[z] =
                     (uint32_t)((s_test_stable_dist[z] * 7U + (uint32_t)distance) / 8U);
-                if (s_test_stable_frames[z] < TOF_TEST_STABLE_MIN_FRAMES)
+                if (s_test_stable_frames[z] < TOF_TEST_STABLE_WINDOW_FRAMES)
                     s_test_stable_frames[z]++;
                 if ((now - s_test_stable_since[z]) >= TOF_TEST_SETTLE_MS &&
                     s_test_stable_frames[z] >= TOF_TEST_STABLE_MIN_FRAMES) {
@@ -1372,11 +1390,12 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
                         s_baseline_signal[z] = s_test_stable_sig[z];
                     if (distance_change >= VL53L5CX_DET_LOCAL_DIST_WEAK_MM)
                         s_baseline_distance[z] = (uint16_t)s_test_stable_dist[z];
-                    printf("[ADAPT] Zone %u baseline sig %lu->%lu dist %u->%u (stable >=12 s)\n",
+                    printf("[ADAPT] Zone %u baseline sig %lu->%lu dist %u->%u (stable window: %u frames, max jitter 1%%/1mm)\n",
                            (unsigned)z, (unsigned long)old_signal,
                            (unsigned long)s_baseline_signal[z],
                            (unsigned)old_distance,
-                           (unsigned)s_baseline_distance[z]);
+                           (unsigned)s_baseline_distance[z],
+                           (unsigned)s_test_stable_frames[z]);
                     s_test_latched = (uint16_t)(s_test_latched & (uint16_t)~bit);
                     s_test_latched_since[z] = 0U;
                     s_test_weak_active_mask &= (uint16_t)~bit;

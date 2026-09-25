@@ -636,13 +636,11 @@
 #define VL53L5CX_DET_MICRO_HIT                  2U
 #define VL53L5CX_DET_MICRO_DECAY                1U
 #define VL53L5CX_DET_MICRO_TRIGGER              32U
-/* Bounded re-arm: a photographed zone may trigger again while its level
-   evidence persists, so an insect that stays in the trap keeps being
-   detected (one photo per interval instead of one per episode). Zones
-   that never fired can never re-arm, and a truly static object is
-   absorbed by the 12 s stable-plateau recentering, so a lens artifact
-   costs at most 2 photos. 0 disables re-arm (one-photo-per-episode). */
-#define VL53L5CX_DET_REARM_INTERVAL_MS          10000U
+/* Disabled (0): a persistent static bias (field zone 10) re-fired a
+   photo every 10 s as long as the bias outlived the interval. If
+   re-enabled later, use >= 20000 ms so it outlasts the per-zone
+   recentering window. */
+#define VL53L5CX_DET_REARM_INTERVAL_MS          0U
 /* Weak tracks are restricted to baseline zones within this depth of the
    farthest valid zone (the box floor). Close wall/border zones remain active
    for strong and fast-edge events. Previous value: absent. */
@@ -655,7 +653,7 @@
     it only reports the signed local residual used by the detector for every
     valid zone. Keep it enabled while collecting the final calibration logs,
     then set it to 0 for production. */
-#define VL53L5CX_DET_CAL_TRACE               1
+#define VL53L5CX_DET_CAL_TRACE               0
 #define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   300U
 
 /* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to
@@ -684,9 +682,17 @@
    (adaptive counts consecutive camera activations after completed capture
     pipelines; periodic uses a static frame counter in VL53L5CX_Update()) */
 
-/* MODE 1: Periodic restart (frame-based) - DISABLED by default */
-#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   0
-#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  500  /* refresh every N Update() frames */
+/* MODE 1: Periodic restart (frame-based) - ENABLED ("recursive baseline").
+   Every N Update() frames (~66 s at 15 Hz) the sensor restarts and
+   re-learns all zones. VL53L5CX_Update() skips the refresh while an insect
+   event or a latched/blocked zone is active (quiet gate) and retries on
+   the next frame, so an insect is never baked into the baseline. Cost:
+   ~5 s of ToF blindness per refresh; in return, slowly drifting per-zone
+   biases (field: weakest corner zone 8, one photo per episode every
+   1-2 min) are re-baselined before they can re-trigger. Shorten the
+   interval (e.g. 500) to re-learn faster at the price of more blind time. */
+#define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   1
+#define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  1000 /* refresh every N Update() frames */
 
 /* MODE 2: Consecutive camera activation refresh. The generic values remain
    unchanged for dual-sensor and legacy detector modes. */
