@@ -654,7 +654,7 @@
     valid zone. Keep it enabled while collecting the final calibration logs,
     then set it to 0 for production. */
 #define VL53L5CX_DET_CAL_TRACE               0
-#define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   300U
+#define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   200U
 
 /* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to
    the SENSOR (via DCI) in VL53L5CX_Configure(). The external guardian
