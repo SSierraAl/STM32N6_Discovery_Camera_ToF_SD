@@ -551,7 +551,7 @@
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_BASELINE_SAMPLES 60
 #else
-#define VL53L5CX_DET_BASELINE_SAMPLES 20
+#define VL53L5CX_DET_BASELINE_SAMPLES 30
 #endif
 /* Discard live frames before collecting the baseline. The previous code
    collected the baseline first and discarded five frames afterwards, so a
@@ -717,6 +717,7 @@
    to tune this mode. Keep the interval below 2^32 ms (about 49 days). */
 #define VL53L5CX_DET_PERIODIC_RESTART_ENABLED   1
 #define VL53L5CX_DET_PERIODIC_RESTART_INTERVAL  1000 /* N frames: other modes and default below */
+// time between baselines and refresh periodic!!! time between automatic baselines!!!!!!
 #define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
     ((1000UL * VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) / VL53L5CX_DET_RANGING_FREQ_HZ)
 #if VL53L5CX_DET_PERIODIC_RESTART_ENABLED && \
