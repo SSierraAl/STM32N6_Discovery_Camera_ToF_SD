@@ -1152,9 +1152,8 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
            The score freezes while LEVEL is policy-blocked, like the floor
            score above. */
         if ((floor_mask & bit) &&
-        (local_signal[z] >= VL53L5CX_DET_MICRO_SIGNAL_PCT ||
-        signed_local_distance[z] <=
-         -(int32_t)VL53L5CX_DET_MICRO_DISTANCE_MM)) {
+            (local_signal[z] >= VL53L5CX_DET_MICRO_SIGNAL_PCT ||
+             local_distance[z] >= VL53L5CX_DET_MICRO_DISTANCE_MM)) {
             micro_evidence_mask |= bit;
             const uint8_t room = (uint8_t)(VL53L5CX_DET_MICRO_TRIGGER -
                                            s_test_micro_score[z]);
