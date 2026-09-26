@@ -765,7 +765,7 @@
    unchanged for dual-sensor and legacy detector modes. */
 #define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
 #define VL53L5CX_DET_REFRESH_WINDOW_SECS        5    /* seconds after the previous capture pipeline */
-#define VL53L5CX_DET_MAX_DETECTIONS             2    /* camera activations before refresh */
+#define VL53L5CX_DET_MAX_DETECTIONS             3    /* camera activations before refresh */
 
 /* HIGH_SENS_CAMERA 4x4 override. Previous behavior: absent because this mode
    bypassed the activation counter. Field logs showed recurring weak 2% tracks;

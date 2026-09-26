@@ -1,30 +1,24 @@
 """
 STM32 SD Card Snapshot Visualizer - Windows-safe raw erase wrapper.
-
 Normal viewer behavior remains in _sd_image_viewer_core.py.
 Raw writes are performed with the original core.zero_fill(), but Windows volumes
 belonging to the selected PhysicalDrive are temporarily locked during Delete and
 Format SD. This is required by Windows for raw writes inside a mounted volume.
-
 Format SD does NOT format the filesystem:
   - first run Scan Snapshots,
   - delete every scanned STM32 photo,
   - clear journal blocks 3070/3071,
   - verify journal A/B are really empty.
 """
-
 import ctypes
 import os
 import subprocess
 import sys
 import time
 from ctypes import wintypes
-
 import _sd_image_viewer_core as core
-
 JOURNAL_BLOCK_A = core.SNAP_BASE_NEW - 2
 JOURNAL_BLOCK_B = core.SNAP_BASE_NEW - 1
-
 _GENERIC_READ = 0x80000000
 _GENERIC_WRITE = 0x40000000
 _FILE_SHARE_READ = 0x00000001
@@ -33,7 +27,6 @@ _OPEN_EXISTING = 3
 _FSCTL_LOCK_VOLUME = 0x00090018
 _FSCTL_UNLOCK_VOLUME = 0x0009001C
 _INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
-
 _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
 _kernel32.CreateFileW.argtypes = [
     wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, wintypes.LPVOID,
@@ -48,15 +41,11 @@ _kernel32.DeviceIoControl.argtypes = [
 _kernel32.DeviceIoControl.restype = wintypes.BOOL
 _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
 _kernel32.CloseHandle.restype = wintypes.BOOL
-
-
 def _disk_number(path):
     prefix = r"\\.\PhysicalDrive"
     if not path.startswith(prefix):
         raise ValueError(f"Not a PhysicalDrive path: {path}")
     return int(path[len(prefix):])
-
-
 def _volume_letters_for_disk(path):
     disk = _disk_number(path)
     ps = (
@@ -81,8 +70,6 @@ def _volume_letters_for_disk(path):
         if len(value) == 1 and value.isalpha() and value not in letters:
             letters.append(value)
     return letters
-
-
 def _ioctl(handle, code):
     returned = wintypes.DWORD(0)
     ctypes.set_last_error(0)
@@ -91,8 +78,8 @@ def _ioctl(handle, code):
     )
     return bool(ok), ctypes.get_last_error()
 
-
 class _LockedVolumes:
+
     def __init__(self, drive):
         self.drive = drive
         self.handles = []
@@ -102,7 +89,6 @@ class _LockedVolumes:
         # Windows can grant an exclusive lock for raw writes to the mounted SD.
         core.close_drive()
         time.sleep(0.1)
-
         letters = _volume_letters_for_disk(self.drive)
         try:
             for letter in letters:
@@ -124,7 +110,6 @@ class _LockedVolumes:
                         f"Cannot open volume {letter}: for raw-write lock: "
                         f"{ctypes.FormatError(code).strip()}",
                     )
-
                 locked = False
                 last_error = 0
                 for _ in range(8):
@@ -132,7 +117,6 @@ class _LockedVolumes:
                     if locked:
                         break
                     time.sleep(0.15)
-
                 if not locked:
                     _kernel32.CloseHandle(handle)
                     raise OSError(
@@ -156,10 +140,8 @@ class _LockedVolumes:
         self.handles.clear()
         return False
 
-
 class LockedEraseThread(core.QThread):
     """Original delete algorithm, but with the Windows volume locked."""
-
     progress = core.Signal(str)
     finished_ok = core.Signal(int)
     failed = core.Signal(str)
@@ -185,7 +167,6 @@ class LockedEraseThread(core.QThread):
                             "Cancelled — the remaining images were not erased."
                         )
                         return
-
                     # Same block calculation used by the validated DeleteThread.
                     h = snap.header
                     data_size = h["data_size"]
@@ -198,19 +179,16 @@ class LockedEraseThread(core.QThread):
                     nb = (
                         core.HEADER_SIZE + data_size + core.BLOCK_SIZE - 1
                     ) // core.BLOCK_SIZE
-
                     self.progress.emit(
                         f"Erasing {i}/{total}: #{snap.idx+1:03d} @ block "
                         f"{snap.block} ({nb * core.BLOCK_SIZE // (1024*1024)} MB) ..."
                     )
                     core.zero_fill(self.drive, snap.block, nb)
-
                 if self.clear_journal:
                     self.progress.emit(
                         f"Clearing journal blocks {JOURNAL_BLOCK_A}/{JOURNAL_BLOCK_B} ..."
                     )
                     core.zero_fill(self.drive, JOURNAL_BLOCK_A, 2)
-
             if self.clear_journal:
                 self.progress.emit("Verifying journal A/B are empty ...")
                 raw = core.rbulk(self.drive, JOURNAL_BLOCK_A, 2)
@@ -226,24 +204,58 @@ class LockedEraseThread(core.QThread):
                         f"{JOURNAL_BLOCK_A}/{JOURNAL_BLOCK_B} are not fully zero"
                     )
                 self.progress.emit("Journal A/B verified empty.")
-
             self.finished_ok.emit(total)
         except Exception as exc:
             self.failed.emit(str(exc))
 
-
 class SDVisualizer(core.SDVisualizer):
+
     def __init__(self):
         self._scan_completed = False
         super().__init__()
 
     def _build_ui(self):
         super()._build_ui()
-
         central_layout = self.centralWidget().layout()
         toolbar = central_layout.itemAt(0).widget()
         toolbar_layout = toolbar.layout()
-
+        # Keep the core viewer's original download action; it owns the export
+        # dialog, decoding, and background work.
+        buttons = [
+            toolbar_layout.itemAt(i).widget()
+            for i in range(toolbar_layout.count())
+            if toolbar_layout.itemAt(i).widget() is not None
+            and isinstance(toolbar_layout.itemAt(i).widget(), core.QPushButton)
+        ]
+        def label(button):
+            return button.text().lower()
+        download_buttons = [
+            button for button in buttons
+            if any(
+                word in label(button)
+                for word in ("download", "extract", "export", "save")
+            )
+            and not any(word in label(button) for word in ("delete", "erase", "format"))
+        ]
+        self._selected_download_button = next(
+            (
+                button
+                for keyword in ("download", "export", "save", "extract")
+                for button in download_buttons
+                if keyword in label(button) and "selected" in label(button)
+            ),
+            download_buttons[0] if len(download_buttons) == 1 else None,
+        )
+        # Refresh, Extract/Scan, Download All, Download Selected, Delete, Format.
+        anchor = next(
+            (
+                button for button in buttons
+                if button is not self._selected_download_button
+                and ("extract" in label(button) or "scan" in label(button))
+            ),
+            next((button for button in buttons if "refresh" in label(button)), None),
+        )
+        insert_at = toolbar_layout.indexOf(anchor) + 1 if anchor else 2
         self.btn_format = core.QPushButton("⚠ Format SD")
         self.btn_format.setObjectName("DangerButton")
         self.btn_format.setToolTip(
@@ -251,7 +263,35 @@ class SDVisualizer(core.SDVisualizer):
             "blocks 3070/3071, and verify they are empty. Does NOT format FAT32."
         )
         self.btn_format.clicked.connect(self.format_card)
-        toolbar_layout.insertWidget(2, self.btn_format)
+        self.btn_download_all = core.QPushButton("⬇ Download All")
+        self.btn_download_all.setToolTip(
+            "Download all scanned photos without manually selecting them."
+        )
+        self.btn_download_all.clicked.connect(self.download_all)
+        toolbar_layout.insertWidget(insert_at, self.btn_download_all)
+        if self._selected_download_button is not None:
+            toolbar_layout.removeWidget(self._selected_download_button)
+            toolbar_layout.insertWidget(
+                toolbar_layout.indexOf(self.btn_download_all) + 1,
+                self._selected_download_button,
+            )
+        else:
+            self.btn_download_all.setEnabled(False)
+            self.btn_download_all.setToolTip(
+                "The existing Download Selected button was not found. "
+                "Check _sd_image_viewer_core.py."
+            )
+        delete_button = next(
+            (button for button in buttons if "delete" in label(button) or "erase" in label(button)),
+            None,
+        )
+        if delete_button is not None:
+            toolbar_layout.removeWidget(delete_button)
+            toolbar_layout.insertWidget(
+                toolbar_layout.indexOf(self._selected_download_button or self.btn_download_all) + 1,
+                delete_button,
+            )
+        toolbar_layout.addWidget(self.btn_format)
 
     def set_drive(self, index):
         self._scan_completed = False
@@ -260,24 +300,33 @@ class SDVisualizer(core.SDVisualizer):
     def refresh_drives(self, disk_infos=None):
         self._scan_completed = False
         super().refresh_drives(disk_infos)
-
     @core.Slot(list)
+
     def _on_scan_finished(self, results):
         super()._on_scan_finished(results)
         self._scan_completed = True
-
     @core.Slot(str)
+
     def _on_scan_error(self, msg):
         self._scan_completed = False
         super()._on_scan_error(msg)
 
     def _set_ui_busy(self, busy, wait_drives=False):
         super()._set_ui_busy(busy, wait_drives)
+        if hasattr(self, "btn_download_all"):
+            self.btn_download_all.setEnabled(
+                not busy and not wait_drives
+                and self._selected_download_button is not None
+            )
         if hasattr(self, "btn_format"):
             self.btn_format.setEnabled(not busy and not wait_drives)
 
     def _set_formatting_ui(self, active):
         super()._set_formatting_ui(active)
+        if hasattr(self, "btn_download_all"):
+            self.btn_download_all.setEnabled(
+                not active and self._selected_download_button is not None
+            )
         if hasattr(self, "btn_format"):
             self.btn_format.setEnabled(not active)
 
@@ -293,13 +342,11 @@ class SDVisualizer(core.SDVisualizer):
                 "Please wait for the current operation to finish..."
             )
             return
-
         snaps = [self.snapshots[self.listbox.row(item)] for item in rows]
         total_mb = sum(
             (core.HEADER_SIZE + s.header["data_size"]) // (1024 * 1024)
             for s in snaps
         )
-
         reply = core.dialog(
             self,
             "question",
@@ -309,7 +356,6 @@ class SDVisualizer(core.SDVisualizer):
         )
         if reply != core.QMessageBox.StandardButton.Yes:
             return
-
         self.delete_thread = LockedEraseThread(self.drive, snaps)
         self.delete_thread.progress.connect(
             lambda msg: self.statusBar().showMessage(msg)
@@ -337,7 +383,6 @@ class SDVisualizer(core.SDVisualizer):
                 "found by that scan.",
             )
             return
-
         drive_num = self.drive.replace(r"\\.\PhysicalDrive", "")
         reply = core.dialog(
             self,
@@ -350,7 +395,6 @@ class SDVisualizer(core.SDVisualizer):
         )
         if reply != core.QMessageBox.StandardButton.Yes:
             return
-
         self._set_formatting_ui(True)
         self.format_thread = LockedEraseThread(
             self.drive, list(self.snapshots), clear_journal=True
@@ -361,8 +405,8 @@ class SDVisualizer(core.SDVisualizer):
         self.format_thread.finished_ok.connect(self._on_format_ok_simple)
         self.format_thread.failed.connect(self._on_format_failed_simple)
         self.format_thread.start()
-
     @core.Slot(int)
+
     def _on_format_ok_simple(self, count):
         self._set_formatting_ui(False)
         self._scan_completed = False
@@ -380,22 +424,57 @@ class SDVisualizer(core.SDVisualizer):
             f"Journal blocks {JOURNAL_BLOCK_A}/{JOURNAL_BLOCK_B} were cleared "
             "and verified empty.",
         )
-
     @core.Slot(str)
+
     def _on_format_failed_simple(self, msg):
         self._set_formatting_ui(False)
         self.statusBar().showMessage("Format SD failed.")
         core.dialog(self, "critical", "Format SD failed", msg)
 
+    def download_all(self):
+        if self._selected_download_button is None:
+            core.dialog(
+                self, "warning", "Download unavailable",
+                "The existing Download Selected button was not found.",
+            )
+            return
+        if not self.snapshots:
+            core.dialog(
+                self,
+                "warning",
+                "No photos",
+                "Run 'Scan Snapshots' first. No photos are currently available.",
+            )
+            return
+        if self._op_running():
+            self.statusBar().showMessage(
+                "Please wait for the current operation to finish..."
+            )
+            return
+        # The existing click handler reads the selection and starts the export.
+        # Keep the selection visible while an asynchronous export is running.
+        self.listbox.selectAll()
+        if len(self.listbox.selectedItems()) != len(self.snapshots):
+            core.dialog(
+                self, "warning", "Selection incomplete",
+                "Could not select every scanned photo. Set the photo list "
+                "to multiple selection and try again.",
+            )
+            return
+        self.statusBar().showMessage(
+            f"Starting download of {len(self.snapshots)} photo(s)..."
+        )
+
+        # QPushButton.click() is ignored while the original button is disabled.
+        # Emit its signal directly so its validated download handler still runs.
+        self._selected_download_button.clicked.emit()
 
 if __name__ == "__main__":
     if os.name != "nt":
         print("This script is designed for Windows PhysicalDrive access.")
         sys.exit(1)
-
     app = core.QApplication(sys.argv)
     app.setStyle("Fusion")
-
     palette = core.QPalette()
     palette.setColor(core.QPalette.ColorRole.Window, core.QColor(240, 242, 245))
     palette.setColor(core.QPalette.ColorRole.WindowText, core.QColor(51, 51, 51))
@@ -428,7 +507,6 @@ if __name__ == "__main__":
     palette.setColor(core.QPalette.ColorRole.Link, core.QColor(37, 99, 235))
     app.setPalette(palette)
     app.setStyleSheet(core.MODERN_QSS)
-
     window = SDVisualizer()
     window.show()
     sys.exit(app.exec())
