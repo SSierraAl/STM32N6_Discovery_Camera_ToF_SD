@@ -251,6 +251,11 @@ void VL53L5CX_Primary_Wake(void);
 /** Get current primary sensor state. */
 PrimaryState_t VL53L5CX_Primary_GetState(void);
 
+/** Scan the I2C bus and print all detected devices.
+    Probes every 7-bit address 0x00-0x7F via HAL_I2C_IsDeviceReady().
+    @return number of devices found. */
+int VL53L5CX_ScanI2CBus(void);
+
 /** Check if primary sensor is currently active (not sleeping).
     @return 1 if active, 0 if sleeping */
 int VL53L5CX_Primary_IsActive(void);

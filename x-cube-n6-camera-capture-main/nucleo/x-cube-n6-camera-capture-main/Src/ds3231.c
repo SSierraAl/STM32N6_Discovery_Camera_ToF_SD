@@ -23,7 +23,7 @@ static int lock(void)
 static int read_reg(unsigned reg, uint8_t *data, unsigned n)
 {
     last_hal = HAL_I2C_Mem_Read(&hi2c1, RTC_ADDRESS, reg,
-                                I2C_MEMADD_SIZE_8BIT, data, n, 20);
+                                I2C_MEMADD_SIZE_8BIT, data, n, 100);
     last_error = HAL_I2C_GetError(&hi2c1);
     return last_hal == HAL_OK ? 0 : -1;
 }
@@ -31,7 +31,7 @@ static int read_reg(unsigned reg, uint8_t *data, unsigned n)
 static int write_reg(unsigned reg, uint8_t *data, unsigned n)
 {
     last_hal = HAL_I2C_Mem_Write(&hi2c1, RTC_ADDRESS, reg,
-                                 I2C_MEMADD_SIZE_8BIT, data, n, 20);
+                                 I2C_MEMADD_SIZE_8BIT, data, n, 100);
     last_error = HAL_I2C_GetError(&hi2c1);
     return last_hal == HAL_OK ? 0 : -1;
 }

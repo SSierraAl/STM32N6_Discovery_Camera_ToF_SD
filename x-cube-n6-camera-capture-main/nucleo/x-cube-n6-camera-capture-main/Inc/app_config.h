@@ -76,7 +76,7 @@
 #define RTC_SET_ON_BOOT 0
 #endif
 #ifndef RTC_SET_UTC
-#define RTC_SET_UTC "2026-09-09T10:46:23Z"
+#define RTC_SET_UTC "2026-10-22T18:00:23Z"
 #endif
 
 /** Snapshot resolution (auto-calculated from CAM_BINNING).

@@ -1257,7 +1257,18 @@ static void main_thread_fct(void *arg)
     /* ---- I2C1 for VL53L5CX ToF (MUST be before tasks start) ---- */
     VL53L5CX_I2C_Init();
     VL53L5CX_PowerUp();
+
+    /* ---- I2C Bus Scan: list all connected devices on I2C1 ---- */
+    //printf("\n=== I2C1 Bus Scan ===\n");
+    //int i2c_found = VL53L5CX_ScanI2CBus();
+    //printf("I2C1 scan complete: %d device(s) found\n\n", i2c_found);
+
     RTC_Init();
+
+    /* Reset I2C1 peripheral to clear any bus errors from failed RTC transactions,
+       ensuring ToF sensor always initializes correctly. */
+    HAL_I2C_DeInit(&hi2c1);
+    VL53L5CX_I2C_Init();
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
     printf("[TOF TEST] RTC finished; releasing sensor task\n");
 #endif
@@ -1414,7 +1425,7 @@ static void MX_GPDMA1_Init(void)
 static void VL53L5CX_I2C_Init(void)
 {
     hi2c1.Instance = I2C1;
-    hi2c1.Init.Timing = 0x00401242;
+    hi2c1.Init.Timing = 0x1011304B;  /* ~400 kHz (DS3231 max). SCLL=75, SCLH=48, SDADEL=1, SCLDEL=1, PRESC=1. At 100MHz I2C clock: 400kHz */
     hi2c1.Init.OwnAddress1 = 0;
     hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
     hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
