@@ -32,9 +32,6 @@
     1 = CONTINUOUS — Camera always running in continuous mode at low resolution.
                  On trigger: grab one completed frame while pipe stays running.
                  Used with ToF enabled.
-     2 = BATCH      — Camera always running. Captures BATCH_FRAMES per detection into PSRAM,
-                     then writes to SD sequentially. FASTEST capture, max data collection.
-                     NOTE: Has I2C conflict with ToF — CMW_CAMERA_Init fails (ret=-7).
      4 = CALLBACK-BATCH — Camera init+warmup ONCE at boot, stays in standby between triggers.
                      On ToF trigger: wake → start continuous pipe → warmup using FRAME EVENT CALLBACK
                      (g_frame_event_count incremented by DCMIPP ISR) → capture N frames WITHOUT
@@ -51,7 +48,7 @@
      The IMX335 still reads full resolution: this is not sensor binning
      and does not shorten rolling-shutter readout. */
 #ifndef CAM_BINNING
-#if CAPTURE_MODE == 1 || CAPTURE_MODE == 2 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 1  || CAPTURE_MODE == 4
 #define CAM_BINNING          1
 #else
 #define CAM_BINNING          0
@@ -134,7 +131,7 @@
     less light. Select it from measured motion and field of view.
     CMW_CAMERA_GetExposure returns a cache, not physical register readback. */
 #ifndef CAM_EXPOSURE_VALUE
-#define CAM_EXPOSURE_VALUE   15000 //10ms
+#define CAM_EXPOSURE_VALUE   13000 //10ms
 #endif
 
 /** Manual sensor gain in millidecibels, quantized down in 300 mdB steps.
@@ -143,7 +140,7 @@
     Current user setting: 12000 mdB = 12 dB (register 40).
     Shared across modes; brightness/noise require bench comparison. */
 #ifndef CAM_GAIN_VALUE
-#define CAM_GAIN_VALUE       12000
+#define CAM_GAIN_VALUE       13200
 #endif
 
 
@@ -245,7 +242,7 @@
      Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
      With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
 #define CALLBACK_WARMUP_FRAMES   8 //11 is working limit 2    /* Frames to discard after wake (callback-based) */
-#define CALLBACK_FRAMES          4   /* Number of frames to capture per trigger */
+#define CALLBACK_FRAMES          2   /* Number of frames to capture per trigger */
 #define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
 
 /** Total PSRAM needed for callback batch: CALLBACK_FRAMES × frame_size
@@ -253,7 +250,7 @@
 #define CALLBACK_BUF_SIZE        (CALLBACK_FRAMES * SNAP_FRAME_SIZE)
 
 /* ================================================================
-    SECTION 5B: BATCH CAPTURE PARAMETERS (CAPTURE_MODE = 2)
+    SECTION 5B: BATCH CAPTURE PARAMETERS
     ================================================================ */
 
 /** Number of frames captured per insect detection event.
@@ -265,9 +262,6 @@
        - 1296x972@YUV422 (2.4MB/frame): 3 frames = 7.2MB, 5 frames = 12MB
        - 2592x1944@YUV422 (9.6MB/frame): 3 frames = 28.8MB, 5 frames = 48MB
 
-     Capture time: ~38ms per frame (stop pipe + memcpy + restart + wait 1 frame)
-       - 3 frames = ~114ms total capture window
-       - 5 frames = ~190ms total capture window
 
      Recommended: 3 (good balance), 5 (max data, still fast) */
 #define BATCH_FRAMES             3
@@ -535,7 +529,7 @@
 #if VL53L5CX_DET_RESOLUTION == 8
 #define VL53L5CX_DET_INTEGRATION_MS   30
 #else
-#define VL53L5CX_DET_INTEGRATION_MS   45
+#define VL53L5CX_DET_INTEGRATION_MS   45 // 30 auimenta sensibilidad pero da algo de ruido
 #endif
 #define VL53L5CX_DET_RANGING_FREQ_HZ  15
 
@@ -754,7 +748,7 @@
 //#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
     ((1000UL * VL53L5CX_DET_PERIODIC_RESTART_INTERVAL) / VL53L5CX_DET_RANGING_FREQ_HZ)
 
-#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS (2UL * 60UL * 1000UL)
+#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS (5UL * 60UL * 1000UL) // 2 min time for the autmatic refresh
 
     #if VL53L5CX_DET_PERIODIC_RESTART_ENABLED && \
     (VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS == 0UL)
@@ -763,19 +757,30 @@
 
 /* MODE 2: Consecutive camera activation refresh. The generic values remain
    unchanged for dual-sensor and legacy detector modes. */
+
 #define VL53L5CX_DET_ADAPTIVE_REFRESH_ENABLED   1
+
+// this two are for the 8x8 mode
 #define VL53L5CX_DET_REFRESH_WINDOW_SECS        5    /* seconds after the previous capture pipeline */
-#define VL53L5CX_DET_MAX_DETECTIONS             3    /* camera activations before refresh */
+#define VL53L5CX_DET_MAX_DETECTIONS             1    /* camera activations before refresh */
 
 /* HIGH_SENS_CAMERA 4x4 override. Previous behavior: absent because this mode
    bypassed the activation counter. Field logs showed recurring weak 2% tracks;
    three activations inside this rolling window now force one full baseline. */
+
+//This is more relevant for the 4x4 functions that it is what is working now!
+
 #define VL53L5CX_DET_HIGH_SENS_REFRESH_WINDOW_SECS  30
-#define VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS       3
+#define VL53L5CX_DET_HIGH_SENS_MAX_DETECTIONS       1
 /* Previous values: 60, then 10. The corrected baseline now settles before
    learning; keep only a short recovery interval and reject fast-only
    transients while normal level/track evidence remains active. */
+
+// time after the refresh to avoid enter in bucle of multiple refrehs activation refresh activation
 #define VL53L5CX_DET_HIGH_SENS_REARM_HOLDOFF_SECS    3
+
+
+// similar to the previous one also we avoid the 5 consecutive frames of ToF just to wait for stabilization
 /* Fresh frames skipped for photo requests after camera/SD returns or a
    stable-scene baseline completes; detector/latches still update per frame. */
 #define VL53L5CX_DET_HIGH_SENS_CAPTURE_COOLDOWN_FRAMES 5U

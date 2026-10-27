@@ -45,7 +45,7 @@ extern uint8_t capture_buf[];
 #if CAPTURE_MODE == 1
 extern uint8_t save_buf[];
 #endif
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 4
 extern uint8_t batch_buf[];
 #endif
 
@@ -858,15 +858,13 @@ void camera_task(void *arg)
        - CAPTURE_MODE==1: camera already initialized in main_thread (pipe running).
          camera_task only services ISP in idle loop and handles snap commands.
        - CAPTURE_MODE==2: camera_task starts the continuous pipe here. */
-#if CAPTURE_MODE == 2
-    CAM_ContinuousStart(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS);
-#endif
+
 
     uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
 
     while (1) {
         CameraCmd_t cmd = {0};
-#if CAPTURE_MODE == 1 || CAPTURE_MODE == 2
+#if CAPTURE_MODE == 1
         CAM_IspUpdate();
 #endif
         if (xQueueReceive(camera_cmd_queue, &cmd, pdMS_TO_TICKS(20)) != pdTRUE) continue;
@@ -897,12 +895,9 @@ void camera_task(void *arg)
 #endif
                 xSemaphoreGive(camera_ready_sem);
             }
-#elif CAPTURE_MODE == 2 || CAPTURE_MODE == 4
+#elif CAPTURE_MODE == 4
             extern uint8_t batch_buf[];
-#if CAPTURE_MODE == 2
-            rc = CAM_ContinuousBatchSnap(batch_buf, frame_size);
-            PERF_MARK(g_perf_timer, CAM_END);
-#else
+#if CAPTURE_MODE == 4
             /* CAPTURE_MODE == 4: Callback-Batch (continuous, NO stop/restart) */
             rc = CAM_CallbackBatchSnap(batch_buf, frame_size);
             PERF_MARK(g_perf_timer, CAM_END);
@@ -1055,7 +1050,7 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
     WS2812_FlashStop();
 #endif
 
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 4
     /* Wait for ALL BATCH_FRAMES to be stored before returning */
     if (g_last_batch_frames <= 0) {
         /* camera_task signals camera_ready_sem on capture failure as well.

@@ -226,7 +226,7 @@ uint8_t capture_buf2[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
      Size = BATCH_FRAMES × SNAP_FRAME_SIZE
      For 1296x972@YUV422 (2.5MB/frame), BATCH_FRAMES=3 → 7.5MB total.
      NOTE: Not static — referenced via extern by app_thread.c (camera_task). */
-#if CAPTURE_MODE == 2 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 4
 uint8_t batch_buf[BATCH_BUF_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
@@ -1238,9 +1238,8 @@ static void main_thread_fct(void *arg)
     printf("[INFO]   - storage_task (SD writes)\n");
     printf("[INFO]   - btn_thread   (manual capture)\n");
 
-#if CAPTURE_MODE == 2
-    printf("[INFO] Capture Mode: BATCH (%d frames/detection)\n", BATCH_FRAMES);
-#elif CAPTURE_MODE == 4
+
+#if CAPTURE_MODE == 4
     printf("[INFO] Capture Mode: CALLBACK-BATCH (%d frames/detection, NO stop/restart)\n", CALLBACK_FRAMES);
 #elif CAPTURE_MODE == 1
     printf("[INFO] Capture Mode: CONTINUOUS (camera_task starts pipe)\n");
