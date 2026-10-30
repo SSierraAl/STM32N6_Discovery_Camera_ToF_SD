@@ -1,0 +1,16 @@
+STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_bus.h:1407:22:LL_AHB4_GRP1_EnableClock	1
+STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_ll_bus.h:1755:22:LL_AHB5_GRP1_EnableClock	1
+Src/main.c:1735:13:VL53L5CX_I2C_Init	1
+Src/main.c:564:13:ETH_PD_WritePHYReg.constprop	4
+Src/main.c:543:17:ETH_PD_ReadPHYReg.constprop	4
+Src/main.c:1280:13:main_thread_fct	34
+Src/main.c:282:5:main	1
+Src/main.c:411:6:IAC_IRQHandler	1
+Src/main.c:736:6:LP_TicklessPreSleep	1
+Src/main.c:744:6:LP_TicklessPostSleep	1
+Src/main.c:1600:19:MX_DCMIPP_ClockConfig	2
+Src/main.c:1630:6:HAL_PCD_MspInit	2
+Src/main.c:1700:6:PeriphCommonClock_Config	1
+Src/main.c:1783:6:assert_failed	1
+Src/main.c:1800:6:vApplicationIdleHook	1
+Src/main.c:1835:6:app_clean_invalidate_dbg	3

@@ -1,0 +1,45 @@
+mkdir -p build
+  CC build/Src/main.o
+In file included from Src/vl53l5cx_detection.h:4,
+                 from Src/main.c:66:
+Src/../Inc/app_config.h:748:1: warning: multi-line comment [-Wcomment]
+  748 | //#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
+      | ^
+In file included from Src/../Inc/vl53l5cx_detection.h:34,
+                 from Src/vl53l5cx_detection.h:24:
+Src/../Inc/app_config.h:748:1: warning: multi-line comment [-Wcomment]
+  748 | //#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
+      | ^
+In file included from Inc/FreeRTOSConfig.h:114,
+                 from Lib/FreeRTOS/Source/include/FreeRTOS.h:64,
+                 from Inc/i2c_arbiter.h:25,
+                 from Src/main.c:67:
+Inc/app_config.h:748:1: warning: multi-line comment [-Wcomment]
+  748 | //#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
+      | ^
+In file included from Src/main.c:70:
+Inc/app_config.h:748:1: warning: multi-line comment [-Wcomment]
+  748 | //#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
+      | ^
+Src/main.c: In function 'LP_DWT_Init':
+Src/main.c:706:29: error: implicit declaration of function 'HAL_RCC_GetCPUClockFreq'; did you mean 'HAL_RCC_GetNPUClockFreq'? [-Wimplicit-function-declaration]
+  706 |              (unsigned long)HAL_RCC_GetCPUClockFreq());
+      |                             ^~~~~~~~~~~~~~~~~~~~~~~
+Src/main.c:95:54: note: in definition of macro 'LP_PRINT'
+   95 | #define LP_PRINT(flag, ...)  do { if ((flag)) printf(__VA_ARGS__); } while(0)
+      |                                                      ^~~~~~~~~~~
+Src/main.c: In function 'main_thread_fct':
+Src/main.c:1413:5: warning: "/*" within comment [-Wcomment]
+ 1413 |     /* ---- PSRAM Initialization ---- */
+Src/main.c: In function 'MX_TIM1_Init':
+Src/main.c:1720:29: warning: unused variable 'sMasterConfig' [-Wunused-variable]
+ 1720 |     TIM_MasterConfigTypeDef sMasterConfig = {0};
+      |                             ^~~~~~~~~~~~~
+Src/main.c: At top level:
+Src/main.c:173:14: warning: 'SD_ReadRawImage' declared 'static' but never defined [-Wunused-function]
+  173 | static int   SD_ReadRawImage(uint8_t *img_buf, uint32_t *data_size_p);
+      |              ^~~~~~~~~~~~~~~
+Src/main.c:1082:13: warning: 'btn_thread_fct' defined but not used [-Wunused-function]
+ 1082 | static void btn_thread_fct(void *arg)
+      |             ^~~~~~~~~~~~~~
+mingw32-make: *** [makefile:195: build/Src/main.o] Error 1

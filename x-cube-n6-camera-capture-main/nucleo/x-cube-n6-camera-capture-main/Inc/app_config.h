@@ -1,4 +1,4 @@
-/**
+﻿/**
  ******************************************************************************
  * @file    app_config.h
  * @author  GPM Application Team (cleaned for standalone snapshot mode)
@@ -10,9 +10,9 @@
  *   SD card via raw block I/O (no FileX/fatfs filesystem needed).
  *
  *   Flow:
- *     Boot → Init SD card → Wait for USER button (PC13)
- *       → Power on camera → Discard N warmup frames → Capture frame #N+1
- *       → Save to SD → Power off camera → Wait for next press
+ *     Boot â†’ Init SD card â†’ Wait for USER button (PC13)
+ *       â†’ Power on camera â†’ Discard N warmup frames â†’ Capture frame #N+1
+ *       â†’ Save to SD â†’ Power off camera â†’ Wait for next press
  ******************************************************************************
  */
 #ifndef APP_CONFIG
@@ -28,15 +28,15 @@
 #endif
 
 /** Capture mode for ToF-triggered photography.
-     0 = ON-DEMAND  — Legacy button/manual single-frame mode. //Validated !
-    1 = CONTINUOUS — Camera always running in continuous mode at low resolution.
+     0 = ON-DEMAND  â€” Legacy button/manual single-frame mode. //Validated !
+    1 = CONTINUOUS â€” Camera always running in continuous mode at low resolution.
                  On trigger: grab one completed frame while pipe stays running.
                  Used with ToF enabled.
-     4 = CALLBACK-BATCH — Camera init+warmup ONCE at boot, stays in standby between triggers.
-                     On ToF trigger: wake → start continuous pipe → warmup using FRAME EVENT CALLBACK
-                     (g_frame_event_count incremented by DCMIPP ISR) → capture N frames WITHOUT
-                     stopping the pipe between them → memcpy each frame as callback fires →
-                     stop pipe once at end → return to standby.
+     4 = CALLBACK-BATCH â€” Camera init+warmup ONCE at boot, stays in standby between triggers.
+                     On ToF trigger: wake â†’ start continuous pipe â†’ warmup using FRAME EVENT CALLBACK
+                     (g_frame_event_count incremented by DCMIPP ISR) â†’ capture N frames WITHOUT
+                     stopping the pipe between them â†’ memcpy each frame as callback fires â†’
+                     stop pipe once at end â†’ return to standby.
                      Continuous capture avoids restart tearing; motion blur still depends on exposure.
                      Uses the SAME callback infrastructure as STANDBY-BATCH but eliminates
                      the Stop/Restart tearing that causes blurry frames.
@@ -96,7 +96,7 @@
 
 /** Number of warmup frames to discard after camera power-on.
      The IMX335 sensor outputs garbage on the first frames.
-     REDUCED FROM 11 → 8: Saves ~133ms per capture (33ms saved per frame).
+     REDUCED FROM 11 â†’ 8: Saves ~133ms per capture (33ms saved per frame).
      CRITICAL: Each warmup frame = ~33ms of delay where the insect can move!
      If images have green tint on first few captures, increase this value. */
 #define SNAP_WARMUP_FRAMES    8  //11 is working
@@ -202,7 +202,7 @@
 /** Minimum inter-batch recovery gap (milliseconds).
     After the SD card reports TRANSFER-ready (via CMD13 poll), we wait this
     many additional milliseconds before sending the next write command. The
-    card's CMD13 "ready" status is optimistic — the host controller reports
+    card's CMD13 "ready" status is optimistic â€” the host controller reports
     ready before the internal NAND flash erase/program cycles complete.
     Without this gap, STA=0x5000 (Data CRC timeout) errors occur on many
     SDXC cards when the next write arrives too early.
@@ -216,7 +216,7 @@
 
 /** Maximum snapshots that can be stored before SD card overflow.
     For a 32 GB SDHC card (64,000,000 blocks):
-    (64,000,000 - 3072) / 19,643 ≈ 3,257 snapshots max.
+    (64,000,000 - 3072) / 19,643 â‰ˆ 3,257 snapshots max.
     This is a safety constant; the actual limit depends on card size. */
 #define SD_MAX_SNAPSHOTS       15000
 
@@ -232,12 +232,12 @@
 
 /** Callback-based batch capture: uses DCMIPP frame event callback (ISR-driven)
      to know exactly when each frame is ready. The pipe runs continuously through
-     the entire batch — no Stop/Restart between frames = no tearing = ALL frames sharp.
+     the entire batch â€” no Stop/Restart between frames = no tearing = ALL frames sharp.
      
      Flow on trigger:
-       Wake sensor (20ms) → Start pipe → Wait for warmup frames via callback →
-       For each capture frame: wait for callback → memcpy → repeat →
-       Stop pipe once → Return to standby
+       Wake sensor (20ms) â†’ Start pipe â†’ Wait for warmup frames via callback â†’
+       For each capture frame: wait for callback â†’ memcpy â†’ repeat â†’
+       Stop pipe once â†’ Return to standby
      
      Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
      With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
@@ -245,8 +245,8 @@
 #define CALLBACK_FRAMES          2   /* Number of frames to capture per trigger */
 #define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
 
-/** Total PSRAM needed for callback batch: CALLBACK_FRAMES × frame_size
-     At 1296x972 YUV422: 3 × 2.5MB = 7.5MB (fits in 16MB PSRAM) */
+/** Total PSRAM needed for callback batch: CALLBACK_FRAMES Ã— frame_size
+     At 1296x972 YUV422: 3 Ã— 2.5MB = 7.5MB (fits in 16MB PSRAM) */
 #define CALLBACK_BUF_SIZE        (CALLBACK_FRAMES * SNAP_FRAME_SIZE)
 
 /* ================================================================
@@ -258,7 +258,7 @@
      More frames = higher chance of at least one sharp image, but more PSRAM used
      and longer total SD write time (happens AFTER capture, so insect can leave).
 
-     PSRAM usage: BATCH_FRAMES × SNAP_FRAME_SIZE
+     PSRAM usage: BATCH_FRAMES Ã— SNAP_FRAME_SIZE
        - 1296x972@YUV422 (2.4MB/frame): 3 frames = 7.2MB, 5 frames = 12MB
        - 2592x1944@YUV422 (9.6MB/frame): 3 frames = 28.8MB, 5 frames = 48MB
 
@@ -273,7 +273,7 @@
 #define BATCH_FRAMES             CALLBACK_FRAMES
 #endif
 
-/** Total batch buffer size in bytes = BATCH_FRAMES × SNAP_FRAME_SIZE.
+/** Total batch buffer size in bytes = BATCH_FRAMES Ã— SNAP_FRAME_SIZE.
     This buffer is allocated in PSRAM and holds all frames for one detection event. */
 #define BATCH_BUF_SIZE           (BATCH_FRAMES * SNAP_FRAME_SIZE)
 
@@ -298,7 +298,7 @@
 #define IMG_STREAMS {{UVCL_PAYLOAD_UNCOMPRESSED_YUY2, 640, 480, 30}}
 
 /** Legacy max frame size (used by app.c / app_jpg.c buffer allocation).
-    In STANDALONE_MODE this is only for compatibility — actual snapshot
+    In STANDALONE_MODE this is only for compatibility â€” actual snapshot
     buffer size is controlled by MAX_SNAP_FRAME_SIZE. */
 #ifndef STANDALONE_MODE
 #define MAX_IMG_FRAME_SIZE (800 * 480 * 2)
@@ -365,12 +365,12 @@
    ================================================================ */
 
 /** Illumination mode:
-    0 = ALWAYS_ON  — LEDs stay on continuously (power hungry, not recommended)
-    1 = CAPTURE    — LEDs turn on at detection, stay on during full camera
+    0 = ALWAYS_ON  â€” LEDs stay on continuously (power hungry, not recommended)
+    1 = CAPTURE    â€” LEDs turn on at detection, stay on during full camera
                       capture cycle (warmup + frame grab + SD write), then off.
                       Uses FlashStart/FlashStop (non-blocking).
                       This is the CORRECT mode for insect capture!
-    2 = INDICATOR  — LEDs flash briefly on detection only (no illumination) */
+    2 = INDICATOR  â€” LEDs flash briefly on detection only (no illumination) */
 #define WS2812_MODE                1
 
 /** Illumination ON duration in milliseconds.
@@ -396,7 +396,7 @@
 #define WS2812_ILLUMINATION_BRIGHTNESS  100
 
 /** Illumination color (0xRRGGBB; driver converts once to WS2812 GRB).
-    White (0xFFFFFF): Maximum illumination for camera — RECOMMENDED
+    White (0xFFFFFF): Maximum illumination for camera â€” RECOMMENDED
     Green (0x00FF00): Insects less sensitive, more natural behavior
     Red (0xFF0000): Least disruptive to insects but camera needs more gain */
 #define WS2812_ILLUMINATION_COLOR       0xC8B080//0xD0E654//0xA0FF28
@@ -464,10 +464,10 @@
         - Camera ToF stays active for DUAL_WAKE_DURATION_MS, then returns to sleep */
 #define VL53L5CX_DUAL_SENSOR              0
 
-/** I2C addresses — DOCUMENTATION ONLY (the code hardcodes them):
-    Primary (camera ToF):  0x29 (7-bit) — set in VL53L5CX_Init()
+/** I2C addresses â€” DOCUMENTATION ONLY (the code hardcodes them):
+    Primary (camera ToF):  0x29 (7-bit) â€” set in VL53L5CX_Init()
     External (guardian):   0x31 (7-bit) = 0x62 in the 8-bit "write"
-                           convention — set in VL53L5CX_External_Init()
+                           convention â€” set in VL53L5CX_External_Init()
     (the platform layer left-shifts the stored value by 1, see Src/platform.c)
     To re-address a sensor: edit the .c call site AND these defines. */
 #define VL53L5CX_PRIMARY_ADDRESS          0x29
@@ -490,7 +490,7 @@
         then starts detecting immediately against that reference.
         Risk: a target still present at timeout gets baked into the
         baseline. The first cycle after boot uses the init-time learn.
-    - NO_REFRESH (3): no learn on wake or before sleep — the sleep/wake
+    - NO_REFRESH (3): no learn on wake or before sleep â€” the sleep/wake
         cycle never refreshes the primary baseline (fastest wake); it
         comes only from boot init, periodic/adaptive refresh, and the
         manual button.
@@ -507,7 +507,7 @@
 #define VL53L5CX_DET_RESOLUTION       4
 
 /** Ranging mode for the PRIMARY sensor (raw VL53L5CX ULD driver codes,
-    see vl53l5cx_api.h — this ULD implements only these two modes):
+    see vl53l5cx_api.h â€” this ULD implements only these two modes):
     - 1 = CONTINUOUS : integration time is forced to the sensor maximum
       (highest sensitivity); VL53L5CX_DET_INTEGRATION_MS below is ignored
       and the effective frame rate drops below VL53L5CX_DET_RANGING_FREQ_HZ.
@@ -711,7 +711,7 @@
 #define VL53L5CX_DET_CAL_TRACE               0
 #define VL53L5CX_DET_CAL_TRACE_INTERVAL_MS   100U
 
-/* Motion indicator tuning — ST plugin level (PRIMARY sensor), applied to
+/* Motion indicator tuning â€” ST plugin level (PRIMARY sensor), applied to
    the SENSOR (via DCI) in VL53L5CX_Configure(). The external guardian
    uses its own VL53L5CX_EXT_MOTION_* defines (EXT block below). The
    plugin runs the motion
@@ -719,7 +719,7 @@
    monitor movements between 400 mm and 1500 mm. These values match the
    plugin's built-in defaults, so the sensor behavior is unchanged.
    NOTE: they shape the raw per-zone motion values that
-   VL53L5CX_DET_MOTION_THRESH is compared against — after changing any of
+   VL53L5CX_DET_MOTION_THRESH is compared against â€” after changing any of
    them, re-datalog and re-check the ZFRAME motion column.
    See Documentation/TUNING_GUIDE.md, section 4. */
 #define VL53L5CX_DET_MOTION_MIN_ZONES       1   /* min_nb_for_global_detection: zones required for the plugin's GLOBAL motion flag (datalog MOTION lines; not part of the firmware trigger) */
@@ -806,7 +806,7 @@
 #define VL53L5CX_DET_DEBUG_ALLPARAM_INT 5   /* emit ALLPARAM every N Update() frames */
 
 /* ================================================================
-   EXT (GUARDIAN) SENSOR — INDEPENDENT CONFIGURATION
+   EXT (GUARDIAN) SENSOR â€” INDEPENDENT CONFIGURATION
    ================================================================
    Active only in dual mode (VL53L5CX_DUAL_SENSOR = 1). The external
    (guardian) VL53L5CX @ 0x62 used to share the VL53L5CX_DET_* defines
@@ -849,7 +849,7 @@
     integration time (integration + processing < 1/frequency). */
 #define VL53L5CX_EXT_RANGING_FREQ_HZ      15
 
-/** EXT ranging mode — raw VL53L5CX ULD driver code, same values as
+/** EXT ranging mode â€” raw VL53L5CX ULD driver code, same values as
     VL53L5CX_RANGING_MODE:
       1 = CONTINUOUS : integration forced to the sensor maximum.
       3 = AUTONOMOUS : VL53L5CX_EXT_INTEGRATION_MS used precisely. */
@@ -882,5 +882,50 @@
 #define VL53L5CX_EXT_MOTION_EXTRA_NOISE      0  /* extra_noise_sigma (was shared VL53L5CX_DET_MOTION_EXTRA_NOISE) */
 
 #endif /* VL53L5CX_DUAL_SENSOR */
+
+/* ================================================================
+   LOW-POWER CONFIGURATION
+   ================================================================
+   Configure power-saving features independently.
+
+   LP_ENABLE_IDLE_WFI      - CPU sleeps in idle (WFI), ~30-50 mW save on idle
+   LP_ENABLE_TICKLESS_IDLE - SysTick suppressed during long sleep (adds ~20 mW)
+   LP_DISABLE_LCD          - Power down unused LCD display + backlight (~80-120 mW)
+   LP_ENABLE_DEBUG_GPIO    - Scope-visible pulse on PH3 during sleep for debug
+
+   TRACE flags control boot-time and per-event prints.  Set LP_TRACE_ALL=0
+   to compile all trace prints to nothing (zero runtime overhead).
+   ================================================================ */
+
+#ifndef LP_ENABLE_IDLE_WFI
+#define LP_ENABLE_IDLE_WFI              1   /* CPU Sleep (WFI) in idle task */
+#endif
+#ifndef LP_ENABLE_TICKLESS_IDLE
+#define LP_ENABLE_TICKLESS_IDLE         1   /* Suppress SysTick during long sleeps */
+#endif
+#ifndef LP_DISABLE_LCD
+#define LP_DISABLE_LCD                  1   /* Power down unused LCD display + backlight */
+#endif
+#ifndef LP_ENABLE_DEBUG_GPIO
+#define LP_ENABLE_DEBUG_GPIO            0   /* Scope pulse on PH3 during sleep */
+#endif
+
+/* Master kill-switch for all LP trace/debug prints (0 = zero runtime cost) */
+#define LP_TRACE_ALL                    1
+
+#if LP_TRACE_ALL
+#define LP_TRACE_ETH_POWERDOWN          1   /* PHY power-down details */
+#define LP_TRACE_GPIO_ISOLATION         1   /* GPIO pin isolation logging */
+#define LP_TRACE_REGISTER_MODS         1   /* Register modification trace */
+#define LP_TRACE_WAKEUP_LATENCY_US      0   /* Wake latency measurement (DWT CYCCNT) */
+#define LP_SUMMARY_AT_BOOT              1   /* One-shot boot summary */
+#else
+#define LP_TRACE_ETH_POWERDOWN          0
+#define LP_TRACE_GPIO_ISOLATION         0
+#define LP_TRACE_REGISTER_MODS         0
+#define LP_TRACE_WAKEUP_LATENCY_US      0
+#define LP_SUMMARY_AT_BOOT              0
+#endif
+
 
 #endif /* APP_CONFIG */

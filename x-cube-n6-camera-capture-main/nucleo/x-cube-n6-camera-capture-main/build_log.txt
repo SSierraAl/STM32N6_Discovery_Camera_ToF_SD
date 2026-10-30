@@ -1,0 +1,13 @@
+mkdir -p build
+  CC build/Src/main.o
+In file included from Src/vl53l5cx_detection.h:4,
+                 from Src/main.c:66:
+Src/../Inc/app_config.h:748:1: warning: multi-line comment [-Wcomment]
+  748 | //#define VL53L5CX_DET_PERIODIC_CAMERA_INTERVAL_MS \
+      | ^
+In file included from Src/vl53l5cx_detection.h:24:
+Src/../Inc/vl53l5cx_detection.h:29:10: fatal error: vl53l5cx_api.h: No such file or directory
+   29 | #include "vl53l5cx_api.h"
+      |          ^~~~~~~~~~~~~~~~
+compilation terminated.
+mingw32-make: *** [makefile:195: build/Src/main.o] Error 1

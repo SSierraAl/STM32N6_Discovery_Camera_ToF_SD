@@ -1,0 +1,283 @@
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccKpRZ3n.s 			page 1
+
+
+   1              		.arch armv8.1-m.main
+   2              		.fpu fpv5-d16
+   3              		.arch_extension dsp
+   4              		.arch_extension fp
+   5              		.arch_extension fp.dp
+   6              		.arch_extension mve
+   7              		.arch_extension mve.fp
+   8              		.eabi_attribute 5, "cortex-m55"
+   9              		.eabi_attribute 28, 1
+  10              		.eabi_attribute 20, 1
+  11              		.eabi_attribute 21, 1
+  12              		.eabi_attribute 23, 3
+  13              		.eabi_attribute 24, 1
+  14              		.eabi_attribute 25, 1
+  15              		.eabi_attribute 26, 1
+  16              		.eabi_attribute 30, 4
+  17              		.eabi_attribute 34, 1
+  18              		.eabi_attribute 38, 1
+  19              		.eabi_attribute 18, 4
+  20              		.file	"app_fuseprogramming.c"
+  21              		.text
+  22              	.Ltext0:
+  23              		.cfi_sections	.debug_frame
+  24              		.file 1 "Src/app_fuseprogramming.c"
+  25              		.section	.text.Fuse_Programming,"ax",%progbits
+  26              		.align	1
+  27              		.global	Fuse_Programming
+  28              		.syntax unified
+  29              		.thumb
+  30              		.thumb_func
+  32              	Fuse_Programming:
+  33              	.LFB284:
+   1:Src/app_fuseprogramming.c ****  /**
+   2:Src/app_fuseprogramming.c ****  ******************************************************************************
+   3:Src/app_fuseprogramming.c ****  * @file    app_fuseprogramming.c
+   4:Src/app_fuseprogramming.c ****  * @author  GPM Application Team
+   5:Src/app_fuseprogramming.c ****  *
+   6:Src/app_fuseprogramming.c ****  ******************************************************************************
+   7:Src/app_fuseprogramming.c ****  * @attention
+   8:Src/app_fuseprogramming.c ****  *
+   9:Src/app_fuseprogramming.c ****  * Copyright (c) 2023 STMicroelectronics.
+  10:Src/app_fuseprogramming.c ****  * All rights reserved.
+  11:Src/app_fuseprogramming.c ****  *
+  12:Src/app_fuseprogramming.c ****  * This software is licensed under terms that can be found in the LICENSE file
+  13:Src/app_fuseprogramming.c ****  * in the root directory of this software component.
+  14:Src/app_fuseprogramming.c ****  * If no LICENSE file comes with this software, it is provided AS-IS.
+  15:Src/app_fuseprogramming.c ****  *
+  16:Src/app_fuseprogramming.c ****  ******************************************************************************
+  17:Src/app_fuseprogramming.c ****  */
+  18:Src/app_fuseprogramming.c **** 
+  19:Src/app_fuseprogramming.c **** #include "stm32n6xx_hal_bsec.h"
+  20:Src/app_fuseprogramming.c **** static void ErrorHandler(void);
+  21:Src/app_fuseprogramming.c **** 
+  22:Src/app_fuseprogramming.c **** #define BSEC_HW_CONFIG_ID        124U
+  23:Src/app_fuseprogramming.c **** #define BSEC_HWS_HSLV_VDDIO3     15U
+  24:Src/app_fuseprogramming.c **** #define BSEC_HWS_HSLV_VDDIO2     16U
+  25:Src/app_fuseprogramming.c **** 
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccKpRZ3n.s 			page 2
+
+
+  26:Src/app_fuseprogramming.c **** #define BSEC_FUSE_ADDRESS        BSEC_HW_CONFIG_ID
+  27:Src/app_fuseprogramming.c **** #define BSEC_FUSE_MASK           ((uint32_t)((1U << BSEC_HWS_HSLV_VDDIO3) | (1U << BSEC_HWS_HSLV_VD
+  28:Src/app_fuseprogramming.c **** 
+  29:Src/app_fuseprogramming.c **** 
+  30:Src/app_fuseprogramming.c **** 
+  31:Src/app_fuseprogramming.c **** 
+  32:Src/app_fuseprogramming.c **** /**
+  33:Src/app_fuseprogramming.c ****   * @brief  Check specific fuse configuration and update it if needed.
+  34:Src/app_fuseprogramming.c ****   * @retval None
+  35:Src/app_fuseprogramming.c ****   */
+  36:Src/app_fuseprogramming.c **** void Fuse_Programming(void)
+  37:Src/app_fuseprogramming.c **** {
+  34              		.loc 1 37 1 view -0
+  35              		.cfi_startproc
+  36              		@ args = 0, pretend = 0, frame = 16
+  37              		@ frame_needed = 0, uses_anonymous_args = 0
+  38:Src/app_fuseprogramming.c ****   uint32_t fuse_id, bit_mask, data;
+  38              		.loc 1 38 3 view .LVU1
+  39:Src/app_fuseprogramming.c **** 
+  40:Src/app_fuseprogramming.c ****   BSEC_HandleTypeDef sBsecHandler;
+  39              		.loc 1 40 3 view .LVU2
+  41:Src/app_fuseprogramming.c **** 
+  42:Src/app_fuseprogramming.c ****   sBsecHandler.Instance = BSEC;
+  40              		.loc 1 42 3 view .LVU3
+  37:Src/app_fuseprogramming.c ****   uint32_t fuse_id, bit_mask, data;
+  41              		.loc 1 37 1 is_stmt 0 view .LVU4
+  42 0000 1FB5     		push	{r0, r1, r2, r3, r4, lr}
+  43              		.cfi_def_cfa_offset 24
+  44              		.cfi_offset 14, -4
+  45              		.loc 1 42 25 view .LVU5
+  46 0002 144B     		ldr	r3, .L18
+  43:Src/app_fuseprogramming.c **** 
+  44:Src/app_fuseprogramming.c ****   /* Read current value of fuse */
+  45:Src/app_fuseprogramming.c ****   fuse_id = BSEC_FUSE_ADDRESS;
+  46:Src/app_fuseprogramming.c ****   if (HAL_BSEC_OTP_Read(&sBsecHandler, fuse_id, &data) == HAL_OK)
+  47              		.loc 1 46 7 view .LVU6
+  48 0004 7C21     		movs	r1, #124
+  49 0006 01AA     		add	r2, sp, #4
+  50 0008 02A8     		add	r0, sp, #8
+  42:Src/app_fuseprogramming.c **** 
+  51              		.loc 1 42 25 view .LVU7
+  52 000a 0293     		str	r3, [sp, #8]
+  45:Src/app_fuseprogramming.c ****   if (HAL_BSEC_OTP_Read(&sBsecHandler, fuse_id, &data) == HAL_OK)
+  53              		.loc 1 45 3 is_stmt 1 view .LVU8
+  54              	.LVL0:
+  55              		.loc 1 46 3 view .LVU9
+  56              		.loc 1 46 7 is_stmt 0 view .LVU10
+  57 000c FFF7FEFF 		bl	HAL_BSEC_OTP_Read
+  58              	.LVL1:
+  59              		.loc 1 46 6 discriminator 1 view .LVU11
+  60 0010 0346     		mov	r3, r0
+  61 0012 E0B9     		cbnz	r0, .L2
+  47:Src/app_fuseprogramming.c ****   {
+  48:Src/app_fuseprogramming.c ****     /* Check if bit has already been set */
+  49:Src/app_fuseprogramming.c ****     bit_mask = BSEC_FUSE_MASK;
+  62              		.loc 1 49 5 is_stmt 1 view .LVU12
+  63              	.LVL2:
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccKpRZ3n.s 			page 3
+
+
+  64              		.loc 1 49 30 view .LVU13
+  50:Src/app_fuseprogramming.c ****     if ((data & bit_mask) != bit_mask)
+  65              		.loc 1 50 5 view .LVU14
+  66              		.loc 1 50 15 is_stmt 0 view .LVU15
+  67 0014 019A     		ldr	r2, [sp, #4]
+  68 0016 02F4C031 		and	r1, r2, #98304
+  69              		.loc 1 50 8 view .LVU16
+  70 001a B1F5C03F 		cmp	r1, #98304
+  71 001e 17D0     		beq	.L1
+  51:Src/app_fuseprogramming.c ****     {
+  52:Src/app_fuseprogramming.c ****       data |= bit_mask;
+  72              		.loc 1 52 7 is_stmt 1 view .LVU17
+  73              		.loc 1 52 12 is_stmt 0 view .LVU18
+  74 0020 42F4C032 		orr	r2, r2, #98304
+  53:Src/app_fuseprogramming.c ****       /* Bitwise programming of lower bits */
+  54:Src/app_fuseprogramming.c ****       if (HAL_BSEC_OTP_Program(&sBsecHandler, fuse_id, data, HAL_BSEC_NORMAL_PROG) == HAL_OK)
+  75              		.loc 1 54 11 view .LVU19
+  76 0024 7C21     		movs	r1, #124
+  77 0026 02A8     		add	r0, sp, #8
+  52:Src/app_fuseprogramming.c ****       /* Bitwise programming of lower bits */
+  78              		.loc 1 52 12 view .LVU20
+  79 0028 0192     		str	r2, [sp, #4]
+  80              		.loc 1 54 7 is_stmt 1 view .LVU21
+  81              		.loc 1 54 11 is_stmt 0 view .LVU22
+  82 002a FFF7FEFF 		bl	HAL_BSEC_OTP_Program
+  83              	.LVL3:
+  84              		.loc 1 54 10 discriminator 1 view .LVU23
+  85 002e 68B9     		cbnz	r0, .L4
+  55:Src/app_fuseprogramming.c ****       {
+  56:Src/app_fuseprogramming.c ****         /* Read lower bits to verify the correct programming */
+  57:Src/app_fuseprogramming.c ****         if (HAL_BSEC_OTP_Read(&sBsecHandler, fuse_id, &data) == HAL_OK)
+  86              		.loc 1 57 9 is_stmt 1 view .LVU24
+  87              		.loc 1 57 13 is_stmt 0 view .LVU25
+  88 0030 7C21     		movs	r1, #124
+  89 0032 01AA     		add	r2, sp, #4
+  90 0034 02A8     		add	r0, sp, #8
+  91 0036 FFF7FEFF 		bl	HAL_BSEC_OTP_Read
+  92              	.LVL4:
+  93              		.loc 1 57 12 discriminator 1 view .LVU26
+  94 003a 30B9     		cbnz	r0, .L5
+  58:Src/app_fuseprogramming.c ****         {
+  59:Src/app_fuseprogramming.c ****           if ((data & bit_mask) != bit_mask)
+  95              		.loc 1 59 11 is_stmt 1 view .LVU27
+  96              		.loc 1 59 21 is_stmt 0 view .LVU28
+  97 003c 019B     		ldr	r3, [sp, #4]
+  98 003e 03F4C033 		and	r3, r3, #98304
+  99              		.loc 1 59 14 view .LVU29
+ 100 0042 B3F5C03F 		cmp	r3, #98304
+ 101 0046 03D0     		beq	.L1
+ 102              	.L6:
+ 103 0048 FEE7     		b	.L6
+ 104              	.L5:
+ 105 004a FEE7     		b	.L5
+ 106              	.L4:
+ 107 004c FEE7     		b	.L4
+ 108              	.LVL5:
+ 109              	.L2:
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccKpRZ3n.s 			page 4
+
+
+ 110              		.loc 1 59 14 view .LVU30
+ 111 004e FEE7     		b	.L2
+ 112              	.LVL6:
+ 113              	.L1:
+  60:Src/app_fuseprogramming.c ****           {
+  61:Src/app_fuseprogramming.c ****             /* Error : Fuse programming not taken in account */
+  62:Src/app_fuseprogramming.c ****             ErrorHandler();
+  63:Src/app_fuseprogramming.c ****           }
+  64:Src/app_fuseprogramming.c ****         }
+  65:Src/app_fuseprogramming.c ****         else
+  66:Src/app_fuseprogramming.c ****         {
+  67:Src/app_fuseprogramming.c ****           /* Error : Fuse read unsuccessful */
+  68:Src/app_fuseprogramming.c ****           ErrorHandler();
+  69:Src/app_fuseprogramming.c ****         }
+  70:Src/app_fuseprogramming.c ****       }
+  71:Src/app_fuseprogramming.c ****       else
+  72:Src/app_fuseprogramming.c ****       {
+  73:Src/app_fuseprogramming.c ****         /* Error : Fuse programming unsuccessful */
+  74:Src/app_fuseprogramming.c ****         ErrorHandler();
+  75:Src/app_fuseprogramming.c ****       }
+  76:Src/app_fuseprogramming.c ****     }
+  77:Src/app_fuseprogramming.c ****     else
+  78:Src/app_fuseprogramming.c ****     {
+  79:Src/app_fuseprogramming.c **** 
+  80:Src/app_fuseprogramming.c ****     }
+  81:Src/app_fuseprogramming.c ****   }
+  82:Src/app_fuseprogramming.c ****   else
+  83:Src/app_fuseprogramming.c ****   {
+  84:Src/app_fuseprogramming.c ****     /* Error  : Fuse read unsuccessful */
+  85:Src/app_fuseprogramming.c ****     ErrorHandler();
+  86:Src/app_fuseprogramming.c ****   }
+  87:Src/app_fuseprogramming.c **** }
+ 114              		.loc 1 87 1 view .LVU31
+ 115 0050 05B0     		add	sp, sp, #20
+ 116              		.cfi_def_cfa_offset 4
+ 117              		@ sp needed
+ 118 0052 00BD     		pop	{pc}
+ 119              	.L19:
+ 120              		.align	2
+ 121              	.L18:
+ 122 0054 00900056 		.word	1442877440
+ 123              		.cfi_endproc
+ 124              	.LFE284:
+ 126              		.text
+ 127              	.Letext0:
+ 128              		.file 2 "D:\\STM32_CLI\\STM32CubeCLT_1.21.0\\GNU-tools-for-STM32\\bin\\../lib/gcc/arm-none-eabi/14
+ 129              		.file 3 "D:\\STM32_CLI\\STM32CubeCLT_1.21.0\\GNU-tools-for-STM32\\bin\\../lib/gcc/arm-none-eabi/14
+ 130              		.file 4 "STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Include/stm32n657xx.h"
+ 131              		.file 5 "STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_def.h"
+ 132              		.file 6 "STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_bsec.h"
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccKpRZ3n.s 			page 5
+
+
+DEFINED SYMBOLS
+                            *ABS*:00000000 app_fuseprogramming.c
+C:\Users\ssierra\AppData\Local\Temp\ccKpRZ3n.s:26     .text.Fuse_Programming:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccKpRZ3n.s:32     .text.Fuse_Programming:00000000 Fuse_Programming
+C:\Users\ssierra\AppData\Local\Temp\ccKpRZ3n.s:122    .text.Fuse_Programming:00000054 $d
+                           .group:00000000 wm4.0.06bd9e954689d0bd6323858278d5678e
+                           .group:00000000 wm4.stddef.h.39.811583f327f35b0df7808fda70b062a0
+                           .group:00000000 wm4.arm_cmse.h.103.a0d15a79c4c9a67da8d5831704d7248e
+                           .group:00000000 wm4.stm32n6xx.h.34.c523a1ffdf274a69e8802892c6776332
+                           .group:00000000 wm4.stm32n657xx.h.26.acd272cb67318cc1a4791ce2f0720ca6
+                           .group:00000000 wm4._newlib_version.h.4.0eb654b64686e2bd29646258853f6c22
+                           .group:00000000 wm4.features.h.33.d554620bb17bd3b714c3fb5c268772bc
+                           .group:00000000 wm4._default_types.h.15.247e5cd201eca3442cbf5404108c4935
+                           .group:00000000 wm4._intsup.h.10.48bafbb683905c4daa4565a85aeeb264
+                           .group:00000000 wm4._stdint.h.10.c24fa3af3bc1706662bb5593a907e841
+                           .group:00000000 wm4.stdint.h.23.d53047a68f4a85177f80b422d52785ed
+                           .group:00000000 wm4.cmsis_version.h.30.d128735bf87720f7436b74fefeb5043c
+                           .group:00000000 wm4.core_cm55.h.67.25006a3ce7048d64bcddd2996d5fac93
+                           .group:00000000 wm4.arm_acle.h.28.a0697f530ff2dbf8c463bef049b82760
+                           .group:00000000 wm4.cmsis_gcc.h.39.eba7438bc45fd1a6e6376b63ffe44436
+                           .group:00000000 wm4.cmsis_gcc_m.h.24.e590ec51aeda3a1242400351d73f5dce
+                           .group:00000000 wm4.core_cm55.h.213.0528f46a674315ef8d35c4477e230358
+                           .group:00000000 wm4.armv8m_mpu.h.24.bf28cc25bee30a7ff9d2f7a44a5e2230
+                           .group:00000000 wm4.armv8m_pmu.h.24.6ded195d2625055391fd378c0e1d2519
+                           .group:00000000 wm4.core_cm55.h.4477.396e822ef855bcfb932819ad48de1c4c
+                           .group:00000000 wm4.armv7m_cachel1.h.24.936dd92d6e204a8d0b17d5e4ea4a356e
+                           .group:00000000 wm4.stm32n657xx.h.575.78d331c417ec710388ced647138f735f
+                           .group:00000000 wm4.stm32n6xx.h.116.b4247d9785590e7c5ec9234ffb2153bf
+                           .group:00000000 wm4.stm32_hal_legacy.h.22.e62aae2fd3ae33360b6781c8a72e5b18
+                           .group:00000000 wm4.newlib.h.7.decd5b9657e2c5df625d9eac6e10520c
+                           .group:00000000 wm4.ieeefp.h.77.99029d7b8220a2cd73dd257e2bbe825d
+                           .group:00000000 wm4.config.h.224.10ee1ad185d877c6e334e6581faab44d
+                           .group:00000000 wm4._ansi.h.31.de524f58584151836e90d8620a16f8e8
+                           .group:00000000 wm4.cdefs.h.49.56fd742369e655e7e8a7e365e706e208
+                           .group:00000000 wm4._types.h.20.dd0d04dca3800a0d2a6129b87f3adbb2
+                           .group:00000000 wm4.stddef.h.173.4903093a50a8482cb062b176ea61fac3
+                           .group:00000000 wm4._types.h.127.3bdfe3ff8ea2d0985b03d9cbe93480e3
+                           .group:00000000 wm4.reent.h.18.25503cdc8b7e55dd0d6ea7b3e5af7a03
+                           .group:00000000 wm4.lock.h.2.1461d1fff82dffe8bfddc23307f6484f
+                           .group:00000000 wm4.reent.h.78.6d702f69a6d6435d2dbe915b10150b1a
+                           .group:00000000 wm4.math.h.13.47cfc34cae8a1153323939c4d32cf7c2
+                           .group:00000000 wm4.stm32n6xx_hal_def.h.63.3a8f01490e8852464e9fcb69092e9c75
+                           .group:00000000 wm4.stm32n6xx_hal_bsec.h.89.5ec211383079e2d29cdd7d864aa3da37
+
+UNDEFINED SYMBOLS
+HAL_BSEC_OTP_Read
+HAL_BSEC_OTP_Program

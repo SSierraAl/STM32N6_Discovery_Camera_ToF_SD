@@ -310,7 +310,7 @@ static int CAM_WaitNextFrameReady(uint32_t timeout_ms, uint32_t *elapsed_ms)
 
   while (g_frame_event_count == start_evt) {
     CAM_IspUpdate();
-    vTaskDelay(pdMS_TO_TICKS(1));
+    vTaskDelay(1);   /* 1 tick = 10 ms with configTICK_RATE_HZ=100 */
     if (HAL_GetTick() - t0 > timeout_ms) {
       if (elapsed_ms) *elapsed_ms = HAL_GetTick() - t0;
       return -1;

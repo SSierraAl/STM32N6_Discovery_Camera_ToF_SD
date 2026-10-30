@@ -174,8 +174,8 @@ int SD_Reinit(void)
 static int SD_WaitForReady(void)
 {
     uint32_t wait_ms = 0;
-    while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 5000) {
-        vTaskDelay(pdMS_TO_TICKS(1));
+    while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 500) {
+        vTaskDelay(1);   /* 1 tick = 10 ms with configTICK_RATE_HZ=100 */
         wait_ms++;
     }
     if (wait_ms >= 5000) {

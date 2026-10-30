@@ -82,6 +82,30 @@
 #include "queue.h"
 #include "semphr.h"
 
+
+/* ================================================================
+   SECTION 2.5: LOW-POWER TRACE PRINT MACROS
+   ================================================================
+   Conditional printf wrappers controlled by app_config.h flags.
+   All compile to nothing when LP_TRACE_ALL = 0.
+   ================================================================ */
+
+#if LP_TRACE_ALL
+/** Helper: print only if the given sub-flag is nonzero (runtime check). */
+#define LP_PRINT(flag, ...)  do { if ((flag)) printf(__VA_ARGS__); } while(0)
+/** Register modification trace: prints name @addr, before value -> after value. */
+#define LP_TRACE_REG(mod_name, addr, before, after)                    \
+    do {                                                                \
+        if (LP_TRACE_REGISTER_MODS)                                     \
+            printf("[REG] %-20s @0x%08lX  0x%08lX -> 0x%08lX\n",       \
+                   (mod_name), (unsigned long)(addr),                    \
+                   (unsigned long)(before), (unsigned long)(after));     \
+    } while(0)
+#else
+#define LP_PRINT(flag, ...)           ((void)0)
+#define LP_TRACE_REG(mod_name, addr, before, after)  ((void)0)
+#endif
+
 /* ================================================================
    SECTION 2: GLOBAL PERIPHERAL HANDLES
    ================================================================ */
@@ -152,6 +176,12 @@ static int   SD_ReadRawImage(uint8_t *img_buf, uint32_t *data_size_p);
 static void MX_TIM1_Init(void);
 static void MX_GPDMA1_Init(void);
 void        PeriphCommonClock_Config(void);
+
+/* ---- Low-Power Functions ---- */
+static void ETH_PowerDown_Disable(void);
+static void LP_DWT_Init(void);
+
+/* ---- External References ---- */
 
 /* ---- VL53L5CX ToF Sensor (I2C init stays in main.c for board-specific config) ---- */
 static void VL53L5CX_I2C_Init(void);
@@ -476,9 +506,249 @@ static void SystemClock_Config(void)
     if (HAL_RCCEx_PeriphCLKConfig(&RCC_PeriphCLKInitStruct) != HAL_OK) { while (1); }
 }
 
+/* ================================================================
+   SECTION 10.5: ETHERNET FULL POWER-DOWN (RGMII PHY + GPIO + CLOCK)
+   ================================================================ 
+
+   Powers down the RTL8211F Ethernet PHY and disables all associated
+   GPIO + clock resources.  Strategy:
+     1. Configure ETH1 main clock source to PLL2_P (IC6=125MHz, already on)
+     2. Enable all ETH1 AHB clocks for MDIO bus access
+     3. Temporarily configure MDIO (PA4) + MDC (PC1) as AF11
+     4. Try multiple PHY addresses to find the RTL8211F
+     5. Set IEEE 802.3 BMCR Power-Down bit (bit 11) on the PHY
+     6. Set ALL Ethernet RGMII GPIO -> ANALOG (High-Z, no pull)
+     7. Disable all ETH1 clocks
+   ================================================================ */
+
+#define ETH_PD_BMCR_REG    0x00U           /* Basic Mode Control Register */
+#define ETH_PD_BMCR_PDN    (1UL << 11)     /* Power Down bit */
+
+/* MDIO register helpers (direct reg access; HAL_ETH not compiled here) */
+static void ETH_PD_SetMDIOClockRange(ETH_TypeDef *eth)
+{
+    uint32_t hclk = HAL_RCC_GetHCLKFreq();
+    uint32_t tmp = eth->MACMDIOAR;
+    tmp &= ~ETH_MACMDIOAR_CR;
+    if      (hclk < 35000000U)   tmp |= ETH_MACMDIOAR_CR_DIV16;
+    else if (hclk < 60000000U)   tmp |= ETH_MACMDIOAR_CR_DIV26;
+    else if (hclk < 100000000U)  tmp |= ETH_MACMDIOAR_CR_DIV42;
+    else if (hclk < 150000000U)  tmp |= ETH_MACMDIOAR_CR_DIV62;
+    else if (hclk < 250000000U)  tmp |= ETH_MACMDIOAR_CR_DIV102;
+    else if (hclk < 300000000U)  tmp |= ETH_MACMDIOAR_CR_DIV124;
+    else                         tmp |= ETH_MACMDIOAR_CR_DIV204;
+    eth->MACMDIOAR = tmp;
+}
+
+static uint32_t ETH_PD_ReadPHYReg(ETH_TypeDef *eth, uint32_t phy_addr, uint32_t reg_addr)
+{
+    uint32_t tickstart;
+    uint32_t tmpreg;
+    if (READ_BIT(eth->MACMDIOAR, ETH_MACMDIOAR_GB) != 0U)
+        return 0xFFFFFFFFU;
+    tmpreg = eth->MACMDIOAR;
+    MODIFY_REG(tmpreg, ETH_MACMDIOAR_PA, (phy_addr << 21));
+    MODIFY_REG(tmpreg, ETH_MACMDIOAR_RDA, (reg_addr << 16));
+    MODIFY_REG(tmpreg, ETH_MACMDIOAR_GOC, (ETH_MACMDIOAR_GOC_1 | ETH_MACMDIOAR_GOC_0));
+    SET_BIT(tmpreg, ETH_MACMDIOAR_GB);
+    eth->MACMDIOAR = tmpreg;
+    tickstart = HAL_GetTick();
+    while (READ_BIT(eth->MACMDIOAR, ETH_MACMDIOAR_GB) != 0U)
+    {
+        if ((HAL_GetTick() - tickstart) > 1000U)
+            return 0xFFFFFFFFU;
+    }
+    return (uint32_t)(uint16_t)eth->MACMDIODR;
+}
+
+static void ETH_PD_WritePHYReg(ETH_TypeDef *eth, uint32_t phy_addr, uint32_t reg_addr, uint32_t value)
+{
+    uint32_t tickstart;
+    uint32_t tmpreg;
+    if (READ_BIT(eth->MACMDIOAR, ETH_MACMDIOAR_GB) != 0U)
+        return;
+    tmpreg = eth->MACMDIOAR;
+    MODIFY_REG(tmpreg, ETH_MACMDIOAR_PA, (phy_addr << 21));
+    MODIFY_REG(tmpreg, ETH_MACMDIOAR_RDA, (reg_addr << 16));
+    MODIFY_REG(tmpreg, ETH_MACMDIOAR_GOC, ETH_MACMDIOAR_GOC_0);
+    SET_BIT(tmpreg, ETH_MACMDIOAR_GB);
+    WRITE_REG(eth->MACMDIODR, (uint16_t)value);
+    tickstart = HAL_GetTick();
+    while (READ_BIT(eth->MACMDIOAR, ETH_MACMDIOAR_GB) != 0U)
+    {
+        if ((HAL_GetTick() - tickstart) > 1000U)
+            return;
+    }
+}
+
+static void ETH_PowerDown_Disable(void)
+{
+    ETH_TypeDef       *eth = ETH1;
+    GPIO_InitTypeDef   GPIO_InitStruct = {0};
+
+    /* ---- 1. Release ETH1 from reset (in case boot ROM left it asserted) ---- */
+    __HAL_RCC_ETH1_FORCE_RESET();
+    __HAL_RCC_ETH1_RELEASE_RESET();
+
+    /* ---- 2. Configure ETH1 clock tree for MDIO operation ----
+       ETH1CLKSEL  (bits 12-13) = 0 = HCLK (400 MHz, always running)
+       ETH1SEL     (bits 16-18) = 1 = RGMII (board uses RTL8211F with RGMII)
+       ETH1PTPSEL  (bits 0-1)   = 0 = HCLK
+       ETH1PTPDIV  (bits 4-7)   = 0 = divide by 1 */
+    {
+        uint32_t ccipr2_before = RCC->CCIPR2;
+        MODIFY_REG(RCC->CCIPR2, RCC_CCIPR2_ETH1CLKSEL, LL_RCC_ETH1_CLKSOURCE_HCLK);
+        MODIFY_REG(RCC->CCIPR2, RCC_CCIPR2_ETH1SEL,    LL_RCC_ETH1PHY_IF_RGMII);
+        MODIFY_REG(RCC->CCIPR2, RCC_CCIPR2_ETH1PTPDIV, 0U);
+        LP_TRACE_REG("RCC->CCIPR2", &RCC->CCIPR2, ccipr2_before, RCC->CCIPR2);
+    }
+
+    /* ---- 3. Enable ETH1 peripheral clocks ---- */
+    __HAL_RCC_ETH1_CLK_ENABLE();
+    __HAL_RCC_ETH1MAC_CLK_ENABLE();
+    __HAL_RCC_ETH1TX_CLK_ENABLE();
+    __HAL_RCC_ETH1RX_CLK_ENABLE();
+
+    __HAL_RCC_GPIOA_CLK_ENABLE();
+    __HAL_RCC_GPIOB_CLK_ENABLE();
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    __HAL_RCC_GPIOG_CLK_ENABLE();
+
+    /* ---- 4. Configure MDIO (PA4) + MDC (PC1) as AF11 (ETH1) ---- */
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_PULLUP;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
+    GPIO_InitStruct.Alternate = GPIO_AF11_ETH1;
+    GPIO_InitStruct.Pin = GPIO_PIN_4;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    GPIO_InitStruct.Pin = GPIO_PIN_1;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
+    /* ---- 5. Set MDIO clock range (HCLK ~400MHz -> DIV124 -> ~3.2 MHz) ---- */
+    ETH_PD_SetMDIOClockRange(eth);
+
+    /* ---- 6. Power-down the RTL8211F PHY via MDIO ----
+       RTL8211F on STM32N6570-DK typically at PHY address 0x00.
+       Try common addresses. A valid BMCR is non-zero (default 0x1000).
+       If BMCR reads 0x0000, the PHY didn't respond — also try reading
+       PHY ID registers (reg 2 = PHY ID1) for better detection. */
+    const uint32_t phy_tbl[] = {0x00U, 0x01U, 0x1FU, 0x02U, 0x03U};
+    int found = 0;
+    for (int i = 0; i < (int)(sizeof(phy_tbl)/sizeof(phy_tbl[0])); i++)
+    {
+        uint32_t reg = ETH_PD_ReadPHYReg(eth, phy_tbl[i], ETH_PD_BMCR_REG);
+        if (reg != 0xFFFFFFFFU && reg != 0x0000U)
+        {
+            LP_PRINT(LP_TRACE_ETH_POWERDOWN,
+                     "[ETH] PHY found at addr 0x%02lX  BMCR=0x%04lX  -> powering down\n",
+                     (unsigned long)phy_tbl[i], (unsigned long)reg);
+            ETH_PD_WritePHYReg(eth, phy_tbl[i], ETH_PD_BMCR_REG, reg | ETH_PD_BMCR_PDN);
+            found = 1;
+            break;
+        }
+    }
+    /* Fallback: try reading PHY ID register (reg 2 = PHY ID1) at addr 0x00
+       RTL8211F PHY ID1 = 0x001C */
+    if (!found)
+    {
+        uint32_t id = ETH_PD_ReadPHYReg(eth, 0x00U, 0x02U);
+        if (id != 0xFFFFFFFFU && id != 0x0000U)
+        {
+            LP_PRINT(LP_TRACE_ETH_POWERDOWN,
+                     "[ETH] PHY found via ID reg at addr 0x00  ID=0x%04lX  -> powering down\n",
+                     (unsigned long)id);
+            /* Read BMCR again and force power-down */
+            uint32_t bmcr = ETH_PD_ReadPHYReg(eth, 0x00U, ETH_PD_BMCR_REG);
+            ETH_PD_WritePHYReg(eth, 0x00U, ETH_PD_BMCR_REG, bmcr | ETH_PD_BMCR_PDN);
+            found = 1;
+        }
+    }
+    if (!found)
+        LP_PRINT(LP_TRACE_ETH_POWERDOWN, "[ETH] WARNING: No PHY responded on MDIO bus!\n");
+
+    /* ---- 7. Ethernet RGMII GPIO pins -> ANALOG (High-Z, no pull) ---- */
+    GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = 0;
+
+    GPIO_InitStruct.Pin = GPIO_PIN_0 | GPIO_PIN_1 | GPIO_PIN_2 | GPIO_PIN_3 |
+                         GPIO_PIN_4 | GPIO_PIN_7 | GPIO_PIN_8;
+    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    LP_PRINT(LP_TRACE_GPIO_ISOLATION, "[ETH] GPIO-A  (PA0-PA4,PA7,PA8) -> ANALOG\n");
+
+    GPIO_InitStruct.Pin = GPIO_PIN_5 | GPIO_PIN_6;
+    HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+    LP_PRINT(LP_TRACE_GPIO_ISOLATION, "[ETH] GPIO-B  (PB5,PB6)      -> ANALOG\n");
+
+    GPIO_InitStruct.Pin = GPIO_PIN_1 | GPIO_PIN_8;
+    HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+    LP_PRINT(LP_TRACE_GPIO_ISOLATION, "[ETH] GPIO-C  (PC1,PC8)      -> ANALOG\n");
+
+    GPIO_InitStruct.Pin = GPIO_PIN_11 | GPIO_PIN_13 | GPIO_PIN_14;
+    HAL_GPIO_Init(GPIOG, &GPIO_InitStruct);
+    LP_PRINT(LP_TRACE_GPIO_ISOLATION, "[ETH] GPIO-G  (PG11,PG13,PG14) -> ANALOG\n");
+
+    LP_PRINT(LP_TRACE_ETH_POWERDOWN, "[ETH] All Ethernet GPIOs isolated, clocks disabled\n");
+
+
+    /* ---- 7. Disable ETH1 clocks ---- */
+    __HAL_RCC_ETH1_CLK_DISABLE();
+    __HAL_RCC_ETH1MAC_CLK_DISABLE();
+    __HAL_RCC_ETH1TX_CLK_DISABLE();
+    __HAL_RCC_ETH1RX_CLK_DISABLE();
+}
+
 
 /* ================================================================
-   SECTION 11: DEBUG CONSOLE (UART)
+   SECTION 11: DWT CYCLE COUNTER INIT (for wake-up latency)
+   ================================================================
+   Initializes the DWT (Data Watchpoint and Trace) cycle counter.
+   Provides microsecond-resolution timing via DWT->CYCCNT.
+   Required by LP_TRACE_WAKEUP_LATENCY_US.
+   ================================================================ */
+static void LP_DWT_Init(void)
+{
+    /* Enable DWT and TRC (trace clock) in Debug Exception and Monitor Control */
+    CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+
+    /* Disable DWT cycle counter before programming */
+    DWT->CTRL &= ~DWT_CTRL_CYCCNTENA_Msk;
+
+    /* Reset the cycle counter */
+    DWT->CYCCNT = 0U;
+
+    /* Enable DWT cycle counter */
+    DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+
+    LP_PRINT(LP_TRACE_WAKEUP_LATENCY_US, "[LP] DWT cycle counter enabled (CPU freq = %lu Hz)\n",
+             (unsigned long)HAL_RCC_GetHCLKFreq());
+}
+
+
+/* ================================================================
+   SECTION 11.5: TICKLESS IDLE PRE/POST SLEEP HANDLERS
+   ================================================================
+   Called by FreeRTOS tickless idle before/after WFI sleep.
+   Kept simple — PLL gating was experimental and showed minimal gains.
+   ================================================================ */
+
+void LP_TicklessPreSleep(uint32_t xModifiableIdleTime)
+{
+    (void)xModifiableIdleTime;
+#if LP_ENABLE_DEBUG_GPIO
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_3, GPIO_PIN_SET);
+#endif
+}
+
+void LP_TicklessPostSleep(uint32_t xExpectedIdleTime)
+{
+    (void)xExpectedIdleTime;
+}
+
+
+/* ================================================================
+   SECTION 12: DEBUG CONSOLE (UART)
    ================================================================ */
 
 /**
@@ -550,9 +820,10 @@ static int SD_Benchmarks(void)
     st = HAL_SD_WriteBlocks(&hsd1, sd_wbuf, blk, SD_BENCH_BLOCKS, HAL_MAX_DELAY);
     t1 = HAL_GetTick();
 
-    if (st == HAL_OK && t1 > t0) {
-        speed = (float)SD_BENCH_BYTES / ((float)(t1 - t0) * 1000.0f);
-        printf("OK  %.2f MB/s  (%lu ms)\n", speed, (unsigned long)(t1 - t0));
+    if (st == HAL_OK) {
+        uint32_t dt = (t1 > t0) ? (t1 - t0) : 1;  /* sub-tick floor for speed calc */
+        speed = (float)SD_BENCH_BYTES / ((float)dt * 1000.0f);
+        printf("OK  %.2f MB/s  (%lu ms)\n", speed, (unsigned long)dt);
     } else {
         printf("FAIL HAL=0x%08lX STA=0x%08lX\n",
                (unsigned long)st, (unsigned long)SDMMC2->STA);
@@ -566,9 +837,10 @@ static int SD_Benchmarks(void)
     st = HAL_SD_ReadBlocks(&hsd1, sd_rbuf, blk, SD_BENCH_BLOCKS, HAL_MAX_DELAY);
     t1 = HAL_GetTick();
 
-    if (st == HAL_OK && t1 > t0) {
-        speed = (float)SD_BENCH_BYTES / ((float)(t1 - t0) * 1000.0f);
-        printf("OK  %.2f MB/s  (%lu ms)\n", speed, (unsigned long)(t1 - t0));
+    if (st == HAL_OK) {
+        uint32_t dt = (t1 > t0) ? (t1 - t0) : 1;  /* sub-tick floor for speed calc */
+        speed = (float)SD_BENCH_BYTES / ((float)dt * 1000.0f);
+        printf("OK  %.2f MB/s  (%lu ms)\n", speed, (unsigned long)dt);
         uint32_t errs = 0;
         for (i = 0; i < SD_BENCH_BYTES; i++)
             if (sd_rbuf[i] != sd_wbuf[i]) errs++;
@@ -710,8 +982,8 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size,
            process and update the card state machine. */
         {
             uint32_t wait_ms = 0;
-            while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 5000) {
-                vTaskDelay(pdMS_TO_TICKS(1));
+            while (HAL_SD_GetCardState(&hsd1) != HAL_SD_CARD_TRANSFER && wait_ms < 500) {
+                vTaskDelay(1);   /* 1 tick = 10 ms with configTICK_RATE_HZ=100 */
                 wait_ms++;
             }
             if (wait_ms >= 5000) {
@@ -1022,6 +1294,45 @@ static void main_thread_fct(void *arg)
     SystemClock_Config();
     vPortSetupTimerInterrupt();
     CONSOLE_Config();
+    printf("[INIT] System clock at %lu MHz, HCLK at %lu MHz\n",
+           (unsigned long)(HAL_RCC_GetSysClockFreq() / 1000000),
+           (unsigned long)(HAL_RCC_GetHCLKFreq() / 1000000));
+
+    /* ---- Ethernet PHY Power-Down (not used, save power) ---- */
+    ETH_PowerDown_Disable();
+
+    /* ---- DWT Cycle Counter (for wake-up latency & timing) ---- */
+    LP_DWT_Init();
+
+    /* ---- LCD Power-Down (unused display) ---- */
+#if LP_DISABLE_LCD
+    {
+        __HAL_RCC_GPIOQ_CLK_ENABLE();
+        GPIO_InitTypeDef gpio_lcd = {0};
+        gpio_lcd.Mode = GPIO_MODE_OUTPUT_PP;
+        gpio_lcd.Pull = GPIO_NOPULL;
+        gpio_lcd.Speed = GPIO_SPEED_FREQ_LOW;
+        gpio_lcd.Pin = GPIO_PIN_6 | GPIO_PIN_3;
+        HAL_GPIO_Init(GPIOQ, &gpio_lcd);
+        HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_6, GPIO_PIN_RESET);   /* Backlight off (PQ6) */
+        HAL_GPIO_WritePin(GPIOQ, GPIO_PIN_3, GPIO_PIN_RESET);   /* LCD_ONOFF off (PQ3) */
+        printf("[LP] LCD display powered down\n");
+    }
+#endif /* LP_DISABLE_LCD */
+
+#if LP_ENABLE_DEBUG_GPIO
+    /* Init PH3 (ARD D9) as output for low-power measurement scope probe */
+    __HAL_RCC_GPIOH_CLK_ENABLE();
+    GPIO_InitTypeDef gpio_lp = {0};
+    gpio_lp.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio_lp.Pull = GPIO_NOPULL;
+    gpio_lp.Speed = GPIO_SPEED_FREQ_LOW;
+    gpio_lp.Pin = GPIO_PIN_3;
+    HAL_GPIO_Init(GPIOH, &gpio_lp);
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_3, GPIO_PIN_RESET);
+    printf("[LP] Debug GPIO on PH3 initialized\n");
+#endif /* LP_ENABLE_DEBUG_GPIO */
+
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
     printf("[BUILD] KAN-36 tof-zones-v3 %s %s maxDet=%u\n",
 #else
@@ -1478,6 +1789,37 @@ void assert_failed(uint8_t *file, uint32_t line)
 }
 #endif
 
+/* ================================================================
+   SECTION 22: FREERTOS IDLE HOOK — LOW-POWER SLEEP
+   ================================================================
+
+   Called by FreeRTOS idle task when no other task is ready to run.
+   WFI stops the CPU clock until the next interrupt (SysTick,
+   GPIO EXTI, or peripheral IRQ).
+   ================================================================ */
+void vApplicationIdleHook(void)
+{
+#if LP_ENABLE_IDLE_WFI
+
+#if LP_ENABLE_DEBUG_GPIO
+    /* Pin HIGH = about to sleep (measure on scope) */
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_3, GPIO_PIN_SET);
+#endif
+
+    /* ---- CPU Sleep (WFI) — core clock stops, peripherals keep running ---- */
+    __WFI();
+
+#if LP_ENABLE_DEBUG_GPIO
+    /* Pin LOW = woke up */
+    HAL_GPIO_WritePin(GPIOH, GPIO_PIN_3, GPIO_PIN_RESET);
+#endif
+
+#else
+    /* LP_ENABLE_IDLE_WFI = 0: yield to other tasks (default FreeRTOS behavior) */
+    taskYIELD();
+#endif
+}
+
 
 /* ================================================================
    SECTION 23: DEBUG HELPER
@@ -1494,3 +1836,4 @@ void app_clean_invalidate_dbg(void)
 {
     SCB_CleanInvalidateDCache();
 }
+

@@ -70,10 +70,10 @@ uint32_t TIM4_Get_Value(void);
 #define configUSE_PREEMPTION                     1
 #define configSUPPORT_STATIC_ALLOCATION          1
 #define configSUPPORT_DYNAMIC_ALLOCATION         1
-#define configUSE_IDLE_HOOK                      0
+#define configUSE_IDLE_HOOK                      1
 #define configUSE_TICK_HOOK                      0
 #define configCPU_CLOCK_HZ                       ( SystemCoreClock )
-#define configTICK_RATE_HZ                       ((TickType_t)1000)
+#define configTICK_RATE_HZ                       ((TickType_t)1000)   /* 1 ms tick — tickless idle suppresses SysTick during long sleep */
 #define configMAX_PRIORITIES                     ( 56 )
 #define configMINIMAL_STACK_SIZE                 ((uint16_t)1024)
 #define configTOTAL_HEAP_SIZE                    ((size_t)10 * 1024)
@@ -108,6 +108,23 @@ uint32_t TIM4_Get_Value(void);
 #define configTIMER_TASK_PRIORITY                ( 2 )
 #define configTIMER_QUEUE_LENGTH                 10
 #define configTIMER_TASK_STACK_DEPTH             128
+
+/* Tickless idle (Step 1 low-power): suppress SysTick during long sleeps */
+#if __has_include("app_config.h")
+#include "app_config.h"
+#if LP_ENABLE_TICKLESS_IDLE
+#define configUSE_TICKLESS_IDLE                 1
+#define configEXPECTED_IDLE_TIME_BEFORE_SLEEP   2
+
+/* Pre/Post sleep processing for tickless idle.
+   Calls simple functions in main.c (debug GPIO toggle only when enabled).
+   Declared extern below. */
+#define configPRE_SLEEP_PROCESSING(x)           LP_TicklessPreSleep(x)
+#define configPOST_SLEEP_PROCESSING(x)          LP_TicklessPostSleep(x)
+void LP_TicklessPreSleep(uint32_t xModifiableIdleTime);
+void LP_TicklessPostSleep(uint32_t xExpectedIdleTime);
+#endif
+#endif
 
 
 #define configGENERATE_RUN_TIME_STATS            1

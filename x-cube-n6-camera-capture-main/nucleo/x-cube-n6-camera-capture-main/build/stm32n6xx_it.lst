@@ -1,0 +1,653 @@
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 1
+
+
+   1              		.arch armv8.1-m.main
+   2              		.fpu fpv5-d16
+   3              		.arch_extension dsp
+   4              		.arch_extension fp
+   5              		.arch_extension fp.dp
+   6              		.arch_extension mve
+   7              		.arch_extension mve.fp
+   8              		.eabi_attribute 5, "cortex-m55"
+   9              		.eabi_attribute 28, 1
+  10              		.eabi_attribute 20, 1
+  11              		.eabi_attribute 21, 1
+  12              		.eabi_attribute 23, 3
+  13              		.eabi_attribute 24, 1
+  14              		.eabi_attribute 25, 1
+  15              		.eabi_attribute 26, 1
+  16              		.eabi_attribute 30, 4
+  17              		.eabi_attribute 34, 1
+  18              		.eabi_attribute 38, 1
+  19              		.eabi_attribute 18, 4
+  20              		.file	"stm32n6xx_it.c"
+  21              		.text
+  22              	.Ltext0:
+  23              		.cfi_sections	.debug_frame
+  24              		.file 1 "Src/stm32n6xx_it.c"
+  25              		.section	.text.GPDMA1_Channel1_IRQHandler,"ax",%progbits
+  26              		.align	1
+  27              		.global	GPDMA1_Channel1_IRQHandler
+  28              		.syntax unified
+  29              		.thumb
+  30              		.thumb_func
+  32              	GPDMA1_Channel1_IRQHandler:
+  33              	.LFB884:
+   1:Src/stm32n6xx_it.c ****  /**
+   2:Src/stm32n6xx_it.c ****  ******************************************************************************
+   3:Src/stm32n6xx_it.c ****  * @file    stm32n6xx_it.c
+   4:Src/stm32n6xx_it.c ****  * @author  GPM Application Team
+   5:Src/stm32n6xx_it.c ****  *
+   6:Src/stm32n6xx_it.c ****  ******************************************************************************
+   7:Src/stm32n6xx_it.c ****  * @attention
+   8:Src/stm32n6xx_it.c ****  *
+   9:Src/stm32n6xx_it.c ****  * Copyright (c) 2023 STMicroelectronics.
+  10:Src/stm32n6xx_it.c ****  * All rights reserved.
+  11:Src/stm32n6xx_it.c ****  *
+  12:Src/stm32n6xx_it.c ****  * This software is licensed under terms that can be found in the LICENSE file
+  13:Src/stm32n6xx_it.c ****  * in the root directory of this software component.
+  14:Src/stm32n6xx_it.c ****  * If no LICENSE file comes with this software, it is provided AS-IS.
+  15:Src/stm32n6xx_it.c ****  *
+  16:Src/stm32n6xx_it.c ****  ******************************************************************************
+  17:Src/stm32n6xx_it.c ****  */
+  18:Src/stm32n6xx_it.c **** 
+  19:Src/stm32n6xx_it.c **** /* Includes ------------------------------------------------------------------*/
+  20:Src/stm32n6xx_it.c **** #include "stm32n6xx_hal.h"
+  21:Src/stm32n6xx_it.c **** #include "stm32n6xx_it.h"
+  22:Src/stm32n6xx_it.c **** 
+  23:Src/stm32n6xx_it.c **** #include "cmw_camera.h"
+  24:Src/stm32n6xx_it.c **** #include "uvcl.h"
+  25:Src/stm32n6xx_it.c **** 
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 2
+
+
+  26:Src/stm32n6xx_it.c **** 
+  27:Src/stm32n6xx_it.c **** 
+  28:Src/stm32n6xx_it.c **** extern DMA_HandleTypeDef handle_GPDMA1_Channel1;
+  29:Src/stm32n6xx_it.c **** extern TIM_HandleTypeDef htim1;
+  30:Src/stm32n6xx_it.c **** 
+  31:Src/stm32n6xx_it.c **** 
+  32:Src/stm32n6xx_it.c **** void GPDMA1_Channel1_IRQHandler(void)
+  33:Src/stm32n6xx_it.c **** {
+  34              		.loc 1 33 1 view -0
+  35              		.cfi_startproc
+  36              		@ args = 0, pretend = 0, frame = 0
+  37              		@ frame_needed = 0, uses_anonymous_args = 0
+  38              		@ link register save eliminated.
+  34:Src/stm32n6xx_it.c ****     HAL_DMA_IRQHandler(&handle_GPDMA1_Channel1);
+  39              		.loc 1 34 5 view .LVU1
+  40 0000 0148     		ldr	r0, .L2
+  41 0002 FFF7FEBF 		b	HAL_DMA_IRQHandler
+  42              	.LVL0:
+  43              	.L3:
+  44 0006 00BF     		.align	2
+  45              	.L2:
+  46 0008 00000000 		.word	handle_GPDMA1_Channel1
+  47              		.cfi_endproc
+  48              	.LFE884:
+  50              		.section	.text.TIM1_UP_IRQHandler,"ax",%progbits
+  51              		.align	1
+  52              		.global	TIM1_UP_IRQHandler
+  53              		.syntax unified
+  54              		.thumb
+  55              		.thumb_func
+  57              	TIM1_UP_IRQHandler:
+  58              	.LFB885:
+  35:Src/stm32n6xx_it.c **** }
+  36:Src/stm32n6xx_it.c **** /**
+  37:Src/stm32n6xx_it.c ****   * @brief TIM1 Capture/Compare IRQ handler (fires after DMA pulse train)
+  38:Src/stm32n6xx_it.c ****   *        This calls HAL_TIM_IRQHandler which eventually triggers
+  39:Src/stm32n6xx_it.c ****   *        HAL_TIM_PWM_PulseFinishedCallback.
+  40:Src/stm32n6xx_it.c ****   */
+  41:Src/stm32n6xx_it.c **** void TIM1_UP_IRQHandler(void)
+  42:Src/stm32n6xx_it.c **** {
+  59              		.loc 1 42 1 view -0
+  60              		.cfi_startproc
+  61              		@ args = 0, pretend = 0, frame = 0
+  62              		@ frame_needed = 0, uses_anonymous_args = 0
+  63              		@ link register save eliminated.
+  43:Src/stm32n6xx_it.c ****     HAL_TIM_IRQHandler(&htim1);
+  64              		.loc 1 43 5 view .LVU3
+  65 0000 0148     		ldr	r0, .L5
+  66 0002 FFF7FEBF 		b	HAL_TIM_IRQHandler
+  67              	.LVL1:
+  68              	.L6:
+  69 0006 00BF     		.align	2
+  70              	.L5:
+  71 0008 00000000 		.word	htim1
+  72              		.cfi_endproc
+  73              	.LFE885:
+  75              		.section	.text.TIM1_CC_IRQHandler,"ax",%progbits
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 3
+
+
+  76              		.align	1
+  77              		.global	TIM1_CC_IRQHandler
+  78              		.syntax unified
+  79              		.thumb
+  80              		.thumb_func
+  82              	TIM1_CC_IRQHandler:
+  83              	.LFB896:
+  84              		.cfi_startproc
+  44:Src/stm32n6xx_it.c **** }
+  45:Src/stm32n6xx_it.c **** 
+  46:Src/stm32n6xx_it.c **** void TIM1_CC_IRQHandler(void)
+  85              		.loc 1 46 6 view -0
+  86              		@ args = 0, pretend = 0, frame = 0
+  87              		@ frame_needed = 0, uses_anonymous_args = 0
+  88              		@ link register save eliminated.
+  89 0000 FFF7FEBF 		b	TIM1_UP_IRQHandler
+  90              		.cfi_endproc
+  91              	.LFE896:
+  93              		.section	.text.NMI_Handler,"ax",%progbits
+  94              		.align	1
+  95              		.global	NMI_Handler
+  96              		.syntax unified
+  97              		.thumb
+  98              		.thumb_func
+ 100              	NMI_Handler:
+ 101              	.LFB887:
+  47:Src/stm32n6xx_it.c **** {
+  48:Src/stm32n6xx_it.c ****     HAL_TIM_IRQHandler(&htim1);
+  49:Src/stm32n6xx_it.c **** }
+  50:Src/stm32n6xx_it.c **** 
+  51:Src/stm32n6xx_it.c **** /**
+  52:Src/stm32n6xx_it.c ****   * @brief   This function handles NMI exception.
+  53:Src/stm32n6xx_it.c ****   * @param  None
+  54:Src/stm32n6xx_it.c ****   * @retval None
+  55:Src/stm32n6xx_it.c ****   */
+  56:Src/stm32n6xx_it.c **** void NMI_Handler(void)
+  57:Src/stm32n6xx_it.c **** {
+ 102              		.loc 1 57 1 view -0
+ 103              		.cfi_startproc
+ 104              		@ args = 0, pretend = 0, frame = 0
+ 105              		@ frame_needed = 0, uses_anonymous_args = 0
+ 106              		@ link register save eliminated.
+  58:Src/stm32n6xx_it.c **** }
+ 107              		.loc 1 58 1 view .LVU6
+ 108 0000 7047     		bx	lr
+ 109              		.cfi_endproc
+ 110              	.LFE887:
+ 112              		.section	.rodata.MemManage_Handler.str1.1,"aMS",%progbits,1
+ 113              	.LC0:
+ 114 0000 5B464155 		.ascii	"[FAULT] MemManage Fault!\000"
+ 114      4C545D20 
+ 114      4D656D4D 
+ 114      616E6167 
+ 114      65204661 
+ 115              		.section	.text.MemManage_Handler,"ax",%progbits
+ 116              		.align	1
+ 117              		.global	MemManage_Handler
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 4
+
+
+ 118              		.syntax unified
+ 119              		.thumb
+ 120              		.thumb_func
+ 122              	MemManage_Handler:
+ 123              	.LFB888:
+  59:Src/stm32n6xx_it.c **** 
+  60:Src/stm32n6xx_it.c **** /**
+  61:Src/stm32n6xx_it.c ****   * @brief  This function handles Memory Manage exception.
+  62:Src/stm32n6xx_it.c ****   * @param  None
+  63:Src/stm32n6xx_it.c ****   * @retval None
+  64:Src/stm32n6xx_it.c ****   */
+  65:Src/stm32n6xx_it.c **** void MemManage_Handler(void)
+  66:Src/stm32n6xx_it.c **** {
+ 124              		.loc 1 66 1 view -0
+ 125              		.cfi_startproc
+ 126              		@ Volatile: function does not return.
+ 127              		@ args = 0, pretend = 0, frame = 0
+ 128              		@ frame_needed = 0, uses_anonymous_args = 0
+  67:Src/stm32n6xx_it.c ****   /* Go to infinite loop when Memory Manage exception occurs */
+  68:Src/stm32n6xx_it.c ****   printf("[FAULT] MemManage Fault!\n");
+ 129              		.loc 1 68 3 view .LVU8
+  66:Src/stm32n6xx_it.c ****   /* Go to infinite loop when Memory Manage exception occurs */
+ 130              		.loc 1 66 1 is_stmt 0 view .LVU9
+ 131 0000 08B5     		push	{r3, lr}
+ 132              		.cfi_def_cfa_offset 8
+ 133              		.cfi_offset 3, -8
+ 134              		.cfi_offset 14, -4
+ 135              		.loc 1 68 3 view .LVU10
+ 136 0002 0248     		ldr	r0, .L11
+ 137 0004 FFF7FEFF 		bl	puts
+ 138              	.LVL2:
+ 139              	.L10:
+  69:Src/stm32n6xx_it.c ****   while (1)
+ 140              		.loc 1 69 3 is_stmt 1 view .LVU11
+  70:Src/stm32n6xx_it.c ****   {
+  71:Src/stm32n6xx_it.c ****   }
+ 141              		.loc 1 71 3 view .LVU12
+  69:Src/stm32n6xx_it.c ****   while (1)
+ 142              		.loc 1 69 9 view .LVU13
+ 143 0008 FEE7     		b	.L10
+ 144              	.L12:
+ 145 000a 00BF     		.align	2
+ 146              	.L11:
+ 147 000c 00000000 		.word	.LC0
+ 148              		.cfi_endproc
+ 149              	.LFE888:
+ 151              		.section	.rodata.BusFault_Handler.str1.1,"aMS",%progbits,1
+ 152              	.LC1:
+ 153 0000 5B464155 		.ascii	"[FAULT] BusFault occurred!\000"
+ 153      4C545D20 
+ 153      42757346 
+ 153      61756C74 
+ 153      206F6363 
+ 154              		.section	.text.BusFault_Handler,"ax",%progbits
+ 155              		.align	1
+ 156              		.global	BusFault_Handler
+ 157              		.syntax unified
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 5
+
+
+ 158              		.thumb
+ 159              		.thumb_func
+ 161              	BusFault_Handler:
+ 162              	.LFB889:
+  72:Src/stm32n6xx_it.c **** }
+  73:Src/stm32n6xx_it.c **** 
+  74:Src/stm32n6xx_it.c **** /**
+  75:Src/stm32n6xx_it.c ****   * @brief  This function handles Bus Fault exception.
+  76:Src/stm32n6xx_it.c ****   * @param  None
+  77:Src/stm32n6xx_it.c ****   * @retval None
+  78:Src/stm32n6xx_it.c ****   */
+  79:Src/stm32n6xx_it.c **** void BusFault_Handler(void)
+  80:Src/stm32n6xx_it.c **** {
+ 163              		.loc 1 80 1 view -0
+ 164              		.cfi_startproc
+ 165              		@ Volatile: function does not return.
+ 166              		@ args = 0, pretend = 0, frame = 0
+ 167              		@ frame_needed = 0, uses_anonymous_args = 0
+  81:Src/stm32n6xx_it.c ****   /* Go to infinite loop when Bus Fault exception occurs */
+  82:Src/stm32n6xx_it.c ****   printf("[FAULT] BusFault occurred!\n");
+ 168              		.loc 1 82 3 view .LVU15
+  80:Src/stm32n6xx_it.c ****   /* Go to infinite loop when Bus Fault exception occurs */
+ 169              		.loc 1 80 1 is_stmt 0 view .LVU16
+ 170 0000 08B5     		push	{r3, lr}
+ 171              		.cfi_def_cfa_offset 8
+ 172              		.cfi_offset 3, -8
+ 173              		.cfi_offset 14, -4
+ 174              		.loc 1 82 3 view .LVU17
+ 175 0002 0248     		ldr	r0, .L15
+ 176 0004 FFF7FEFF 		bl	puts
+ 177              	.LVL3:
+ 178              	.L14:
+  83:Src/stm32n6xx_it.c ****   while (1)
+ 179              		.loc 1 83 3 is_stmt 1 view .LVU18
+  84:Src/stm32n6xx_it.c ****   {
+  85:Src/stm32n6xx_it.c ****   }
+ 180              		.loc 1 85 3 view .LVU19
+  83:Src/stm32n6xx_it.c ****   while (1)
+ 181              		.loc 1 83 9 view .LVU20
+ 182 0008 FEE7     		b	.L14
+ 183              	.L16:
+ 184 000a 00BF     		.align	2
+ 185              	.L15:
+ 186 000c 00000000 		.word	.LC1
+ 187              		.cfi_endproc
+ 188              	.LFE889:
+ 190              		.section	.rodata.SecureFault_Handler.str1.1,"aMS",%progbits,1
+ 191              	.LC2:
+ 192 0000 5B464155 		.ascii	"[FAULT] Secure Fault occurred!\000"
+ 192      4C545D20 
+ 192      53656375 
+ 192      72652046 
+ 192      61756C74 
+ 193              		.section	.text.SecureFault_Handler,"ax",%progbits
+ 194              		.align	1
+ 195              		.global	SecureFault_Handler
+ 196              		.syntax unified
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 6
+
+
+ 197              		.thumb
+ 198              		.thumb_func
+ 200              	SecureFault_Handler:
+ 201              	.LFB890:
+  86:Src/stm32n6xx_it.c **** }
+  87:Src/stm32n6xx_it.c **** 
+  88:Src/stm32n6xx_it.c **** /**
+  89:Src/stm32n6xx_it.c ****   * @brief  This function handles Secure Fault exception.
+  90:Src/stm32n6xx_it.c ****   * @param  None
+  91:Src/stm32n6xx_it.c ****   * @retval None
+  92:Src/stm32n6xx_it.c ****   */
+  93:Src/stm32n6xx_it.c **** void SecureFault_Handler(void)
+  94:Src/stm32n6xx_it.c **** {
+ 202              		.loc 1 94 1 view -0
+ 203              		.cfi_startproc
+ 204              		@ Volatile: function does not return.
+ 205              		@ args = 0, pretend = 0, frame = 0
+ 206              		@ frame_needed = 0, uses_anonymous_args = 0
+  95:Src/stm32n6xx_it.c ****   /* Go to infinite loop when Secure Fault exception occurs */
+  96:Src/stm32n6xx_it.c ****   printf("[FAULT] Secure Fault occurred!\n");
+ 207              		.loc 1 96 3 view .LVU22
+  94:Src/stm32n6xx_it.c ****   /* Go to infinite loop when Secure Fault exception occurs */
+ 208              		.loc 1 94 1 is_stmt 0 view .LVU23
+ 209 0000 08B5     		push	{r3, lr}
+ 210              		.cfi_def_cfa_offset 8
+ 211              		.cfi_offset 3, -8
+ 212              		.cfi_offset 14, -4
+ 213              		.loc 1 96 3 view .LVU24
+ 214 0002 0248     		ldr	r0, .L19
+ 215 0004 FFF7FEFF 		bl	puts
+ 216              	.LVL4:
+ 217              	.L18:
+  97:Src/stm32n6xx_it.c ****   while (1)
+ 218              		.loc 1 97 3 is_stmt 1 view .LVU25
+  98:Src/stm32n6xx_it.c ****   {
+  99:Src/stm32n6xx_it.c ****   }
+ 219              		.loc 1 99 3 view .LVU26
+  97:Src/stm32n6xx_it.c ****   while (1)
+ 220              		.loc 1 97 9 view .LVU27
+ 221 0008 FEE7     		b	.L18
+ 222              	.L20:
+ 223 000a 00BF     		.align	2
+ 224              	.L19:
+ 225 000c 00000000 		.word	.LC2
+ 226              		.cfi_endproc
+ 227              	.LFE890:
+ 229              		.section	.text.DebugMon_Handler,"ax",%progbits
+ 230              		.align	1
+ 231              		.global	DebugMon_Handler
+ 232              		.syntax unified
+ 233              		.thumb
+ 234              		.thumb_func
+ 236              	DebugMon_Handler:
+ 237              	.LFB891:
+ 100:Src/stm32n6xx_it.c **** }
+ 101:Src/stm32n6xx_it.c **** 
+ 102:Src/stm32n6xx_it.c **** /**
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 7
+
+
+ 103:Src/stm32n6xx_it.c ****   * @brief  This function handles Debug Monitor exception.
+ 104:Src/stm32n6xx_it.c ****   * @param  None
+ 105:Src/stm32n6xx_it.c ****   * @retval None
+ 106:Src/stm32n6xx_it.c ****   */
+ 107:Src/stm32n6xx_it.c **** void DebugMon_Handler(void)
+ 108:Src/stm32n6xx_it.c **** {
+ 238              		.loc 1 108 1 view -0
+ 239              		.cfi_startproc
+ 240              		@ Volatile: function does not return.
+ 241              		@ args = 0, pretend = 0, frame = 0
+ 242              		@ frame_needed = 0, uses_anonymous_args = 0
+ 243              		@ link register save eliminated.
+ 244              	.L22:
+ 109:Src/stm32n6xx_it.c ****   while (1)
+ 245              		.loc 1 109 3 view .LVU29
+ 110:Src/stm32n6xx_it.c ****   {
+ 111:Src/stm32n6xx_it.c ****   }
+ 246              		.loc 1 111 3 view .LVU30
+ 109:Src/stm32n6xx_it.c ****   while (1)
+ 247              		.loc 1 109 9 view .LVU31
+ 248 0000 FEE7     		b	.L22
+ 249              		.cfi_endproc
+ 250              	.LFE891:
+ 252              		.section	.text.CSI_IRQHandler,"ax",%progbits
+ 253              		.align	1
+ 254              		.global	CSI_IRQHandler
+ 255              		.syntax unified
+ 256              		.thumb
+ 257              		.thumb_func
+ 259              	CSI_IRQHandler:
+ 260              	.LFB892:
+ 112:Src/stm32n6xx_it.c **** }
+ 113:Src/stm32n6xx_it.c **** 
+ 114:Src/stm32n6xx_it.c **** /******************************************************************************/
+ 115:Src/stm32n6xx_it.c **** /*                 STM32N6xx Peripherals Interrupt Handlers                   */
+ 116:Src/stm32n6xx_it.c **** /*  Add here the Interrupt Handler for the used peripheral(s) (PPP), for the  */
+ 117:Src/stm32n6xx_it.c **** /*  available peripheral interrupt handler's name please refer to the startup */
+ 118:Src/stm32n6xx_it.c **** /*  file (startup_stm32n6xx.s).                                               */
+ 119:Src/stm32n6xx_it.c **** /******************************************************************************/
+ 120:Src/stm32n6xx_it.c **** 
+ 121:Src/stm32n6xx_it.c **** void CSI_IRQHandler(void)
+ 122:Src/stm32n6xx_it.c **** {
+ 261              		.loc 1 122 1 view -0
+ 262              		.cfi_startproc
+ 263              		@ args = 0, pretend = 0, frame = 0
+ 264              		@ frame_needed = 0, uses_anonymous_args = 0
+ 123:Src/stm32n6xx_it.c ****   HAL_DCMIPP_CSI_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());
+ 265              		.loc 1 123 3 view .LVU33
+ 122:Src/stm32n6xx_it.c ****   HAL_DCMIPP_CSI_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());
+ 266              		.loc 1 122 1 is_stmt 0 view .LVU34
+ 267 0000 08B5     		push	{r3, lr}
+ 268              		.cfi_def_cfa_offset 8
+ 269              		.cfi_offset 3, -8
+ 270              		.cfi_offset 14, -4
+ 271              		.loc 1 123 3 view .LVU35
+ 272 0002 FFF7FEFF 		bl	CMW_CAMERA_GetDCMIPPHandle
+ 273              	.LVL5:
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 8
+
+
+ 124:Src/stm32n6xx_it.c **** }
+ 274              		.loc 1 124 1 view .LVU36
+ 275 0006 BDE80840 		pop	{r3, lr}
+ 276              		.cfi_restore 14
+ 277              		.cfi_restore 3
+ 278              		.cfi_def_cfa_offset 0
+ 123:Src/stm32n6xx_it.c ****   HAL_DCMIPP_CSI_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());
+ 279              		.loc 1 123 3 discriminator 1 view .LVU37
+ 280 000a FFF7FEBF 		b	HAL_DCMIPP_CSI_IRQHandler
+ 281              	.LVL6:
+ 282              		.cfi_endproc
+ 283              	.LFE892:
+ 285              		.section	.text.DCMIPP_IRQHandler,"ax",%progbits
+ 286              		.align	1
+ 287              		.global	DCMIPP_IRQHandler
+ 288              		.syntax unified
+ 289              		.thumb
+ 290              		.thumb_func
+ 292              	DCMIPP_IRQHandler:
+ 293              	.LFB893:
+ 125:Src/stm32n6xx_it.c **** 
+ 126:Src/stm32n6xx_it.c **** void DCMIPP_IRQHandler(void)
+ 127:Src/stm32n6xx_it.c **** {
+ 294              		.loc 1 127 1 is_stmt 1 view -0
+ 295              		.cfi_startproc
+ 296              		@ args = 0, pretend = 0, frame = 0
+ 297              		@ frame_needed = 0, uses_anonymous_args = 0
+ 128:Src/stm32n6xx_it.c ****   HAL_DCMIPP_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());
+ 298              		.loc 1 128 3 view .LVU39
+ 127:Src/stm32n6xx_it.c ****   HAL_DCMIPP_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());
+ 299              		.loc 1 127 1 is_stmt 0 view .LVU40
+ 300 0000 08B5     		push	{r3, lr}
+ 301              		.cfi_def_cfa_offset 8
+ 302              		.cfi_offset 3, -8
+ 303              		.cfi_offset 14, -4
+ 304              		.loc 1 128 3 view .LVU41
+ 305 0002 FFF7FEFF 		bl	CMW_CAMERA_GetDCMIPPHandle
+ 306              	.LVL7:
+ 129:Src/stm32n6xx_it.c **** }
+ 307              		.loc 1 129 1 view .LVU42
+ 308 0006 BDE80840 		pop	{r3, lr}
+ 309              		.cfi_restore 14
+ 310              		.cfi_restore 3
+ 311              		.cfi_def_cfa_offset 0
+ 128:Src/stm32n6xx_it.c ****   HAL_DCMIPP_IRQHandler(CMW_CAMERA_GetDCMIPPHandle());
+ 312              		.loc 1 128 3 discriminator 1 view .LVU43
+ 313 000a FFF7FEBF 		b	HAL_DCMIPP_IRQHandler
+ 314              	.LVL8:
+ 315              		.cfi_endproc
+ 316              	.LFE893:
+ 318              		.section	.text.USB1_OTG_HS_IRQHandler,"ax",%progbits
+ 319              		.align	1
+ 320              		.global	USB1_OTG_HS_IRQHandler
+ 321              		.syntax unified
+ 322              		.thumb
+ 323              		.thumb_func
+ 325              	USB1_OTG_HS_IRQHandler:
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 9
+
+
+ 326              	.LFB894:
+ 130:Src/stm32n6xx_it.c **** 
+ 131:Src/stm32n6xx_it.c **** void USB1_OTG_HS_IRQHandler(void)
+ 132:Src/stm32n6xx_it.c **** {
+ 327              		.loc 1 132 1 is_stmt 1 view -0
+ 328              		.cfi_startproc
+ 329              		@ args = 0, pretend = 0, frame = 0
+ 330              		@ frame_needed = 0, uses_anonymous_args = 0
+ 331              		@ link register save eliminated.
+ 133:Src/stm32n6xx_it.c ****   UVCL_IRQHandler();
+ 332              		.loc 1 133 3 view .LVU45
+ 333 0000 FFF7FEBF 		b	UVCL_IRQHandler
+ 334              	.LVL9:
+ 335              		.cfi_endproc
+ 336              	.LFE894:
+ 338              		.text
+ 339              	.Letext0:
+ 340              		.file 2 "D:\\STM32_CLI\\STM32CubeCLT_1.21.0\\GNU-tools-for-STM32\\bin\\../lib/gcc/arm-none-eabi/14
+ 341              		.file 3 "D:\\STM32_CLI\\STM32CubeCLT_1.21.0\\GNU-tools-for-STM32\\bin\\../lib/gcc/arm-none-eabi/14
+ 342              		.file 4 "STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Include/stm32n657xx.h"
+ 343              		.file 5 "STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_def.h"
+ 344              		.file 6 "STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dma.h"
+ 345              		.file 7 "STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dma_ex.h"
+ 346              		.file 8 "STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_dcmipp.h"
+ 347              		.file 9 "STM32Cube_FW_N6/Drivers/STM32N6xx_HAL_Driver/Inc/stm32n6xx_hal_tim.h"
+ 348              		.file 10 "Lib/Camera_Middleware/cmw_camera.h"
+ 349              		.file 11 "Lib/uvcl/Inc/uvcl.h"
+ 350              		.file 12 "<built-in>"
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 10
+
+
+DEFINED SYMBOLS
+                            *ABS*:00000000 stm32n6xx_it.c
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:26     .text.GPDMA1_Channel1_IRQHandler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:32     .text.GPDMA1_Channel1_IRQHandler:00000000 GPDMA1_Channel1_IRQHandler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:46     .text.GPDMA1_Channel1_IRQHandler:00000008 $d
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:51     .text.TIM1_UP_IRQHandler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:57     .text.TIM1_UP_IRQHandler:00000000 TIM1_UP_IRQHandler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:71     .text.TIM1_UP_IRQHandler:00000008 $d
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:76     .text.TIM1_CC_IRQHandler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:82     .text.TIM1_CC_IRQHandler:00000000 TIM1_CC_IRQHandler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:94     .text.NMI_Handler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:100    .text.NMI_Handler:00000000 NMI_Handler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:116    .text.MemManage_Handler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:122    .text.MemManage_Handler:00000000 MemManage_Handler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:147    .text.MemManage_Handler:0000000c $d
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:155    .text.BusFault_Handler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:161    .text.BusFault_Handler:00000000 BusFault_Handler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:186    .text.BusFault_Handler:0000000c $d
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:194    .text.SecureFault_Handler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:200    .text.SecureFault_Handler:00000000 SecureFault_Handler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:225    .text.SecureFault_Handler:0000000c $d
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:230    .text.DebugMon_Handler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:236    .text.DebugMon_Handler:00000000 DebugMon_Handler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:253    .text.CSI_IRQHandler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:259    .text.CSI_IRQHandler:00000000 CSI_IRQHandler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:286    .text.DCMIPP_IRQHandler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:292    .text.DCMIPP_IRQHandler:00000000 DCMIPP_IRQHandler
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:319    .text.USB1_OTG_HS_IRQHandler:00000000 $t
+C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s:325    .text.USB1_OTG_HS_IRQHandler:00000000 USB1_OTG_HS_IRQHandler
+                           .group:00000000 wm4.0.06bd9e954689d0bd6323858278d5678e
+                           .group:00000000 wm4.stm32n6xx_hal_conf.h.23.deb2d5fcb940ea0971b8a91d7c28a156
+                           .group:00000000 wm4.stddef.h.39.811583f327f35b0df7808fda70b062a0
+                           .group:00000000 wm4.arm_cmse.h.103.a0d15a79c4c9a67da8d5831704d7248e
+                           .group:00000000 wm4.stm32n6xx.h.34.c523a1ffdf274a69e8802892c6776332
+                           .group:00000000 wm4.stm32n657xx.h.26.acd272cb67318cc1a4791ce2f0720ca6
+                           .group:00000000 wm4._newlib_version.h.4.0eb654b64686e2bd29646258853f6c22
+                           .group:00000000 wm4.features.h.33.d554620bb17bd3b714c3fb5c268772bc
+                           .group:00000000 wm4._default_types.h.15.247e5cd201eca3442cbf5404108c4935
+                           .group:00000000 wm4._intsup.h.10.48bafbb683905c4daa4565a85aeeb264
+                           .group:00000000 wm4._stdint.h.10.c24fa3af3bc1706662bb5593a907e841
+                           .group:00000000 wm4.stdint.h.23.d53047a68f4a85177f80b422d52785ed
+                           .group:00000000 wm4.cmsis_version.h.30.d128735bf87720f7436b74fefeb5043c
+                           .group:00000000 wm4.core_cm55.h.67.25006a3ce7048d64bcddd2996d5fac93
+                           .group:00000000 wm4.arm_acle.h.28.a0697f530ff2dbf8c463bef049b82760
+                           .group:00000000 wm4.cmsis_gcc.h.39.eba7438bc45fd1a6e6376b63ffe44436
+                           .group:00000000 wm4.cmsis_gcc_m.h.24.e590ec51aeda3a1242400351d73f5dce
+                           .group:00000000 wm4.core_cm55.h.213.0528f46a674315ef8d35c4477e230358
+                           .group:00000000 wm4.armv8m_mpu.h.24.bf28cc25bee30a7ff9d2f7a44a5e2230
+                           .group:00000000 wm4.armv8m_pmu.h.24.6ded195d2625055391fd378c0e1d2519
+                           .group:00000000 wm4.core_cm55.h.4477.396e822ef855bcfb932819ad48de1c4c
+                           .group:00000000 wm4.armv7m_cachel1.h.24.936dd92d6e204a8d0b17d5e4ea4a356e
+                           .group:00000000 wm4.stm32n657xx.h.575.78d331c417ec710388ced647138f735f
+                           .group:00000000 wm4.stm32n6xx.h.116.b4247d9785590e7c5ec9234ffb2153bf
+                           .group:00000000 wm4.stm32_hal_legacy.h.22.e62aae2fd3ae33360b6781c8a72e5b18
+                           .group:00000000 wm4.newlib.h.7.decd5b9657e2c5df625d9eac6e10520c
+                           .group:00000000 wm4.ieeefp.h.77.99029d7b8220a2cd73dd257e2bbe825d
+                           .group:00000000 wm4.config.h.224.10ee1ad185d877c6e334e6581faab44d
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 11
+
+
+                           .group:00000000 wm4._ansi.h.31.de524f58584151836e90d8620a16f8e8
+                           .group:00000000 wm4.cdefs.h.49.56fd742369e655e7e8a7e365e706e208
+                           .group:00000000 wm4._types.h.20.dd0d04dca3800a0d2a6129b87f3adbb2
+                           .group:00000000 wm4.stddef.h.173.4903093a50a8482cb062b176ea61fac3
+                           .group:00000000 wm4._types.h.127.3bdfe3ff8ea2d0985b03d9cbe93480e3
+                           .group:00000000 wm4.reent.h.18.25503cdc8b7e55dd0d6ea7b3e5af7a03
+                           .group:00000000 wm4.lock.h.2.1461d1fff82dffe8bfddc23307f6484f
+                           .group:00000000 wm4.reent.h.78.6d702f69a6d6435d2dbe915b10150b1a
+                           .group:00000000 wm4.math.h.13.47cfc34cae8a1153323939c4d32cf7c2
+                           .group:00000000 wm4.stm32n6xx_hal_def.h.63.3a8f01490e8852464e9fcb69092e9c75
+                           .group:00000000 wm4.stm32n6xx_ll_bus.h.38.2366a295ee4cdb04833997d3787fcd2d
+                           .group:00000000 wm4.stm32n6xx_ll_rcc.h.21.656bd5637db608589ad16ea57d39430c
+                           .group:00000000 wm4.stm32n6xx_hal_rcc.h.194.69b522b1afdf59a82d05a1f71efe03c7
+                           .group:00000000 wm4.stm32n6xx_hal_rcc_ex.h.21.cc6be0a7d168882a1a6f470236ba784c
+                           .group:00000000 wm4.stm32n6xx_hal_rcc.h.4361.4b490a4a19722e68c21f88cb8a774a30
+                           .group:00000000 wm4.stm32n6xx_hal_gpio.h.21.89d54af663b98eb8fc098192053f7eeb
+                           .group:00000000 wm4.stm32n6xx_hal_gpio_ex.h.22.f7e795fb05a69a19b87d946b47c8db8b
+                           .group:00000000 wm4.stm32n6xx_hal_rif.h.21.33f2c553a8a3fc14dca8c470b213ab19
+                           .group:00000000 wm4.stm32n6xx_hal_dma.h.21.61e48c5c2e8d25d22177834b232fe45c
+                           .group:00000000 wm4.stm32n6xx_hal_dma_ex.h.21.82f854ecdb6a463b06d0b4e5c217c368
+                           .group:00000000 wm4.stm32n6xx_hal_dma.h.1020.87e2180c009560b617c1f8208140c950
+                           .group:00000000 wm4.stm32n6xx_hal_cortex.h.21.f493623cc58f9454ab4eae41e395c5cc
+                           .group:00000000 wm4.stm32n6xx_hal_bsec.h.21.1ee89319140541f82434908b4267aa30
+                           .group:00000000 wm4.stm32n6xx_hal_dcmipp.h.21.e2b87dce83d7d722d696a597f6ac56bf
+                           .group:00000000 wm4.stm32n6xx_hal_exti.h.21.e0efb23591051684dc14f1f2431c6aab
+                           .group:00000000 wm4.stm32n6xx_hal_i2c.h.21.3f483626ff64c5bf027265bb2e1d1331
+                           .group:00000000 wm4.stm32n6xx_hal_i2c_ex.h.21.79e9196c22282cdaf6b4047893638c45
+                           .group:00000000 wm4.stm32n6xx_hal_i2c.h.741.1084702632703acc669e4282b3043372
+                           .group:00000000 wm4.stm32n6xx_hal_jpeg.h.21.4e5436a0ea160269c18247b1ecbf17b2
+                           .group:00000000 wm4.stm32n6xx_ll_usb.h.21.daaf86158046f2cf02166c495d637480
+                           .group:00000000 wm4.stm32n6xx_hal_pcd.h.155.27040aac6844effe2af8c180caf1dd2e
+                           .group:00000000 wm4.stm32n6xx_hal_pwr.h.21.cdb73e4869c3fed3fc84f901ec0e5f0a
+                           .group:00000000 wm4.stm32n6xx_hal_pwr_ex.h.21.1a673224a58b0c1e5fad8eeda6514208
+                           .group:00000000 wm4.stm32n6xx_ll_sdmmc.h.151.8f039a095b33c58a39c91b59df0d8e18
+                           .group:00000000 wm4.stm32n6xx_ll_dlyb.h.21.44a304d66812d8c9ea8a4c5abab32fde
+                           .group:00000000 wm4.stm32n6xx_hal_sd.h.71.b83d10af03e36c820c893444588bae05
+                           .group:00000000 wm4.stm32n6xx_hal_sd_ex.h.21.0294125df092827b72ace449508982b9
+                           .group:00000000 wm4.stm32n6xx_hal_spi.h.21.9f810303326e2d91749800e9911f8e4d
+                           .group:00000000 wm4.stm32n6xx_hal_spi.h.906.8ad9375f39dce09dc0a4db0025ee7a76
+                           .group:00000000 wm4.stm32n6xx_hal_tim.h.21.839dd2b2a70382fb2c44f8f293a84d5f
+                           .group:00000000 wm4.stm32n6xx_hal_tim_ex.h.21.e372d5ac63c13441211ea4ecbd353150
+                           .group:00000000 wm4.stm32n6xx_hal_uart.h.21.230f549bfa0d5ebfd77bfb311b2aca15
+                           .group:00000000 wm4.stm32n6xx_hal_uart_ex.h.21.a0d5511e1d0703b7b5278c8f5472b96d
+                           .group:00000000 wm4.stm32n6xx_hal_xspi.h.21.7fd922d3bdb871475cf18436a68935bb
+                           .group:00000000 wm4.stm32n6xx_hal.h.81.e79d59262ba173c33cf1d69281830d15
+                           .group:00000000 wm4.cmw_errno.h.21.91021ac9b2627a1ce6b8517d105715d1
+                           .group:00000000 wm4.stm32n6570_discovery_conf.h.21.f52c8202689527a3dc0d9c6cba9c0416
+                           .group:00000000 wm4.stm32n6570_discovery_errno.h.22.80e523b09444a11ebe4b6e24ae914f0e
+                           .group:00000000 wm4.stm32n6570_discovery_bus.h.62.3b5b2c6837f7adeb489604fa214cd371
+                           .group:00000000 wm4.isp_conf.h.21.bfb1d020517608810095aa56acf25d1e
+                           .group:00000000 wm4.stdio.h.27.3fc80220048df77954e38daec3bb9670
+                           .group:00000000 wm4.stddef.h.173.1cea4f16a943c8e875db6791959c3141
+                           .group:00000000 wm4.stdarg.h.34.3a23a216c0c293b3d2ea2e89281481e6
+                           .group:00000000 wm4.stdio.h.47.dc31ec4674d7bcb103c9f08809549f45
+                           .group:00000000 wm4.stdio.h.2.4aa87247282eca6c8f36f9de33d8df1a
+                           .group:00000000 wm4.stdio.h.87.a1e20d2651f9bfb66e51bfbe849db00a
+                           .group:00000000 wm4.stdlib.h.13.4ed386f5c1a80d71e72172885d946ef2
+ARM GAS  C:\Users\ssierra\AppData\Local\Temp\ccEWsdgn.s 			page 12
+
+
+                           .group:00000000 wm4.alloca.h.8.dfc0c703c47ec3e69746825b17d9e66d
+                           .group:00000000 wm4.stdlib.h.56.f4862cfbf4363a1db01842d5bdf72c18
+                           .group:00000000 wm4.string.h.8.c4b8571ce60dff2817f43fec8b86aecd
+                           .group:00000000 wm4.string.h.177.59a005921fa78485abc80a0267de5752
+                           .group:00000000 wm4.stdbool.h.29.c08aa3eec75cf5b9b5003883f43253f0
+                           .group:00000000 wm4.isp_core.h.110.8c4344a3506ac8fadc31ee17c3f6f7d7
+                           .group:00000000 wm4.cmw_camera.h.33.3e21b0797a1f24d8d61aeb33a948c5cd
+                           .group:00000000 wm4.uvcl.h.19.7bda141a09e83dc1cc474aa1d712303c
+
+UNDEFINED SYMBOLS
+HAL_DMA_IRQHandler
+handle_GPDMA1_Channel1
+HAL_TIM_IRQHandler
+htim1
+puts
+CMW_CAMERA_GetDCMIPPHandle
+HAL_DCMIPP_CSI_IRQHandler
+HAL_DCMIPP_IRQHandler
+UVCL_IRQHandler
