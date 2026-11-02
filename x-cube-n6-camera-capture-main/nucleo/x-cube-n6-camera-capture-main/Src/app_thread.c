@@ -64,6 +64,7 @@ volatile SensorState_t g_sensor_state = SENSOR_STATE_IDLE;
 static volatile int g_capture_busy = 0;
 static volatile int g_last_storage_rc = 0;
 static volatile int g_last_batch_frames = 0;
+static volatile int g_stage3_crops = 0;
 /* Camera task reserves IDs before dispatch; failed writes leave an ID gap. */
 static uint32_t g_next_snap_id = 0;
 static uint32_t g_sd_img_base_block;
@@ -1082,6 +1083,7 @@ void camera_task(void *arg)
                 if (g_detection_result.has_insect) {
                 {
                     uint16_t roi_x, roi_y, roi_w, roi_h;
+                    g_stage3_crops = 0;
                     int roi_ok = IF_CalcROI(&g_detection_result, &roi_x, &roi_y, &roi_w, &roi_h);
                     if (roi_ok != 0) {
                         roi_w = SNAP_WIDTH; roi_h = SNAP_HEIGHT; roi_x = 0; roi_y = 0;
@@ -1130,8 +1132,9 @@ void camera_task(void *arg)
                         /* Wait for storage to read crop before next iteration overwrites batch_buf */
                         xSemaphoreTake(storage_done_sem, pdMS_TO_TICKS(5000));
                     }
+                    }
                 }
-                }
+                /* Stage 3 set g_stage3_crops = rc when has_insect, else 0 */
                 printf("=============================================================\n\n");
                 g_capture_stage = CAPTURE_STAGE_DONE;
                 g_detection_result.has_insect = 0;
