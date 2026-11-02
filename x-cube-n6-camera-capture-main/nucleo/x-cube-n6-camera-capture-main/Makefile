@@ -67,6 +67,7 @@ C_SOURCES += Src/app_sdcard.c
 C_SOURCES += Src/i2c_arbiter.c
 C_SOURCES += Src/ds3231.c
 C_SOURCES += Src/ds3231_calendar.c
+C_SOURCES += Src/image_filter.c
 
 # ASM sources
 ASM_SOURCES =
@@ -135,6 +136,7 @@ C_DEFS += -DTX_MAX_PARALLEL_NETWORKS=1
 # C includes
 # Patched files
 C_INCLUDES += -IInc
+C_INCLUDES += -ISTM32Cube_FW_N6/Drivers/VL53L5CX_ULD_API/inc
 
 
 ASFLAGS = $(MCU) $(AS_DEFS) $(AS_INCLUDES) $(OPT) -Wall -fstack-usage -fdata-sections -ffunction-sections -fcyclomatic-complexity

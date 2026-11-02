@@ -241,7 +241,7 @@
      
      Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
      With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
-#define CALLBACK_WARMUP_FRAMES   8 //11 is working limit 2    /* Frames to discard after wake (callback-based) */
+#define CALLBACK_WARMUP_FRAMES   12   /* Frames to discard after wake (callback-based) */
 #define CALLBACK_FRAMES          2   /* Number of frames to capture per trigger */
 #define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
 

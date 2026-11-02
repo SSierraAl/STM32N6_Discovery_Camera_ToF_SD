@@ -218,4 +218,48 @@ void CAM_CountVsyncFrame(void);
 void CAM_ResetFrameCounter(int wait_frames);
 uint32_t CAM_GetFrameCount(void);
 
+/* ================================================================
+   MULTI-RESOLUTION / ROI API  (Stage 1 + Stage 3)
+   ================================================================ */
+
+/**
+ * @brief  Multi-byte register write to IMX335 via I2C (16-bit address).
+ * @param  reg    16-bit register address (e.g. 0x3074)
+ * @param  data   Pointer to data bytes (little-endian)
+ * @param  len    Number of bytes to write (1..4)
+ * @return 0 on success, -1 on error
+ */
+int CAM_WriteSensorRegMulti(uint16_t reg, const uint8_t *data, uint16_t len);
+
+/**
+ * @brief  Reconfigure IMX335 output window via AREA3 registers.
+ *         Sequence: STANDBY → HOLD → write AREA3 + VMAX + SHUTTER → clear HOLD → STREAMING.
+ *         After this call, the sensor outputs only (width × height) pixels.
+ *         Caller must re-init DCMIPP with matching dimensions.
+ *
+ * @param  x_start  Window X start (0–2591, even)
+ * @param  y_start  Window Y start (0–1943, even)
+ * @param  width    Window width (16–2592, even)
+ * @param  height   Window height (4–1944, even)
+ * @return 0 on success, -1 on error
+ */
+int CAM_SetSensorROI(uint16_t x_start, uint16_t y_start,
+                     uint16_t width, uint16_t height);
+
+/**
+ * @brief  Convenience: set sensor to full-frame output (2592×1944).
+ *         Equivalent to CAM_SetSensorROI(0, 0, 2592, 1944).
+ */
+int CAM_SetFullFrame(void);
+
+/**
+ * @brief  Stage 3 AREA3 ROI capture.
+ *         Sensor enters standby → AREA3 → DCMIPP init → warmup → stop →
+ *         full-frame → standby. Buffer must hold roi_w*roi_h*2 bytes.
+ *         Returns 0 on success, -1 on error.
+ */
+int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
+                   uint16_t roi_x, uint16_t roi_y,
+                   uint16_t roi_w, uint16_t roi_h);
+
 #endif /* APP_CAM_H */

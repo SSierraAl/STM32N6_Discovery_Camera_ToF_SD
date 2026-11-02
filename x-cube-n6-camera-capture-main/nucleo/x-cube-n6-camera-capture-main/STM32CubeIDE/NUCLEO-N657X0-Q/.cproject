@@ -75,6 +75,7 @@
 									<listOptionValue builtIn="false" value="../../../Lib/uvcl/Src/usbx"/>
 									<listOptionValue builtIn="false" value="../../../Lib/uvcl/Inc"/>
 									<listOptionValue builtIn="false" value="../../../Lib/uvcl/Src"/>
+									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/Inc}&quot;"/>
 								</option>
 								<inputType id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.assembler.input.2095723728" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.assembler.input"/>
 							</tool>
@@ -127,6 +128,7 @@
 									<listOptionValue builtIn="false" value="../../../Lib/uvcl/Src/usbx"/>
 									<listOptionValue builtIn="false" value="../../../Lib/uvcl/Inc"/>
 									<listOptionValue builtIn="false" value="../../../Lib/uvcl/Src"/>
+									<listOptionValue builtIn="false" value="&quot;${workspace_loc:/${ProjName}/Inc}&quot;"/>
 								</option>
 								<option IS_BUILTIN_EMPTY="false" IS_VALUE_EMPTY="false" id="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.option.otherflags.315856049" name="Other flags" superClass="com.st.stm32cube.ide.mcu.gnu.managedbuild.tool.c.compiler.option.otherflags" useByScannerDiscovery="true" valueType="stringList">
 									<listOptionValue builtIn="false" value=""/>

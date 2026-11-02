@@ -15,6 +15,11 @@
 #include "stm32n6xx_hal.h"
 #include "stm32n6570_discovery.h"
 #include "main.h"
+#include "image_filter.h"
+#include "utils.h"
+
+/* Detection frame buffer (640x480 YUV422 = 614 KB) in PSRAM */
+static uint8_t detection_frame[IF_DETECT_FRAME_SZ] ALIGN_32 IN_PSRAM;
 
 /* Bound repeated camera activations in every detector mode. This includes the
    high-sensitivity 4x4 camera path: after the configured number of photos, a
@@ -71,6 +76,46 @@ static uint32_t g_debug_frame_count = 0;
 extern SD_HandleTypeDef hsd1;
 extern uint8_t sd_batch_buf[];
 PerfTimer_t g_perf_timer;
+
+/* ================================================================
+   MULTI-RESOLUTION CAPTURE STATE (Phase 3)
+   ================================================================ */
+typedef enum {
+    CAPTURE_STAGE_IDLE = 0,
+    CAPTURE_STAGE1_DETECT,       /* 640×480 downscale + image_filter */
+    CAPTURE_STAGE2_FULLFRAME,    /* 1296×972 full-frame save */
+    CAPTURE_STAGE3_ROI,          /* AREA3 ROI capture */
+    CAPTURE_STAGE_RESTORE,       /* Restore full-frame */
+    CAPTURE_STAGE_DONE,
+} CaptureStage_t;
+
+static volatile CaptureStage_t g_capture_stage = CAPTURE_STAGE_IDLE;
+static IF_Result_t g_detection_result;
+static int g_stage1_detected = 0;
+
+/* Software downscale: 1296×972 YUYV -> 640×480 YUYV (2× decimate + center crop)
+   1296/2 = 648, center-crop to 640 (offset 4 pixel pairs from left)
+   972/2  = 486, center-crop to 480 (offset 3 rows from top) */
+static void downscale_1296x972_to_640x480(const uint8_t *src, uint8_t *dst)
+{
+    int src_row_bytes = 1296 * 2;
+    int dst_row_bytes = 640 * 2;
+    printf("[MULTI] Downscale 1296x972 -> 640x480 (2x decimate + center crop)\n");
+    for (int r = 0; r < 480; r++) {
+        int src_r = r * 2 + 3;
+        for (int g = 0; g < 320; g++) {
+            int src_g = g + 4;
+            int si = src_r * src_row_bytes + src_g * 4;
+            int di = r * dst_row_bytes + g * 4;
+            dst[di + 0] = src[si + 0];
+            dst[di + 1] = src[si + 1];
+            dst[di + 2] = src[si + 2];
+            dst[di + 3] = src[si + 3];
+        }
+    }
+    SCB_InvalidateDCache_by_Addr((uint32_t *)dst, IF_DETECT_FRAME_SZ);
+    printf("[MULTI] Downscale done (%d bytes)\n", IF_DETECT_FRAME_SZ);
+}
 
 /* DS3231 gives UTC at one-second resolution. Mode 4 keeps that UTC anchor
    and replaces only capture_tick with the exact completion tick of each frame. */
@@ -911,6 +956,94 @@ void camera_task(void *arg)
                 printf("[CAM] Batch: %d frames captured\n", rc);
 #endif
 #endif
+
+                /* ================================================================
+                   STAGE 1: Multi-resolution object detection (Phase 3)
+                   Takes the first captured frame, downscales to 640×480, runs
+                   image_filter detection pipeline, prints comprehensive results.
+                   ================================================================ */
+                g_capture_stage = CAPTURE_STAGE1_DETECT;
+                printf("\n========== [MULTI] === STAGE 1: Low-Res Detection === ==========\n");
+                printf("[MULTI] Frame %dx%d YUV422 -> downscale -> IF_Process\n",
+                       SNAP_WIDTH, SNAP_HEIGHT);
+                uint32_t t_detect = HAL_GetTick();
+                downscale_1296x972_to_640x480(batch_buf, detection_frame);
+
+                /* Y-plane stats: verify camera data is real */
+                {
+                    uint32_t y_sum = 0;
+                    uint8_t y_min = 255, y_max = 0;
+                    int y_n = 0;
+                    for (int y = 0; y < IF_DETECT_H; y += 8) {
+                        for (int x = 0; x < IF_DETECT_W; x += 8) {
+                            uint8_t yv = detection_frame[y * IF_DETECT_W * 2 + x * 2];
+                            y_sum += yv; y_n++;
+                            if (yv < y_min) y_min = yv;
+                            if (yv > y_max) y_max = yv;
+                        }
+                    }
+                    printf("[MULTI] Y-plane (mean/min/max): %u / %u / %u\n",
+                           (unsigned)(y_sum / y_n), y_min, y_max);
+                }
+
+                /* Grid heatmap (80x60 cells, subsampled 4x -> 20x15 chars) */
+                {
+                    IF_Grid_t grid;
+                    IF_Downscale(detection_frame, &grid);
+                    uint32_t g_sum = 0;
+                    uint8_t g_min = 255, g_max = 0;
+                    for (int gy = 0; gy < IF_GRID_H; gy++) {
+                        for (int gx = 0; gx < IF_GRID_W; gx++) {
+                            uint8_t gv = grid.grid[gy][gx];
+                            g_sum += gv;
+                            if (gv < g_min) g_min = gv;
+                            if (gv > g_max) g_max = gv;
+                        }
+                    }
+                    printf("[MULTI] Grid 80x60 (mean/min/max): %u / %u / %u\n",
+                           (unsigned)(g_sum / (IF_GRID_H * IF_GRID_W)), g_min, g_max);
+                    printf("[MULTI] Heatmap ('.'=dark, '%%'=bright):\n");
+                    for (int gy = 0; gy < IF_GRID_H; gy += 4) {
+                        printf("[MULTI] ");
+                        for (int gx = 0; gx < IF_GRID_W; gx += 4) {
+                            uint32_t cs = 0; int cc = 0;
+                            for (int dy = 0; dy < 4 && gy+dy < IF_GRID_H; dy++)
+                                for (int dx = 0; dx < 4 && gx+dx < IF_GRID_W; dx++)
+                                    { cs += grid.grid[gy+dy][gx+dx]; cc++; }
+                            uint8_t a = (uint8_t)(cs / cc);
+                            putchar(a < 32 ? ' ' : a < 64 ? '.' : a < 96 ? ':' :
+                                    a < 128 ? '-' : a < 160 ? '=' : a < 192 ? '+' :
+                                    a < 224 ? '#' : '%');
+                        }
+                        putchar('\n');
+                    }
+                }
+
+                IF_Process(detection_frame, &g_detection_result);
+                uint32_t detect_ms = HAL_GetTick() - t_detect;
+                printf("[MULTI] Detection took %lu ms\n", (unsigned long)detect_ms);
+                printf("[MULTI] Result: has_insect=%s  hot_count=%u  strong=%u  bbox=(%u,%u) %ux%u  fallback=%u\n",
+                       g_detection_result.has_insect ? "YES" : "no",
+                       g_detection_result.hot_count,
+                       g_detection_result.hot_strong_count,
+                       g_detection_result.bbox_x, g_detection_result.bbox_y,
+                       g_detection_result.bbox_w, g_detection_result.bbox_h,
+                       g_detection_result.fallback);
+                if (g_detection_result.has_insect) {
+                    g_stage1_detected = 1;
+                    printf("[MULTI] >>> STAGE 1: INSECT DETECTED <<<\n");
+                } else {
+                    g_stage1_detected = 0;
+                    printf("[MULTI] STAGE 1: No insect detected (fallback: save full-frame)\n");
+                }
+
+                /* ---------------------------------------------------------------
+                   STAGE 2: Save batch frames to SD (read from batch_buf).
+                   Must happen BEFORE Stage 3 which REUSES batch_buf for AREA3.
+                   --------------------------------------------------------------- */
+                g_capture_stage = CAPTURE_STAGE2_FULLFRAME;
+                printf("[MULTI] >>> STAGE 2: Save %d batch frames (%ux%u)\n",
+                       rc, SNAP_WIDTH, SNAP_HEIGHT);
                 xSemaphoreGive(camera_ready_sem);
                 RTC_Stamp stamp = RTC_CaptureStamp();
                 uint32_t first_id = g_next_snap_id;
@@ -933,6 +1066,68 @@ void camera_task(void *arg)
 #endif
                     }
                 }
+
+                /* ---------------------------------------------------------------
+                   STAGE 3: AREA3 ROI capture — REUSES batch_buf (Stage 2 is done).
+                   When IF_CalcROI fails or the ROI exceeds batch_buf, compute the
+                   largest centered crop that fits in BATCH_BUF_SIZE (~1584x1584).
+                   --------------------------------------------------------------- */
+                if (g_detection_result.has_insect) {
+                    uint16_t roi_x, roi_y, roi_w, roi_h;
+                    int roi_ok = IF_CalcROI(&g_detection_result, &roi_x, &roi_y, &roi_w, &roi_h);
+                    uint32_t roi_sz = roi_ok == 0 ? (uint32_t)roi_w * roi_h * 2 : 0;
+                    if (roi_ok != 0 || roi_sz > BATCH_BUF_SIZE) {
+                        if (roi_ok != 0) {
+                            printf("[MULTI] >>> Stage 3: IF_CalcROI failed, fallback to max crop\n");
+                        } else {
+                            printf("[MULTI] >>> Stage 3: ROI %ux%u exceeds batch_buf, fallback to max crop\n", roi_w, roi_h);
+                        }
+                        uint32_t max_dim;
+                        {
+                            uint32_t area = BATCH_BUF_SIZE / 2;
+                            uint32_t s = area / 2;
+                            if (s > 65536) s = 65536;
+                            uint32_t s_prev = 0;
+                            while (s != s_prev) {
+                                s_prev = s;
+                                s = (s + area / s) / 2;
+                            }
+                            max_dim = s & ~7U;
+                        }
+                        if (max_dim < 64) max_dim = 64;
+                        /* TEMP: use 1296 to test if DeInit→Init is the root cause of Y=16 */
+                        roi_w = 1296;
+                        roi_h = 972;
+                        roi_x = (uint16_t)((2592U - roi_w) / 2) & ~1U;
+                        roi_y = (uint16_t)((1944U - roi_h) / 2) & ~1U;
+                        roi_sz = (uint32_t)roi_w * roi_h * 2;
+                        printf("[MULTI] >>> STAGE 3: AREA3 max crop %ux%u centered\n", roi_w, roi_h);
+                    } else {
+                        printf("[MULTI] >>> STAGE 3: AREA3 ROI (%u,%u) %ux%u capture\n",
+                               roi_x, roi_y, roi_w, roi_h);
+                    }
+                    uint32_t t3 = HAL_GetTick();
+                    if (CAM_CaptureROI(batch_buf, roi_sz,
+                                        roi_x, roi_y, roi_w, roi_h) == 0) {
+                        printf("[MULTI] >>> STAGE 3: Captured in %lu ms\n",
+                               (unsigned long)(HAL_GetTick() - t3));
+                        StorageCmd_t sc3 = {0};
+                        sc3.type = STORAGE_CMD_SAVE;
+                        sc3.image_buf = batch_buf;
+                        sc3.image_size = roi_sz;
+                        sc3.width = roi_w; sc3.height = roi_h;
+                        sc3.pixel_format = 0;
+                        sc3.snap_id = g_next_snap_id++;
+                        sc3.stamp = RTC_CaptureStamp();
+                        if (xQueueSend(storage_cmd_queue, &sc3, pdMS_TO_TICKS(1000)) != pdTRUE) {
+                            printf("[CAM] Stage 3: storage queue full\n");
+                        }
+                    } else {
+                        printf("[MULTI] >>> STAGE 3: Capture FAILED\n");
+                    }
+                }
+                printf("=============================================================\n\n");
+                g_capture_stage = CAPTURE_STAGE_DONE;
             } else {
 #if PERF_DEBUG_LEVEL >= 1
 #if CAPTURE_MODE == 4

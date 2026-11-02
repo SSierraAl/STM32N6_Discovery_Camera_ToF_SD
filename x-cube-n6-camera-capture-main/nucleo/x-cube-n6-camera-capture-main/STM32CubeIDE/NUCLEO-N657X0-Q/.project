@@ -97,6 +97,11 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/cmw_camera_conf.h</locationURI>
 		</link>
 		<link>
+			<name>Inc/ds3231.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Inc/ds3231.h</locationURI>
+		</link>
+		<link>
 			<name>Inc/freertos_mpool.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/freertos_mpool.h</locationURI>
@@ -115,6 +120,11 @@
 			<name>Inc/i2c_arbiter.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/i2c_arbiter.h</locationURI>
+		</link>
+		<link>
+			<name>Inc/image_filter.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Inc/image_filter.h</locationURI>
 		</link>
 		<link>
 			<name>Inc/imx335_isp_param_conf.h</name>
@@ -175,6 +185,11 @@
 			<name>Inc/platform.h</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Inc/platform.h</locationURI>
+		</link>
+		<link>
+			<name>Inc/raw_image.h</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Inc/raw_image.h</locationURI>
 		</link>
 		<link>
 			<name>Inc/stm32_assert_template.h</name>
@@ -337,6 +352,16 @@
 			<locationURI>PARENT-2-PROJECT_LOC/Src/app_thread.c</locationURI>
 		</link>
 		<link>
+			<name>Src/ds3231.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Src/ds3231.c</locationURI>
+		</link>
+		<link>
+			<name>Src/ds3231_calendar.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Src/ds3231_calendar.c</locationURI>
+		</link>
+		<link>
 			<name>Src/freertos_bsp.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Src/freertos_bsp.c</locationURI>
@@ -350,6 +375,11 @@
 			<name>Src/i2c_arbiter.c</name>
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/Src/i2c_arbiter.c</locationURI>
+		</link>
+		<link>
+			<name>Src/image_filter.c</name>
+			<type>1</type>
+			<locationURI>PARENT-2-PROJECT_LOC/Src/image_filter.c</locationURI>
 		</link>
 		<link>
 			<name>Src/main.c</name>
@@ -3606,9 +3636,5 @@
 			<type>1</type>
 			<locationURI>PARENT-2-PROJECT_LOC/STM32Cube_FW_N6/Drivers/CMSIS/Device/ST/STM32N6xx/Source/Templates/gcc/startup_stm32n657xx.s</locationURI>
 		</link>
-	<link><name>Src/ds3231.c</name><type>1</type><locationURI>PARENT-2-PROJECT_LOC/Src/ds3231.c</locationURI></link>
-<link><name>Src/ds3231_calendar.c</name><type>1</type><locationURI>PARENT-2-PROJECT_LOC/Src/ds3231_calendar.c</locationURI></link>
-<link><name>Inc/ds3231.h</name><type>1</type><locationURI>PARENT-2-PROJECT_LOC/Inc/ds3231.h</locationURI></link>
-<link><name>Inc/raw_image.h</name><type>1</type><locationURI>PARENT-2-PROJECT_LOC/Inc/raw_image.h</locationURI></link>
-</linkedResources>
+	</linkedResources>
 </projectDescription>
