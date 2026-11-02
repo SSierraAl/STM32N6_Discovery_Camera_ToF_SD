@@ -859,6 +859,7 @@ void sensor_task(void *arg)
                        (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
             } else {
+                vTaskDelay(pdMS_TO_TICKS(800)); /* let temp sensor settle before resume */
                 VL53L5CX_StartRanging();
                 consecutive_window_start = xTaskGetTickCount();
                 consecutive_window_active = 1;
@@ -866,6 +867,7 @@ void sensor_task(void *arg)
                        (unsigned long)TOF_CAPTURE_REFRESH_WINDOW_SECS);
             }
 #else
+            vTaskDelay(pdMS_TO_TICKS(800));
             VL53L5CX_StartRanging();
 #endif
             g_sensor_state = SENSOR_STATE_RUNNING;
@@ -945,6 +947,7 @@ void camera_task(void *arg)
 #if CAPTURE_MODE == 4
             /* CAPTURE_MODE == 4: Callback-Batch (continuous, NO stop/restart) */
             rc = CAM_CallbackBatchSnap(batch_buf, frame_size);
+            /* PIPE1 is stopped inside CAM_CallbackBatchSnap + sensor in standby */
             PERF_MARK(g_perf_timer, CAM_END);
 #endif
             if (rc > 0) {
@@ -1066,51 +1069,50 @@ void camera_task(void *arg)
 #endif
                     }
                 }
+                /* Wait for storage to finish reading batch frames before
+                   Stage 3 overwrites batch_buf with the crop output. */
+                for (int i = 0; i < rc; i++) {
+                    xSemaphoreTake(storage_done_sem, pdMS_TO_TICKS(5000));
+                }
 
                 /* ---------------------------------------------------------------
-                   STAGE 3: AREA3 ROI capture — REUSES batch_buf (Stage 2 is done).
-                   When IF_CalcROI fails or the ROI exceeds batch_buf, compute the
-                   largest centered crop that fits in BATCH_BUF_SIZE (~1584x1584).
+                   STAGE 3: Software crop each batch frame from the buffer.
+                   Only when insect detected — skip fallback crops.
                    --------------------------------------------------------------- */
                 if (g_detection_result.has_insect) {
+                {
                     uint16_t roi_x, roi_y, roi_w, roi_h;
                     int roi_ok = IF_CalcROI(&g_detection_result, &roi_x, &roi_y, &roi_w, &roi_h);
-                    uint32_t roi_sz = roi_ok == 0 ? (uint32_t)roi_w * roi_h * 2 : 0;
-                    if (roi_ok != 0 || roi_sz > BATCH_BUF_SIZE) {
-                        if (roi_ok != 0) {
-                            printf("[MULTI] >>> Stage 3: IF_CalcROI failed, fallback to max crop\n");
-                        } else {
-                            printf("[MULTI] >>> Stage 3: ROI %ux%u exceeds batch_buf, fallback to max crop\n", roi_w, roi_h);
-                        }
-                        uint32_t max_dim;
-                        {
-                            uint32_t area = BATCH_BUF_SIZE / 2;
-                            uint32_t s = area / 2;
-                            if (s > 65536) s = 65536;
-                            uint32_t s_prev = 0;
-                            while (s != s_prev) {
-                                s_prev = s;
-                                s = (s + area / s) / 2;
-                            }
-                            max_dim = s & ~7U;
-                        }
-                        if (max_dim < 64) max_dim = 64;
-                        /* TEMP: use 1296 to test if DeInit→Init is the root cause of Y=16 */
-                        roi_w = 1296;
-                        roi_h = 972;
-                        roi_x = (uint16_t)((2592U - roi_w) / 2) & ~1U;
-                        roi_y = (uint16_t)((1944U - roi_h) / 2) & ~1U;
-                        roi_sz = (uint32_t)roi_w * roi_h * 2;
-                        printf("[MULTI] >>> STAGE 3: AREA3 max crop %ux%u centered\n", roi_w, roi_h);
+                    if (roi_ok != 0) {
+                        roi_w = SNAP_WIDTH; roi_h = SNAP_HEIGHT; roi_x = 0; roi_y = 0;
                     } else {
-                        printf("[MULTI] >>> STAGE 3: AREA3 ROI (%u,%u) %ux%u capture\n",
-                               roi_x, roi_y, roi_w, roi_h);
+                        printf("[MULTI] >>> Stage 3: CAM-ROI (%u,%u) %ux%u", roi_x, roi_y, roi_w, roi_h);
                     }
-                    uint32_t t3 = HAL_GetTick();
-                    if (CAM_CaptureROI(batch_buf, roi_sz,
-                                        roi_x, roi_y, roi_w, roi_h) == 0) {
-                        printf("[MULTI] >>> STAGE 3: Captured in %lu ms\n",
-                               (unsigned long)(HAL_GetTick() - t3));
+                    /* Scale from camera (2592x1944) to SNAP (1296x972) */
+                    roi_x = (uint16_t)((uint32_t)roi_x / 2U);
+                    roi_y = (uint16_t)((uint32_t)roi_y / 2U);
+                    roi_w = (uint16_t)((uint32_t)roi_w / 2U);
+                    roi_h = (uint16_t)((uint32_t)roi_h / 2U);
+                    printf(" -> SNAP-ROI (%u,%u) %ux%u x%d frames\n", roi_x, roi_y, roi_w, roi_h, rc);
+                    if ((uint32_t)roi_w * roi_h * 2 > BATCH_BUF_SIZE) {
+                        printf("[MULTI] >>> Stage 3: ROI %ux%u too large, using 800x600 center\n", roi_w, roi_h);
+                        roi_w = 800; roi_h = 600;
+                        roi_x = (SNAP_WIDTH - roi_w) / 2;
+                        roi_y = (SNAP_HEIGHT - roi_h) / 2;
+                    }
+                    /* Stop PIPE1 so batch_buf is stable for crop.
+                       Do NOT touch PipeState (leave it after stop). */
+                    SCB_InvalidateDCache_by_Addr((uint32_t *)batch_buf, BATCH_BUF_SIZE);
+                    extern uint8_t capture_buf[];
+                    uint32_t frame_sz = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2;
+                    uint32_t roi_sz = (uint32_t)roi_w * roi_h * 2;
+                    for (int f = 0; f < rc; f++) {
+                        uint8_t *src_frame = batch_buf + (uint32_t)f * frame_sz;
+                        memcpy(capture_buf, src_frame, frame_sz);
+                        for (uint32_t y = 0; y < (uint32_t)roi_h; y++) {
+                            uint8_t *src_line = capture_buf + ((uint32_t)roi_y + y) * (SNAP_WIDTH * 2) + (uint32_t)roi_x * 2;
+                            memcpy(batch_buf + y * roi_w * 2, src_line, roi_w * 2);
+                        }
                         StorageCmd_t sc3 = {0};
                         sc3.type = STORAGE_CMD_SAVE;
                         sc3.image_buf = batch_buf;
@@ -1120,14 +1122,20 @@ void camera_task(void *arg)
                         sc3.snap_id = g_next_snap_id++;
                         sc3.stamp = RTC_CaptureStamp();
                         if (xQueueSend(storage_cmd_queue, &sc3, pdMS_TO_TICKS(1000)) != pdTRUE) {
-                            printf("[CAM] Stage 3: storage queue full\n");
+                            printf("[CAM] Stage 3 frame %d: storage queue full\n", f);
+                        } else {
+                            printf("[MULTI] >>> Stage 3 frame %d: cropped %ux%u size=%lu snap=%lu\n",
+                                   f, roi_w, roi_h, (unsigned long)roi_sz, (unsigned long)(g_next_snap_id-1));
                         }
-                    } else {
-                        printf("[MULTI] >>> STAGE 3: Capture FAILED\n");
+                        /* Wait for storage to read crop before next iteration overwrites batch_buf */
+                        xSemaphoreTake(storage_done_sem, pdMS_TO_TICKS(5000));
                     }
+                }
                 }
                 printf("=============================================================\n\n");
                 g_capture_stage = CAPTURE_STAGE_DONE;
+                g_detection_result.has_insect = 0;
+                g_capture_busy = 0;
             } else {
 #if PERF_DEBUG_LEVEL >= 1
 #if CAPTURE_MODE == 4

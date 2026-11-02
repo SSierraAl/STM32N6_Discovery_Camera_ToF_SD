@@ -1047,8 +1047,10 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
   printf("[CAM] Stage 3: AREA3 crop (%u,%u) %ux%u buf=0x%08lx buf_sz=%lu\n",
          roi_x, roi_y, roi_w, roi_h, (unsigned long)(uintptr_t)buf, (unsigned long)buf_size);
 
-  /* Step 1: Full power-cycle + DCMIPP reset to flush any stale pipe state */
+  /* Step 0: Stop PIPE1 then full DeInit→Init to reset the DCMIPP + CSI receiver
+     so that restart genuinely captures new frames (vsync=0 otherwise). */
   {
+    extern DCMIPP_HandleTypeDef hcamera_dcmipp;
     CMW_CameraInit_t cam_conf;
     CMW_CAMERA_DeInit();
     HAL_Delay(50);
@@ -1060,10 +1062,15 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
       printf("[CAM] Stage 3: Init failed\n");
       return -1;
     }
-    printf("[CAM] Step1: DeInit→Init done\n");
+    printf("[CAM] Step0: DeInit→Init done\n");
   }
 
-  /* Step 2: Configure pipe for the exact AREA3 crop — single pipe config, no stale stride. */
+  /* Boost exposure/gain after Init's minimum — avoids Y=16 from CMW_CAMERA_Init.
+     Using the same non-zero values used in DCMIPP_Restart */
+  CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+  CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+
+  /* Step 1: Configure pipe for the exact AREA3 crop */
   {
     uint32_t hw_pitch;
     CMW_DCMIPP_Conf_t dc = {0};
@@ -1088,12 +1095,12 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
     hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_READY;
     if (dc.output_format == DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1)
       CAM_EnableYuv(DCMIPP_PIPE1);
-    printf("[CAM] Step2: hw_pitch=%lu (raw=%lu) pipe_state=%lu\n",
+    printf("[CAM] Step1: hw_pitch=%lu (raw=%lu) pipe_state=%lu\n",
            (unsigned long)hw_pitch, (unsigned long)roi_w * 2,
            (unsigned long)hcamera_dcmipp.PipeState[DCMIPP_PIPE1]);
   }
 
-  /* Step 3: Start pipe, capture, stop */
+  /* Step 2: Start pipe, capture, stop */
   {
     int start_ret = CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
     if (start_ret != 0) {
@@ -1115,7 +1122,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
     uint32_t elapsed = HAL_GetTick() - t0;
     uint32_t vsync_delta = g_vsync_count - pre_vsync;
     uint32_t frame_delta = g_frame_event_count - pre_frame;
-    printf("[CAM] Step3: wait=%ldms vsync=%lu frame_evt=%lu g_fcnt=%lu\n",
+    printf("[CAM] Step2: wait=%ldms vsync=%lu frame_evt=%lu g_fcnt=%lu\n",
            (unsigned long)elapsed, (unsigned long)vsync_delta,
            (unsigned long)frame_delta, (unsigned long)g_frame_count);
   }
