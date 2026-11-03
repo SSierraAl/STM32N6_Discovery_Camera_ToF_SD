@@ -952,11 +952,12 @@ static int SaveOverviewCropImage(const char *kind, uint8_t *buffer, uint16_t wid
 }
 
 /* Compare the same sensor window in both exposures on a static target. */
-static void LogBurstLuma(const char *kind, const uint8_t *window, uint32_t pitch)
+static void LogBurstLuma(const char *kind, const uint8_t *window, uint32_t pitch,
+                         const CAM_BurstWindow *roi)
 {
     uint32_t sum = 0, count = 0, dark = 0, clipped = 0;
-    for (uint32_t y = 0; y < CAM_BURST_CROP_H; y += 8U) {
-        for (uint32_t x = 0; x < CAM_BURST_CROP_W; x += 8U) {
+    for (uint32_t y = 0; y < roi->height; y += 8U) {
+        for (uint32_t x = 0; x < roi->width; x += 8U) {
             uint8_t luma = window[y * pitch + x * 2U];
             sum += luma;
             ++count;
@@ -971,31 +972,65 @@ static void LogBurstLuma(const char *kind, const uint8_t *window, uint32_t pitch
 
 static void CaptureFullAndCrop(uint8_t *source, uint8_t *crop)
 {
+    uint32_t started = HAL_GetTick();
     uint32_t ticks[2];
+    CAM_BurstWindow roi = {0};
+    int oversize;
     int captured = CAM_CaptureFullAndCrop(source, MAX_SNAP_FRAME_SIZE,
-                                         crop, BATCH_BUF_SIZE, ticks);
+                                         crop, BATCH_BUF_SIZE, ticks, &roi, &oversize);
     PERF_MARK(g_perf_timer, CAM_END);
 #if WS2812_MODE == 0 || WS2812_MODE == 1
     WS2812_FlashStop();
 #endif
+    uint32_t light_off = HAL_GetTick();
     if (captured == 0) {
         g_last_storage_rc = -1;
         return;
     }
 
-    LogBurstLuma("full_window",
-                 source + (CAM_BURST_CROP_Y * CAM_FULL_WIDTH + CAM_BURST_CROP_X) * 2U,
-                 CAM_FULL_WIDTH * 2U);
-    if (captured == 2) LogBurstLuma("native_crop", crop, CAM_BURST_CROP_W * 2U);
+    if (captured == 2) {
+        LogBurstLuma("full_window", source + (roi.y * CAM_FULL_WIDTH + roi.x) * 2U,
+                     CAM_FULL_WIDTH * 2U, &roi);
+        LogBurstLuma("native_crop", crop, roi.width * 2U, &roi);
+    }
     RTC_Stamp stamp = RTC_CaptureStamp();
+    uint32_t sd_start = HAL_GetTick();
     int rc = SaveOverviewCropImage("full_source", source, CAM_FULL_WIDTH, CAM_FULL_HEIGHT,
                                    RTC_StampForFrame(stamp, ticks[0]));
     if (captured == 2) {
-        int crop_rc = SaveOverviewCropImage("native_crop", crop, CAM_BURST_CROP_W, CAM_BURST_CROP_H,
+        int crop_rc = SaveOverviewCropImage("native_crop", crop, roi.width, roi.height,
                                             RTC_StampForFrame(stamp, ticks[1]));
         if (rc == 0) rc = crop_rc;
     }
+    uint32_t sd_ms = HAL_GetTick() - sd_start;
+    if (rc == 0 && oversize) {
+        /* SD has released the full buffer. Reuse it only now. */
+        uint32_t fallback_start = HAL_GetTick();
+#if WS2812_MODE == 0 || WS2812_MODE == 1
+        WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
+#endif
+        int fallback = CAM_CaptureFullAndCrop(source, MAX_SNAP_FRAME_SIZE,
+                                              NULL, 0, ticks, &roi, NULL);
+#if WS2812_MODE == 0 || WS2812_MODE == 1
+        WS2812_FlashStop();
+#endif
+        printf("[CAM][FALLBACK] full_frames=%d/2 second_capture_ms=%lu\n",
+               1 + fallback, (unsigned long)(HAL_GetTick() - fallback_start));
+        if (fallback == 1) {
+            stamp = RTC_CaptureStamp();
+            sd_start = HAL_GetTick();
+            rc = SaveOverviewCropImage("full_fallback", source, CAM_FULL_WIDTH, CAM_FULL_HEIGHT,
+                                       RTC_StampForFrame(stamp, ticks[0]));
+            sd_ms += HAL_GetTick() - sd_start;
+        } else {
+            rc = -1;
+        }
+    }
     g_last_storage_rc = rc;
+    uint32_t done = HAL_GetTick();
+    printf("[CAM][TIME] first_capture_to_light_off_ms=%lu sd_ms=%lu camera_task_total_ms=%lu\n",
+           (unsigned long)(light_off - started), (unsigned long)sd_ms,
+           (unsigned long)(done - started));
 }
 #endif
 

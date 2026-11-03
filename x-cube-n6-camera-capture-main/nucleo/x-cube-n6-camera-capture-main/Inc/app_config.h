@@ -80,7 +80,27 @@
 #define CAM_BURST_CROP_Y 584U
 #define CAM_BURST_CROP_W 640U
 #define CAM_BURST_CROP_H 768U
-#define CAM_BURST_CROP_BYTES (CAM_BURST_CROP_W * CAM_BURST_CROP_H * 2U)
+/** Native pixels of context for localization uncertainty and motion. */
+#ifndef CAM_DYNAMIC_CROP_MARGIN
+#define CAM_DYNAMIC_CROP_MARGIN 96U
+#endif
+/** White-background detector thresholds in YUYV luma units and grid cells. */
+#define CAM_ROI_GRID_STEP 16U
+#define CAM_ROI_WHITE_MIN 128U
+#define CAM_ROI_LUMA_DELTA 26U
+#define CAM_ROI_MIN_COMPONENT 3U
+#define CAM_ROI_MAX_FOREGROUND_PCT 30U
+/** Suppress foreground repeated at the same position and similar contrast. */
+#ifndef CAM_ROI_RESIDENT_MIN_MS
+#define CAM_ROI_RESIDENT_MIN_MS 2000U
+#endif
+#ifndef CAM_ROI_RESIDENT_DELTA
+#define CAM_ROI_RESIDENT_DELTA 16U
+#endif
+/** Fixed PSRAM budget for one native-scale crop and detector scratch. */
+#define CAM_BURST_CROP_BYTES (2U * 1024U * 1024U)
+/** Reject captures with a median brightness shift beyond this range. */
+#define CAM_ROI_MAX_REFERENCE_SHIFT 32
 #if CAM_FULL_WARMUP_FRAMES < 1 || CAM_BURST_CROP_X % 2 || CAM_BURST_CROP_Y % 2 || \
     CAM_BURST_CROP_W < 16 || CAM_BURST_CROP_W % 16 || CAM_BURST_CROP_H < 4 || \
     CAM_BURST_CROP_H % 2 || CAM_BURST_CROP_X + CAM_BURST_CROP_W > CAM_FULL_WIDTH || \

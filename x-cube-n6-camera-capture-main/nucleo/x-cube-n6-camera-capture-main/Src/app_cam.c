@@ -916,13 +916,13 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
 #if CAM_OVERVIEW_CROP
 /* Change only geometry on the stopped pipe. The general CMW configuration
    also rewrites gamma and YUV conversion, which are owned by the tuned ISP. */
-static int CAM_SetBurstGeometry(DCMIPP_HandleTypeDef *h, int cropped)
+static int CAM_SetBurstGeometry(DCMIPP_HandleTypeDef *h, const CAM_BurstWindow *roi)
 {
   DCMIPP_CropConfTypeDef window = {0};
-  window.HSize = cropped ? CAM_BURST_CROP_W : CAM_FULL_WIDTH;
-  window.VSize = cropped ? CAM_BURST_CROP_H : CAM_FULL_HEIGHT;
-  window.HStart = cropped ? CAM_BURST_CROP_X : 0U;
-  window.VStart = cropped ? CAM_BURST_CROP_Y : 0U;
+  window.HSize = roi ? roi->width : CAM_FULL_WIDTH;
+  window.VSize = roi ? roi->height : CAM_FULL_HEIGHT;
+  window.HStart = roi ? roi->x : 0U;
+  window.VStart = roi ? roi->y : 0U;
 
   if (HAL_DCMIPP_PIPE_SetCropConfig(h, DCMIPP_PIPE1, &window) != HAL_OK ||
       HAL_DCMIPP_PIPE_EnableCrop(h, DCMIPP_PIPE1) != HAL_OK ||
@@ -933,16 +933,169 @@ static int CAM_SetBurstGeometry(DCMIPP_HandleTypeDef *h, int cropped)
 
   /* Crop at native scale. Re-enable the untouched full-frame unity scaler
      configuration when returning to the boot geometry. */
-  HAL_StatusTypeDef rc = cropped ? HAL_DCMIPP_PIPE_DisableDownsize(h, DCMIPP_PIPE1) :
+  HAL_StatusTypeDef rc = roi ? HAL_DCMIPP_PIPE_DisableDownsize(h, DCMIPP_PIPE1) :
                                    HAL_DCMIPP_PIPE_EnableDownsize(h, DCMIPP_PIPE1);
   return rc == HAL_OK ? 0 : -1;
 }
 
-int CAM_CaptureFullAndCrop(uint8_t *buf, uint32_t size, uint8_t *crop,
-                          uint32_t crop_size, uint32_t ticks[2])
+enum {
+  ROI_COLS = (CAM_FULL_WIDTH + CAM_ROI_GRID_STEP - 1U) / CAM_ROI_GRID_STEP,
+  ROI_ROWS = (CAM_FULL_HEIGHT + CAM_ROI_GRID_STEP - 1U) / CAM_ROI_GRID_STEP,
+  ROI_CELLS = ROI_COLS * ROI_ROWS
+};
+
+typedef struct {
+  uint32_t left, top, right, bottom;
+} CAM_GridBox;
+
+static int CAM_FitBurstWindow(CAM_GridBox box, uint32_t capacity, CAM_BurstWindow *window)
 {
-  if (!g_callback_ready || !buf || size < MAX_SNAP_FRAME_SIZE ||
-      !crop || crop_size < CAM_BURST_CROP_BYTES ||
+  uint32_t left = box.left * CAM_ROI_GRID_STEP;
+  uint32_t top = box.top * CAM_ROI_GRID_STEP;
+  uint32_t right = box.right * CAM_ROI_GRID_STEP;
+  uint32_t bottom = box.bottom * CAM_ROI_GRID_STEP;
+  left = (left > CAM_DYNAMIC_CROP_MARGIN ? left - CAM_DYNAMIC_CROP_MARGIN : 0U) & ~15U;
+  top = (top > CAM_DYNAMIC_CROP_MARGIN ? top - CAM_DYNAMIC_CROP_MARGIN : 0U) & ~1U;
+  right = MIN((right + CAM_DYNAMIC_CROP_MARGIN + 15U) & ~15U, CAM_FULL_WIDTH);
+  bottom = MIN((bottom + CAM_DYNAMIC_CROP_MARGIN + 1U) & ~1U, CAM_FULL_HEIGHT);
+
+  uint32_t width = right - left;
+  uint32_t height = bottom - top;
+  uint32_t pitch = (width * 2U + 15U) & ~15U;
+  if (pitch != width * 2U || height > capacity / pitch) return 0;
+  *window = (CAM_BurstWindow){left, top, width, height};
+  return 1;
+}
+
+/* Contrast relative to the white reference in the previous accepted scene.
+   Zero means background. This survives camera standby in ordinary SRAM. */
+/* PSRAM is NOLOAD. Calibration fills the grid before setting roi_reference_ready. */
+static uint8_t roi_empty_reference[ROI_CELLS] ALIGN_32 IN_PSRAM;
+static int roi_reference_ready;
+static uint8_t roi_previous_contrast[ROI_CELLS];
+static uint32_t roi_previous_tick;
+static uint32_t roi_resident_cells;
+
+static const char *CAM_FindBurstWindow(const uint8_t *source, uint8_t *scratch,
+                                       uint32_t capacity, CAM_BurstWindow *window)
+{
+  /* Reuse the crop DMA slot before arming it. Each grid cell samples the
+     center of a native 16x16 region, with no intermediate YUYV image. */
+  _Static_assert(ROI_CELLS < UINT16_MAX, "ROI queue indexes must fit in uint16_t");
+  _Static_assert(((ROI_CELLS + 1U) & ~1U) + ROI_CELLS * sizeof(uint16_t) <=
+                 CAM_BURST_CROP_BYTES, "ROI scratch exceeds the crop slot");
+  uint16_t *queue = (uint16_t *)(scratch + ((ROI_CELLS + 1U) & ~1U));
+  uint16_t histogram[256] = {0};
+  roi_resident_cells = 0;
+  for (uint32_t y = 0; y < ROI_ROWS; ++y)
+  {
+    uint32_t sy = MIN(y * CAM_ROI_GRID_STEP + CAM_ROI_GRID_STEP / 2U, CAM_FULL_HEIGHT - 1U);
+    for (uint32_t x = 0; x < ROI_COLS; ++x)
+    {
+      uint32_t sx = MIN(x * CAM_ROI_GRID_STEP + CAM_ROI_GRID_STEP / 2U, CAM_FULL_WIDTH - 1U);
+      uint32_t index = y * ROI_COLS + x;
+      uint8_t luma = source[(sy * CAM_FULL_WIDTH + sx) * 2U];
+      scratch[index] = luma;
+      int bin = luma;
+      if (roi_reference_ready)
+      {
+        int delta = (int)luma - roi_empty_reference[index];
+        bin = MIN(MAX(delta + 128, 0), 255);
+      }
+      ++histogram[bin];
+    }
+  }
+
+  uint32_t median = 0, cumulative = histogram[0];
+  while (median < 255U && cumulative <= ROI_CELLS / 2U) cumulative += histogram[++median];
+  if (!roi_reference_ready)
+  {
+    if (median < CAM_ROI_WHITE_MIN) return "calibration_too_dark";
+    /* The first successful bright frame after boot must show the empty passage. */
+    memcpy(roi_empty_reference, scratch, sizeof(roi_empty_reference));
+    roi_reference_ready = 1;
+    return "empty_reference_saved";
+  }
+
+  int shift = (int)median - 128;
+  if (shift < -CAM_ROI_MAX_REFERENCE_SHIFT || shift > CAM_ROI_MAX_REFERENCE_SHIFT)
+    return "lighting_shift";
+
+  uint32_t foreground = 0;
+  for (uint32_t i = 0; i < ROI_CELLS; ++i)
+  {
+    int reference = MIN(MAX((int)roi_empty_reference[i] + shift, 0), 255);
+    int contrast = reference - scratch[i];
+    scratch[i] = contrast >= (int)CAM_ROI_LUMA_DELTA ? (uint8_t)contrast : 0U;
+    foreground += scratch[i] != 0U;
+  }
+  if (foreground * 100U > CAM_ROI_MAX_FOREGROUND_PCT * ROI_CELLS) return "widespread_change";
+
+  uint32_t now = HAL_GetTick();
+  int can_mask = now - roi_previous_tick >= CAM_ROI_RESIDENT_MIN_MS;
+  for (uint32_t i = 0; i < ROI_CELLS; ++i)
+  {
+    uint32_t current = scratch[i], previous = roi_previous_contrast[i];
+    uint32_t delta = current > previous ? current - previous : previous - current;
+    int resident = can_mask && current && previous && delta <= CAM_ROI_RESIDENT_DELTA;
+    roi_previous_contrast[i] = current;
+    roi_resident_cells += resident;
+    scratch[i] = current && !resident;
+  }
+  roi_previous_tick = now;
+
+  CAM_GridBox combined = {ROI_COLS, ROI_ROWS, 0, 0};
+  CAM_GridBox largest = {0};
+  uint32_t largest_count = 0;
+  for (uint32_t i = 0; i < ROI_CELLS; ++i)
+  {
+    if (!scratch[i]) continue;
+    CAM_GridBox box = {ROI_COLS, ROI_ROWS, 0, 0};
+    uint32_t tail = 0;
+    queue[tail++] = i;
+    scratch[i] = 0;
+    for (uint32_t head = 0; head < tail; ++head)
+    {
+      uint32_t index = queue[head];
+      uint32_t x = index % ROI_COLS, y = index / ROI_COLS;
+      box.left = MIN(box.left, x);
+      box.top = MIN(box.top, y);
+      box.right = MAX(box.right, x + 1U);
+      box.bottom = MAX(box.bottom, y + 1U);
+      uint32_t neighbors[] = {
+        x > 0U ? index - 1U : index,
+        x + 1U < ROI_COLS ? index + 1U : index,
+        y > 0U ? index - ROI_COLS : index,
+        y + 1U < ROI_ROWS ? index + ROI_COLS : index
+      };
+      for (uint32_t n = 0; n < 4U; ++n)
+      {
+        if (!scratch[neighbors[n]]) continue;
+        scratch[neighbors[n]] = 0;
+        queue[tail++] = neighbors[n];
+      }
+    }
+    if (tail < CAM_ROI_MIN_COMPONENT) continue;
+    if (tail > largest_count) { largest = box; largest_count = tail; }
+    combined.left = MIN(combined.left, box.left);
+    combined.top = MIN(combined.top, box.top);
+    combined.right = MAX(combined.right, box.right);
+    combined.bottom = MAX(combined.bottom, box.bottom);
+  }
+
+  if (largest_count == 0U) return roi_resident_cells ? "resident_only" : "no_connected_object";
+  if (CAM_FitBurstWindow(combined, capacity, window)) return "localized";
+  if (CAM_FitBurstWindow(largest, capacity, window)) return "largest_component";
+  return "object_exceeds_buffer";
+}
+
+int CAM_CaptureFullAndCrop(uint8_t *buf, uint32_t size, uint8_t *crop,
+                          uint32_t crop_size, uint32_t ticks[2], CAM_BurstWindow *window,
+                          int *oversize)
+{
+  if (oversize) *oversize = 0;
+  if (!g_callback_ready || !buf || !window || size < MAX_SNAP_FRAME_SIZE ||
+      (oversize && (!crop || crop_size < CAM_BURST_CROP_BYTES)) ||
       (((uintptr_t)buf | (uintptr_t)crop) & 31U) != 0U)
   {
     printf("[CAM][FULL] rejected ready=%d buffer_bytes=%lu expected=%lu\n",
@@ -952,6 +1105,8 @@ int CAM_CaptureFullAndCrop(uint8_t *buf, uint32_t size, uint8_t *crop,
 
   DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
   int captured = 0;
+  uint32_t detect_ms = 0;
+  const char *decision = "not_run";
   int crop_config_attempted = 0;
   int restore_rc = 0;
   int exposure_mode_rc = 0;
@@ -1024,12 +1179,26 @@ int CAM_CaptureFullAndCrop(uint8_t *buf, uint32_t size, uint8_t *crop,
   }
   if (full_rc != 0 || g_single_capture_errors) goto standby;
   captured = 1;
+  if (!oversize) { stage = "full_only"; goto standby; }
+
+  SCB_InvalidateDCache_by_Addr((uint32_t *)buf, MAX_SNAP_FRAME_SIZE);
+  uint32_t detect_start = HAL_GetTick();
+  decision = CAM_FindBurstWindow(buf, crop, crop_size, window);
+  detect_ms = HAL_GetTick() - detect_start;
+  if (window->width == 0U)
+  {
+    stage = decision;
+    *oversize = strcmp(decision, "object_exceeds_buffer") == 0;
+    goto standby;
+  }
+  /* Drop dirty preview lines before the DMA reuses the dedicated slot. */
+  SCB_InvalidateDCache_by_Addr((uint32_t *)crop, crop_size);
 
   /* Full DMA has stopped. Reconfigure only the receiver, leaving the sensor
      streaming at its known-good exposure and full-field readout. */
   stage = "crop_config";
   crop_config_attempted = 1;
-  if (CAM_SetBurstGeometry(h, 1) != 0) goto standby;
+  if (CAM_SetBurstGeometry(h, window) != 0) goto standby;
   stage = "crop_start";
   event = g_frame_event_count;
   if (CAM_CapturePipe_Start(crop, CMW_MODE_SNAPSHOT) != CMW_ERROR_NONE) goto standby;
@@ -1048,7 +1217,7 @@ standby:
   PERF_MARK(g_perf_timer, CAM_STOP);
   if (crop_config_attempted && g_callback_ready)
   {
-    restore_rc = CAM_SetBurstGeometry(h, 0);
+    restore_rc = CAM_SetBurstGeometry(h, NULL);
     if (restore_rc != 0) g_callback_ready = 0;
   }
   if (g_callback_ready)
@@ -1059,7 +1228,11 @@ standby:
   int standby_rc = CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
   if (standby_rc != 0) g_callback_ready = 0;
   if (captured >= 1) SCB_InvalidateDCache_by_Addr((uint32_t *)buf, MAX_SNAP_FRAME_SIZE);
-  if (captured == 2) SCB_InvalidateDCache_by_Addr((uint32_t *)crop, CAM_BURST_CROP_BYTES);
+  if (captured == 2) SCB_InvalidateDCache_by_Addr((uint32_t *)crop, crop_size);
+  printf("[CAM][ROI] decision=%s detect_ms=%lu masked_cells=%lu window=(%u,%u) %ux%u\n",
+         decision, (unsigned long)detect_ms,
+         detect_ms || captured ? (unsigned long)roi_resident_cells : 0UL,
+         window->x, window->y, window->width, window->height);
   printf("[CAM][BURST] captured=%d/2 stage=%s warmup=%lu/%u frames=%lu vsync=%lu "
          "errors=%lu restore=%d mode=%d standby=%d ready=%d full_ms=%lu gap_ms=%lu\n",
          captured, captured == 2 ? "complete" : stage,

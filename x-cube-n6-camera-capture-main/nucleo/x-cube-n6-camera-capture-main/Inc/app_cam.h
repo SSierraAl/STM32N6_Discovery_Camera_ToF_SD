@@ -199,8 +199,14 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
 int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
 /** Capture a full-field frame followed by a native crop. Returns the number
  * of completed images (0, 1 or 2). ticks receives their completion ticks. */
+typedef struct {
+  uint16_t x, y, width, height;
+} CAM_BurstWindow;
+/** Pass NULL for oversize to capture only a full frame. Otherwise oversize
+ * reports a detected object that cannot fit in the crop buffer. */
 int CAM_CaptureFullAndCrop(uint8_t *buf, uint32_t size, uint8_t *crop,
-                          uint32_t crop_size, uint32_t ticks[2]);
+                          uint32_t crop_size, uint32_t ticks[2], CAM_BurstWindow *window,
+                          int *oversize);
 
 /** Return HAL tick recorded when a kept Mode-4 frame completed. */
 uint32_t CAM_GetCallbackFrameTick(uint32_t index);
