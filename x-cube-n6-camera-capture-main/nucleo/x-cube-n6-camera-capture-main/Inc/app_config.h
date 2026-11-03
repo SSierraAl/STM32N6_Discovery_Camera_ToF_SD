@@ -58,7 +58,11 @@
 /* Opt-in ToF burst with a fixed, unscaled DCMIPP crop. Coordinates are
    relative to the oriented sensor image. Set the window using a bench target. */
 #ifndef CAM_NATIVE_ROI
+<<<<<<< ours
 #define CAM_NATIVE_ROI 1
+=======
+#define CAM_NATIVE_ROI 0
+>>>>>>> theirs
 #endif
 #if CAM_NATIVE_ROI
 #define CAM_NATIVE_ROI_X 976

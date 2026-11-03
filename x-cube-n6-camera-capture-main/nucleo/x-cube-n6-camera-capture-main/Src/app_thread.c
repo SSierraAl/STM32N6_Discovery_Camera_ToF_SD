@@ -1006,7 +1006,10 @@ void camera_task(void *arg)
                 xSemaphoreTake(storage_done_sem, portMAX_DELAY);
                 g_last_batch_frames++;
             }
+<<<<<<< ours
             g_capture_busy = 0;
+=======
+>>>>>>> theirs
             xSemaphoreGive(camera_ready_sem);
 #else
             if (rc > 0) {
