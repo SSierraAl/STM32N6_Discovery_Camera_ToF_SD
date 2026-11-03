@@ -325,6 +325,14 @@ static int CAM_FormatToBpp(int fmt)
 
 static void CAM_InitCropConfig(CMW_Manual_roi_area_t *roi, int sw, int sh, CAM_conf_t *conf)
 {
+#if CAM_NATIVE_ROI
+  assert(CAM_NATIVE_ROI_X + conf->capture_width <= sw);
+  assert(CAM_NATIVE_ROI_Y + conf->capture_height <= sh);
+  roi->width = conf->capture_width;
+  roi->height = conf->capture_height;
+  roi->offset_x = CAM_NATIVE_ROI_X;
+  roi->offset_y = CAM_NATIVE_ROI_Y;
+#else
   float rx = (float)sw / conf->capture_width;
   float ry = (float)sh / conf->capture_height;
   float r = MIN(rx, ry);
@@ -333,6 +341,7 @@ static void CAM_InitCropConfig(CMW_Manual_roi_area_t *roi, int sw, int sh, CAM_c
   roi->height = (uint32_t)MIN(conf->capture_height * r, sh);
   roi->offset_x = (sw - roi->width + 1) / 2;
   roi->offset_y = (sh - roi->height + 1) / 2;
+#endif
 }
 
 static void CAM_EnableYuv(uint32_t Pipe)
@@ -352,7 +361,6 @@ static void DCMIPP_PipeInitCapture(CAM_conf_t *cam_conf, int sw, int sh, CAM_con
 {
   CMW_DCMIPP_Conf_t dc;
   uint32_t hw_pitch;
-  assert(conf->capture_width >= conf->capture_height);
   dc.output_width  = conf->capture_width;
   dc.output_height = conf->capture_height;
   dc.output_format = cam_conf->dcmipp_output_format;
@@ -360,6 +368,11 @@ static void DCMIPP_PipeInitCapture(CAM_conf_t *cam_conf, int sw, int sh, CAM_con
   dc.mode          = CMW_Aspect_ratio_manual_roi;
   dc.enable_swap   = cam_conf->is_rgb_swap;
   dc.enable_gamma_conversion = 0;
+#if CAM_NATIVE_ROI
+  assert(sensor == CMW_IMX335_Sensor);
+#else
+  assert(conf->capture_width >= conf->capture_height);
+#endif
   CAM_InitCropConfig(&dc.manual_conf, sw, sh, conf);
 #if PERF_DEBUG_LEVEL >= 1
   printf("[CAM] Full field=%lux%lu+%lu+%lu output=%dx%d\n",
@@ -495,9 +508,8 @@ void CAM_NotifyFrameEvent(void)
  *   or torn images, worse for a moving subject.
  * @return 0 on success, -1 on timeout (elapsed_ms optionally reports actual wait)
  */
-static int CAM_WaitNextFrameReady(uint32_t timeout_ms, uint32_t *elapsed_ms)
+static int CAM_WaitFrameAfter(uint32_t start_evt, uint32_t timeout_ms, uint32_t *elapsed_ms)
 {
-  uint32_t start_evt = g_frame_event_count;
   uint32_t t0 = HAL_GetTick();
 
   while (g_frame_event_count == start_evt) {
@@ -510,6 +522,11 @@ static int CAM_WaitNextFrameReady(uint32_t timeout_ms, uint32_t *elapsed_ms)
   }
   if (elapsed_ms) *elapsed_ms = HAL_GetTick() - t0;
   return 0;
+}
+
+static int CAM_WaitNextFrameReady(uint32_t timeout_ms, uint32_t *elapsed_ms)
+{
+  return CAM_WaitFrameAfter(g_frame_event_count, timeout_ms, elapsed_ms);
 }
 
 void CAM_CountVsyncFrame(void)
@@ -934,11 +951,13 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
      Addresses start out pointing at scratch raw_buf[0]/raw_buf[1]; they
      get reprogrammed to batch_buf slots as the warmup tail approaches.
      --------------------------------------------------------------- */
+  uint32_t last_event = g_frame_event_count;
   if (CMW_CAMERA_DoubleBufferStart(DCMIPP_PIPE1, raw_buf[0], raw_buf[1], CMW_MODE_CONTINUOUS) != CMW_ERROR_NONE) {
 #if PERF_DEBUG_LEVEL >= 1
     printf("[CAM] Double-buffer start failed after callback wake\n");
 #endif
-    goto callback_exit;
+    CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
+    return -1;
   }
 
   /* ---------------------------------------------------------------
@@ -975,10 +994,16 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
         PERF_MARK(g_perf_timer, CAM_SNAP);
       }
 
-      if (CAM_WaitNextFrameReady(120, &frame_ms) != 0) {
+      if (CAM_WaitFrameAfter(last_event, 120, &frame_ms) != 0) {
 #if PERF_DEBUG_LEVEL >= 1
         printf("[CAM] Frame wait timeout at k=%lu\n", (unsigned long)k);
 #endif
+        break;
+      }
+      last_event++;
+      if (g_frame_event_count != last_event) {
+        printf("[CAM] Missed frame completion in callback burst\n");
+        captured = 0;
         break;
       }
       frame_seq++;
@@ -987,24 +1012,27 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 #endif
 
       int32_t out_idx = (int32_t)k - (int32_t)CALLBACK_WARMUP_FRAMES;
-      if (out_idx >= 0) {
-        /* This frame was DMA'd directly into batch_buf[out_idx] — no copy
-           needed, just drop any stale CPU cache lines before storage reads it. */
-        uint8_t *dest = batch_buf + ((uint32_t)out_idx * frame_size);
-        SCB_InvalidateDCache_by_Addr((uint32_t*)dest, frame_size);
-        g_callback_capture_ticks[(uint32_t)out_idx] = HAL_GetTick();
-        captured++;
+      /* Retarget the completed hardware slot before doing any cache work.
+         After its final retained frame, send further DMA back to scratch. */
+      int32_t arm_idx = out_idx + 2;
+      uint32_t slot = (frame_seq - 1U) % 2U;
+      if (arm_idx >= 0) {
+        uint8_t *next = arm_idx < CALLBACK_FRAMES ?
+                        batch_buf + (uint32_t)arm_idx * frame_size : raw_buf[slot];
+        uint32_t address_slot = slot == 0U ? DCMIPP_MEMORY_ADDRESS_0 : DCMIPP_MEMORY_ADDRESS_1;
+        if (HAL_DCMIPP_PIPE_SetMemoryAddress(h, DCMIPP_PIPE1, address_slot,
+                                            (uint32_t)next) != HAL_OK) {
+          printf("[CAM] Failed to arm callback burst DMA slot\n");
+          captured = 0;
+          break;
+        }
       }
 
-      /* Arm the address that JUST freed (used by the frame that just
-         completed) for reuse 2 frames from now, if that future frame is
-         one we want to keep. */
-      int32_t arm_idx = out_idx + 2;
-      if (arm_idx >= 0 && arm_idx < CALLBACK_FRAMES) {
-        uint32_t parity = (frame_seq - 1U) % 2U;
-        HAL_DCMIPP_PIPE_SetMemoryAddress(h, DCMIPP_PIPE1,
-                                          parity == 0U ? DCMIPP_MEMORY_ADDRESS_0 : DCMIPP_MEMORY_ADDRESS_1,
-                                          (uint32_t)(batch_buf + ((uint32_t)arm_idx * frame_size)));
+      if (out_idx >= 0) {
+        uint8_t *dest = batch_buf + (uint32_t)out_idx * frame_size;
+        SCB_InvalidateDCache_by_Addr((uint32_t *)dest, frame_size);
+        g_callback_capture_ticks[(uint32_t)out_idx] = HAL_GetTick();
+        captured++;
       }
     }
   }
@@ -1012,10 +1040,13 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   /* ---------------------------------------------------------------
      Step 6: Stop pipe ONCE after ALL frames captured.
      --------------------------------------------------------------- */
-callback_exit:
   /* Return to standby. */
   PERF_MARK(g_perf_timer, CAM_STOP);
-  HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
+  if (HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0) != HAL_OK) {
+    printf("[CAM] Callback burst stop failed, capture disabled until reboot\n");
+    g_callback_ready = 0;
+    captured = 0;
+  }
   CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
   PERF_MARK(g_perf_timer, CAM_DEINIT);
 #if PERF_DEBUG_LEVEL >= 1

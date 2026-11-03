@@ -55,9 +55,25 @@
 #endif
 #endif
 
-/* Mode 4 keeps its validated six half-size buffers. Full-resolution testing
-   uses CAPTURE_MODE=0 (USER button): one reused frame buffer, no burst. */
-#if CAPTURE_MODE == 4 && CAM_BINNING != 1
+/* Opt-in ToF burst with a fixed, unscaled DCMIPP crop. Coordinates are
+   relative to the oriented sensor image. Set the window using a bench target. */
+#ifndef CAM_NATIVE_ROI
+#define CAM_NATIVE_ROI 1
+#endif
+#if CAM_NATIVE_ROI
+#define CAM_NATIVE_ROI_X 976
+#define CAM_NATIVE_ROI_Y 584
+#define CAM_NATIVE_ROI_W 640
+#define CAM_NATIVE_ROI_H 768
+#if CAPTURE_MODE != 4 || CAM_NATIVE_ROI_W < 16 || CAM_NATIVE_ROI_H < 4 || \
+    CAM_NATIVE_ROI_X < 0 || CAM_NATIVE_ROI_Y < 0 || \
+    CAM_NATIVE_ROI_X % 2 || CAM_NATIVE_ROI_Y % 2 || \
+    CAM_NATIVE_ROI_W % 16 || CAM_NATIVE_ROI_H % 2 || \
+    CAM_NATIVE_ROI_X + CAM_NATIVE_ROI_W > 2592 || \
+    CAM_NATIVE_ROI_Y + CAM_NATIVE_ROI_H > 1944
+#error "Native ROI requires mode 4 and an aligned window inside 2592x1944"
+#endif
+#elif CAPTURE_MODE == 4 && CAM_BINNING != 1
 #error "Full-resolution testing requires CAPTURE_MODE=0; Mode 4 keeps half-size buffers"
 #endif
 
@@ -78,7 +94,10 @@
 
 /** Snapshot resolution (auto-calculated from CAM_BINNING).
     YUV422 format = 2 bytes per pixel */
-#if CAM_BINNING == 1
+#if CAM_NATIVE_ROI
+    #define SNAP_WIDTH  CAM_NATIVE_ROI_W
+    #define SNAP_HEIGHT CAM_NATIVE_ROI_H
+#elif CAM_BINNING == 1
     #define SNAP_WIDTH       1296   /* Half-size output: 2592/2 */
     #define SNAP_HEIGHT      972    /* Half-size output: 1944/2 */
 #else
@@ -241,8 +260,15 @@
      
      Timing: warmup(N) + capture(M) frames at ~33ms each = (N+M)*33ms total.
      With CALLBACK_WARMUP=5 and CALLBACK_FRAMES=3: ~264ms from wake to SD write. */
+#ifndef CALLBACK_WARMUP_FRAMES
 #define CALLBACK_WARMUP_FRAMES   13   /* Frames to discard after wake (callback-based) */
+#endif
+#ifndef CALLBACK_FRAMES
 #define CALLBACK_FRAMES          2   /* Number of frames to capture per trigger */
+#endif
+#if CAM_NATIVE_ROI && (CALLBACK_WARMUP_FRAMES < 2 || CALLBACK_FRAMES < 1)
+#error "Native ROI double-buffering needs at least two warmup frames and one retained frame"
+#endif
 #define CALLBACK_WAKE_TIMEOUT_MS 1000  /* Max wait for wake + warmup + capture */
 
 /** Total PSRAM needed for callback batch: CALLBACK_FRAMES × frame_size

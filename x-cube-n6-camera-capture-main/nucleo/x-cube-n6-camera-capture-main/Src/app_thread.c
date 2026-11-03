@@ -18,8 +18,10 @@
 #include "image_filter.h"
 #include "utils.h"
 
+#if !CAM_NATIVE_ROI
 /* Detection frame buffer (640x480 YUV422 = 614 KB) in PSRAM */
 static uint8_t detection_frame[IF_DETECT_FRAME_SZ] ALIGN_32 IN_PSRAM;
+#endif
 
 /* Bound repeated camera activations in every detector mode. This includes the
    high-sensitivity 4x4 camera path: after the configured number of photos, a
@@ -64,7 +66,9 @@ volatile SensorState_t g_sensor_state = SENSOR_STATE_IDLE;
 static volatile int g_capture_busy = 0;
 static volatile int g_last_storage_rc = 0;
 static volatile int g_last_batch_frames = 0;
+#if !CAM_NATIVE_ROI
 static volatile int g_stage3_crops = 0;
+#endif
 /* Camera task reserves IDs before dispatch; failed writes leave an ID gap. */
 static uint32_t g_next_snap_id = 0;
 static uint32_t g_sd_img_base_block;
@@ -78,6 +82,7 @@ extern SD_HandleTypeDef hsd1;
 extern uint8_t sd_batch_buf[];
 PerfTimer_t g_perf_timer;
 
+#if !CAM_NATIVE_ROI
 /* ================================================================
    MULTI-RESOLUTION CAPTURE STATE (Phase 3)
    ================================================================ */
@@ -117,6 +122,8 @@ static void downscale_1296x972_to_640x480(const uint8_t *src, uint8_t *dst)
     SCB_InvalidateDCache_by_Addr((uint32_t *)dst, IF_DETECT_FRAME_SZ);
     printf("[MULTI] Downscale done (%d bytes)\n", IF_DETECT_FRAME_SZ);
 }
+
+#endif
 
 /* DS3231 gives UTC at one-second resolution. Mode 4 keeps that UTC anchor
    and replaces only capture_tick with the exact completion tick of each frame. */
@@ -977,6 +984,31 @@ void camera_task(void *arg)
             /* PIPE1 is stopped inside CAM_CallbackBatchSnap + sensor in standby */
             PERF_MARK(g_perf_timer, CAM_END);
 #endif
+#if CAM_NATIVE_ROI
+#if WS2812_MODE == 0 || WS2812_MODE == 1
+            WS2812_FlashStop();
+#endif
+            RTC_Stamp stamp = RTC_CaptureStamp();
+            for (int f = 0; f < rc; f++) {
+                StorageCmd_t frame = {0};
+                frame.type = STORAGE_CMD_SAVE;
+                frame.image_buf = batch_buf + (uint32_t)f * frame_size;
+                frame.image_size = frame_size;
+                frame.width = SNAP_WIDTH;
+                frame.height = SNAP_HEIGHT;
+                frame.snap_id = g_next_snap_id++;
+                frame.stamp = RTC_StampForFrame(stamp, CAM_GetCallbackFrameTick((uint32_t)f));
+                if (xQueueSend(storage_cmd_queue, &frame, pdMS_TO_TICKS(1000)) != pdTRUE) {
+                    g_last_storage_rc = -1;
+                    break;
+                }
+                /* Hold the slot until SD releases it, including recovery/retry. */
+                xSemaphoreTake(storage_done_sem, portMAX_DELAY);
+                g_last_batch_frames++;
+            }
+            g_capture_busy = 0;
+            xSemaphoreGive(camera_ready_sem);
+#else
             if (rc > 0) {
                 g_last_batch_frames = rc;
 #if PERF_DEBUG_LEVEL >= 1
@@ -1180,6 +1212,7 @@ void camera_task(void *arg)
                 g_capture_busy = 0;
                 xSemaphoreGive(camera_ready_sem);
             }
+#endif /* CAM_NATIVE_ROI */
 #else
             rc = CAM_CaptureSingleFrame(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS, SNAP_WARMUP_FRAMES);
             PERF_MARK(g_perf_timer, CAM_END);
@@ -1267,7 +1300,9 @@ static int Capture_ReturnWithIlluminationOff(int result)
 int Capture_RequestSnapshot(uint32_t timeout_ms)
 {
     Perf_Start(&g_perf_timer);
+#if !CAM_NATIVE_ROI
     uint32_t t_start = g_perf_timer.start_tick;
+#endif
     CameraCmd_t cmd = {0}; cmd.type = CAM_CMD_SNAP;
     g_last_storage_rc = 0;
     while (xSemaphoreTake(storage_done_sem, 0) == pdTRUE) {
@@ -1278,6 +1313,19 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
     }
 
     TickType_t ticks = (timeout_ms > 0) ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY;
+#if CAM_NATIVE_ROI
+    if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) {
+        /* End illumination on timeout, but finish draining this transaction
+           before another request can reuse its buffers or completion signal. */
+        Capture_ReturnWithIlluminationOff(-1);
+        xSemaphoreTake(camera_ready_sem, portMAX_DELAY);
+        Perf_Stop(&g_perf_timer);
+        return -1;
+    }
+    Perf_Stop(&g_perf_timer);
+    return Capture_ReturnWithIlluminationOff(
+        g_last_batch_frames == CALLBACK_FRAMES && g_last_storage_rc == 0 ? 0 : -1);
+#else
     if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) {
         return Capture_ReturnWithIlluminationOff(-1);
     }
