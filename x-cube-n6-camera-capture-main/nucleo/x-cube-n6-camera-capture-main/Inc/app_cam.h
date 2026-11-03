@@ -253,10 +253,32 @@ int CAM_SetSensorROI(uint16_t x_start, uint16_t y_start,
 int CAM_SetFullFrame(void);
 
 /**
+ * @brief  Put camera sensor into low-power standby mode (writes 0x01 to 0x3000).
+ *         The sensor stays powered; call CAM_CallbackBatchSnap to wake it again.
+ */
+void CAM_Standby(void);
+
+/**
+ * @brief  Reconfigure DCMIPP pipe for a given resolution on-the-fly.
+ *         Uses PipeState reset (no DeInit→Init) — call only when pipe is stopped.
+ *         After this, CAM_CallbackBatchSnap uses the new dimensions.
+ *         Returns 0 on success, -1 on error.
+ */
+int CAM_SetPipeResolution(uint16_t width, uint16_t height,
+                           uint16_t offset_x, uint16_t offset_y);
+
+/**
+ * @brief  Reset callback-ready flag so the next CAM_CallbackBatchSnap
+ *         re-initializes the camera pipeline cleanly (after Stage 3's
+ *         DeInit→Init). Call between capture cycles in camera_task.
+ */
+void CAM_ResetCallbackReady(void);
+
+/**
  * @brief  Stage 3 AREA3 ROI capture.
  *         Sensor enters standby → AREA3 → DCMIPP init → warmup → stop →
  *         full-frame → standby. Buffer must hold roi_w*roi_h*2 bytes.
- *         Returns 0 on success, -1 on error.
+ *         Returns captured frame count (>0) on success, -1 on error.
  */
 int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
                    uint16_t roi_x, uint16_t roi_y,

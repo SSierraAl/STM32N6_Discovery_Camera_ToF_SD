@@ -54,7 +54,7 @@ int CAM_WriteSensorRegMulti(uint16_t reg, const uint8_t *data, uint16_t len)
 /* ================================================================
    IMX335 AREA3 / ROI register sequence
    ================================================================
-   Full standby→hold→write→stream sequence with retry logic.
+   Full standby->hold->write->stream sequence with retry logic.
    Reference: MASSIF-ROI-Windowing project, App_ChangeROI().
    ================================================================ */
 
@@ -76,6 +76,15 @@ static int CAM_WriteSensorReg24(uint16_t reg, uint32_t value)
   d[1] = (uint8_t)((value >> 8) & 0xFFU);
   d[2] = (uint8_t)((value >> 16) & 0xFFU);
   return CMW_I2C_WRITEREG16(CAMERA_IMX335_ADDRESS, reg, d, 3);
+}
+
+/** Helper: write 2-byte (16-bit) value to sensor, little-endian. */
+static int CAM_WriteSensorReg16(uint16_t reg, uint32_t value)
+{
+  uint8_t d[2];
+  d[0] = (uint8_t)(value & 0xFFU);
+  d[1] = (uint8_t)((value >> 8) & 0xFFU);
+  return CMW_I2C_WRITEREG16(CAMERA_IMX335_ADDRESS, reg, d, 2);
 }
 
 /** Helper: write 4-byte (32-bit) value to sensor, little-endian. */
@@ -105,13 +114,29 @@ int CAM_SetSensorROI(uint16_t x_start, uint16_t y_start,
   x_end = x_start + width - 1;
   y_end = y_start + height - 1;
 
-  /* VMAX = output height + blanking (100 lines for stability, per ref project) */
-  vmax   = height + 100;
-  shutter = vmax - 100;
+  /* VMAX = full-frame 30fps value = 0x1194 = 4500 lines.
+     IMPORTANT: IMX335 VMAX is a 16-bit register at 0x3030-0x3031.
+     Do NOT use CAM_WriteSensorReg32 (4 bytes) — it corrupts 0x3032-0x3033!
+     line_time = 1/(30*4500) = 7.407 us at 30fps.  */
+  vmax   = 0x1194UL;  /* Fixed: full-frame 30fps from imx335.c framerate_30fps_regs */
+  /* SHUTTER from target exposure (CAM_EXPOSURE_VALUE µs):
+     shutter = exposure_us * fps * vmax / 1000000  */
+  shutter = (uint32_t)((unsigned long long)CAM_EXPOSURE_VALUE *
+                      (unsigned long long)SNAP_FPS *
+                      (unsigned long long)vmax / 1000000ULL);
   if (shutter < 9) shutter = 9;
+  if (shutter > vmax - 4) shutter = vmax - 4;
 
-  printf("[CAM] SetSensorROI: (%u,%u) %ux%u → VMAX=%lu SHUTTER=%lu\n",
-         x_start, y_start, width, height, (unsigned long)vmax, (unsigned long)shutter);
+  {
+    /* Actual exposure in microseconds for diagnostic */
+    uint32_t exposure_us = (uint32_t)((unsigned long long)shutter *
+                                     1000000ULL /
+                                     ((unsigned long long)SNAP_FPS * vmax));
+    printf("[CAM] SetSensorROI: (%u,%u) %ux%u → VMAX=%lu SHUTTER=%lu → exposure=%lu us (target=%lu us)\n",
+           x_start, y_start, width, height,
+           (unsigned long)vmax, (unsigned long)shutter,
+           (unsigned long)exposure_us, (unsigned long)CAM_EXPOSURE_VALUE);
+  }
 
   /* Step 1: STANDBY (0x3000 = 0x01) with retry */
   for (retry = 0; retry < 3; retry++) {
@@ -167,9 +192,9 @@ int CAM_SetSensorROI(uint16_t x_start, uint16_t y_start,
   }
   if (ret) return -1;
 
-  /* Step 4: Write VMAX (32-bit) with retry */
+  /* Step 4: Write VMAX (16-bit at 0x3030-0x3031, NOT 32-bit! 0x3032-0x3033 are OTHER registers.) */
   for (retry = 0; retry < 3; retry++) {
-    ret = CAM_WriteSensorReg32(IMX335_REG_VMAX, vmax);
+    ret = CAM_WriteSensorReg16(IMX335_REG_VMAX, vmax);
     if (ret == 0) break;
     HAL_Delay(5);
   }
@@ -428,6 +453,7 @@ static int CAM_CapturePipe_StartRetry(uint8_t *dst, uint32_t mode, uint8_t retri
 
 void CAM_IspUpdate(void)
 {
+  assert(CMW_CAMERA_GetDCMIPPHandle() != NULL);
   assert(CMW_CAMERA_Run() == CMW_ERROR_NONE);
 }
 
@@ -1030,27 +1056,74 @@ int CAM_IsCallbackReady(void)
 }
 
 /* ================================================================
-   CAM_CaptureROI  —  Stage 3 ROI capture after Stage 1 detection.
+   ROW DIAGNOSTIC — print mean Y of key rows to detect dark/top rows.
+   Samples the Y component (byte 0 of each pixel pair) across a row.
+   ================================================================ */
+static void CAM_DumpRowStats(const uint8_t *buf, uint16_t w, uint16_t h,
+                              const char *label)
+{
+  const uint32_t pitch = (uint32_t)w * 2;  /* YUV422: 2 bytes/pixel */
+  /* Key row indices: first, quarter, half, three-quarter, last */
+  uint32_t rows[] = {0, h/4, h/2, 3*h/4, h > 0 ? h-1 : 0};
+  uint32_t sample_pix[] = {0, w/4, w/2, 3*w/4, w > 0 ? w-1 : 0};
+  int nr = sizeof(rows)/sizeof(rows[0]);
+  int np = sizeof(sample_pix)/sizeof(sample_pix[0]);
+
+  for (int ri = 0; ri < nr; ri++) {
+    /* Compute mean Y across the row by sampling at 5 x-positions */
+    uint32_t sum_y = 0;
+    for (int pi = 0; pi < np; pi++) {
+      uint32_t off = rows[ri] * pitch + sample_pix[pi] * 2;
+      sum_y += buf[off];
+    }
+    printf("[CAM] %s row=%lu meanY=%u\n",
+           label, (unsigned long)rows[ri], (unsigned)(sum_y / np));
+  }
+}
+
+/* ================================================================
+   CAM_ResetCallbackReady  —  Allow re-init for second capture.
+   After Stage 3's CAM_CaptureROI does DeInit→Init, the DCMIPP
+   handle is refreshed but g_callback_ready remains set from boot's
+   CAM_CallbackInit.  Reset it so CAM_CallbackBatchSnap re-initializes
+   cleanly on the next capture cycle.
+   ================================================================ */
+void CAM_ResetCallbackReady(void)
+{
+  g_callback_ready = 0;
+}
+
+/* ================================================================
+   CAM_CaptureROI  —  Stage 3 AREA3 ROI capture after Stage 1 detection.
    Performs a FULL CMW_CAMERA_DeInit → Init cycle so the DCMIPP pipe
    is completely clean before reconfiguring for the ROI crop.  Pipe-
    only crop changes without full re-init produce corrupted frames
    (repeated/dark/green columns) because the DCMIPP state machine
    does not cleanly transition between different crop sizes.
-   Returns 0 on success, -1 on error.
+   Programs sensor AREA3 registers for the window, then uses the
+   callback-batch approach to capture CALLBACK_FRAMES frames.
+   Returns number of frames captured, or -1 on error.
    ================================================================ */
 int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
                    uint16_t roi_x, uint16_t roi_y,
                    uint16_t roi_w, uint16_t roi_h)
 {
-  if (!buf || buf_size < (uint32_t)roi_w * roi_h * 2) return -1;
+  uint32_t roi_frame_sz = (uint32_t)roi_w * roi_h * 2;
+  if (!buf || buf_size < roi_frame_sz) return -1;
 
-  printf("[CAM] Stage 3: AREA3 crop (%u,%u) %ux%u buf=0x%08lx buf_sz=%lu\n",
-         roi_x, roi_y, roi_w, roi_h, (unsigned long)(uintptr_t)buf, (unsigned long)buf_size);
+  uint32_t max_frames = buf_size / roi_frame_sz;
+  if (max_frames > CALLBACK_FRAMES) max_frames = CALLBACK_FRAMES;
+  if (max_frames == 0) return -1;
 
-  /* Step 0: Stop PIPE1 then full DeInit→Init to reset the DCMIPP + CSI receiver
-     so that restart genuinely captures new frames (vsync=0 otherwise). */
+  uint32_t captured = 0;
+
+  printf("[CAM] Stage 3: AREA3 (%u,%u) %ux%u native 2592x1944 capture %lu frames\n",
+         roi_x, roi_y, roi_w, roi_h, (unsigned long)max_frames);
+
+  /* ---------------------------------------------------------------
+     Step 0: Full DeInit->Init to reset DCMIPP + CSI receiver cleanly.
+     --------------------------------------------------------------- */
   {
-    extern DCMIPP_HandleTypeDef hcamera_dcmipp;
     CMW_CameraInit_t cam_conf;
     CMW_CAMERA_DeInit();
     HAL_Delay(50);
@@ -1059,18 +1132,19 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
     cam_conf.fps = SNAP_FPS;
     cam_conf.mirror_flip = CAM_getFlipMode(sensor);
     if (CMW_CAMERA_Init(&cam_conf, NULL) != CMW_ERROR_NONE) {
-      printf("[CAM] Stage 3: Init failed\n");
+      printf("[CAM] Stage 3: CMW_CAMERA_Init failed\n");
       return -1;
     }
-    printf("[CAM] Step0: DeInit→Init done\n");
   }
 
-  /* Boost exposure/gain after Init's minimum — avoids Y=16 from CMW_CAMERA_Init.
-     Using the same non-zero values used in DCMIPP_Restart */
+  /* Set exposure/gain after Init's minimum — avoids Y=16 from CMW_CAMERA_Init. */
   CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
   CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
 
-  /* Step 1: Configure pipe for the exact AREA3 crop */
+  /* ---------------------------------------------------------------
+     Step 1: Configure DCMIPP pipe for 1:1 at the ROI size first.
+     Offset (0,0) since AREA3 handles the spatial crop.
+     --------------------------------------------------------------- */
   {
     uint32_t hw_pitch;
     CMW_DCMIPP_Conf_t dc = {0};
@@ -1084,8 +1158,8 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
     dc.enable_gamma_conversion = 0;
     dc.manual_conf.width  = roi_w;
     dc.manual_conf.height = roi_h;
-    dc.manual_conf.offset_x = roi_x;
-    dc.manual_conf.offset_y = roi_y;
+    dc.manual_conf.offset_x = 0;
+    dc.manual_conf.offset_y = 0;
     hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_RESET;
     if (CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &dc, &hw_pitch) != CMW_ERROR_NONE) {
       printf("[CAM] Stage 3: SetPipeConfig failed\n");
@@ -1095,84 +1169,122 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
     hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_READY;
     if (dc.output_format == DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1)
       CAM_EnableYuv(DCMIPP_PIPE1);
-    printf("[CAM] Step1: hw_pitch=%lu (raw=%lu) pipe_state=%lu\n",
-           (unsigned long)hw_pitch, (unsigned long)roi_w * 2,
-           (unsigned long)hcamera_dcmipp.PipeState[DCMIPP_PIPE1]);
   }
 
-  /* Step 2: Start pipe, capture, stop */
+  /* ---------------------------------------------------------------
+     Step 2: Program sensor AREA3 (AREA1) registers for the ROI window.
+     CRITICAL: Do this BEFORE starting the DCMIPP pipe, while sensor
+     is in the init standby state.  CAM_SetSensorROI does:
+       STANDBY → HOLD → write AREA1+VMAX+SHUTTER → STREAMING.
+     The DCMIPP pipe is NOT running yet, so the CSI receiver stays clean.
+     --------------------------------------------------------------- */
+  if (CAM_SetSensorROI(roi_x, roi_y, roi_w, roi_h) != 0) {
+    printf("[CAM] Stage 3: CAM_SetSensorROI failed\n");
+    CMW_CAMERA_DeInit();
+    return -1;
+  }
+
+  /* ---------------------------------------------------------------
+     Step 3: Start double-buffer continuous capture.  The sensor is
+     already configured for the AREA3 window and streaming.
+     Camera_Drv.Start() writes streaming mode (0x3000=0x00) which is
+     redundant but harmless — it does NOT reset the AREA1 registers.
+     --------------------------------------------------------------- */
   {
-    int start_ret = CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
-    if (start_ret != 0) {
-      printf("[CAM] Stage 3: Pipe start failed ret=%d\n", start_ret);
+    extern uint8_t save_buf[];
+    if (CMW_CAMERA_DoubleBufferStart(DCMIPP_PIPE1, capture_buf, save_buf, CMW_MODE_CONTINUOUS) != CMW_ERROR_NONE) {
+      printf("[CAM] Stage 3: DoubleBufferStart failed\n");
       CMW_CAMERA_DeInit();
       return -1;
     }
   }
+
+  /* Double-check actual exposure/gain after AREA3 override. */
   {
-    uint32_t t0 = HAL_GetTick();
-    uint32_t pre_vsync = g_vsync_count;
-    uint32_t pre_frame = g_frame_event_count;
-    CAM_ResetFrameCounter(10);
-    while (g_wait_frames > 0) {
-      CAM_IspUpdate();
-      vTaskDelay(pdMS_TO_TICKS(5));
-      if (HAL_GetTick() - t0 > 3000) break;
-    }
-    uint32_t elapsed = HAL_GetTick() - t0;
-    uint32_t vsync_delta = g_vsync_count - pre_vsync;
-    uint32_t frame_delta = g_frame_event_count - pre_frame;
-    printf("[CAM] Step2: wait=%ldms vsync=%lu frame_evt=%lu g_fcnt=%lu\n",
-           (unsigned long)elapsed, (unsigned long)vsync_delta,
-           (unsigned long)frame_delta, (unsigned long)g_frame_count);
+    uint32_t actual_exposure = 0;
+    CMW_CAMERA_GetExposure(&actual_exposure);
+    printf("[CAM] Stage 3: ROI active — CMW exposure=%lu us (target=%lu us)\n",
+           (unsigned long)actual_exposure, (unsigned long)CAM_EXPOSURE_VALUE);
   }
+
+  /* ---------------------------------------------------------------
+     Step 4: Walk through warmup AND capture frames in one loop.
+     k in [0, WARMUP) are discarded; k in [WARMUP, WARMUP+CAPTURE)
+     are saved into successive batch_buf slots.  DMA addresses are
+     armed 2 frames ahead for zero-copy continuous capture.
+     --------------------------------------------------------------- */
   {
     DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
-    printf("[CAM] Pre-stop pipe1_state=%lu\n",
-           (unsigned long)h->PipeState[DCMIPP_PIPE1]);
+    const uint32_t total = (uint32_t)CALLBACK_WARMUP_FRAMES + max_frames;
+
+    for (uint32_t k = 0; k < total; k++) {
+      if (CAM_WaitNextFrameReady(120, NULL) != 0) {
+        printf("[CAM] Stage 3: frame wait timeout at k=%lu\n", (unsigned long)k);
+        break;
+      }
+
+      int32_t out_idx = (int32_t)k - (int32_t)CALLBACK_WARMUP_FRAMES;
+      if (out_idx >= 0) {
+        uint8_t *dest = buf + ((uint32_t)out_idx * roi_frame_sz);
+        SCB_InvalidateDCache_by_Addr((uint32_t*)dest, roi_frame_sz);
+        captured++;
+        CAM_DumpRowStats(dest, roi_w, roi_h, "Stage3_ROI");
+      }
+
+      /* Arm the address that JUST freed for reuse 2 frames from now. */
+      int32_t arm_idx = out_idx + 2;
+      if (arm_idx >= 0 && arm_idx < (int32_t)max_frames) {
+        uint32_t parity = k % 2U;
+        HAL_DCMIPP_PIPE_SetMemoryAddress(h, DCMIPP_PIPE1,
+                                          parity == 0U ? DCMIPP_MEMORY_ADDRESS_0 : DCMIPP_MEMORY_ADDRESS_1,
+                                          (uint32_t)(buf + ((uint32_t)arm_idx * roi_frame_sz)));
+      }
+    }
+
+    printf("[CAM] Stage 3: Captured %d/%lu ROI frames\n", (int)captured, (unsigned long)max_frames);
+  }
+
+  /* ---------------------------------------------------------------
+     Step 5: Stop pipe.  Caller restores full-frame.
+     --------------------------------------------------------------- */
+  {
+    DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
     HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
-    printf("[CAM] Post-stop pipe1_state=%lu\n",
-           (unsigned long)h->PipeState[DCMIPP_PIPE1]);
-  }
-  SCB_InvalidateDCache_by_Addr((uint32_t*)buf, (uint32_t)roi_w * roi_h * 2);
-
-  /* Verify buffer content: first 16 bytes, mean of first 512 Y pixels */
-  {
-    uint32_t y_sum = 0, n_check = (roi_w > 512 ? 512 : roi_w);
-    for (uint32_t i = 0; i < n_check; i++) y_sum += buf[i*2];
-    printf("[CAM] Buf[0..15]:");
-    for (int i = 0; i < 16; i++) printf(" %02x", buf[i]);
-    printf("  Y-mean=%lu/%lu\n", (unsigned long)(y_sum/n_check), (unsigned long)n_check);
-    printf("[CAM] Buf[%lu..%lu]:", (unsigned long)(roi_w*2), (unsigned long)(roi_w*2+15));
-    for (int i = 0; i < 16; i++) printf(" %02x", buf[roi_w*2 + i]);
-    printf("\n");
   }
 
-  /* Step 4: Restore pipe config for SNAP. Do NOT start — CAM_CallbackBatchSnap
-     calls CMW_CAMERA_DoubleBufferStart on the next trigger with its own buffers. */
-  {
-    extern DCMIPP_HandleTypeDef hcamera_dcmipp;
-    uint32_t snap_pitch;
-    CMW_DCMIPP_Conf_t sdc = {0};
-    sdc.output_width      = SNAP_WIDTH;
-    sdc.output_height     = SNAP_HEIGHT;
-    sdc.output_format     = DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1;
-    sdc.output_bpp        = 2;
-    sdc.mode              = CMW_Aspect_ratio_manual_roi;
-    sdc.enable_swap       = 0;
-    sdc.enable_gamma_conversion = 0;
-    sdc.manual_conf.width  = SNAP_WIDTH;
-    sdc.manual_conf.height = SNAP_HEIGHT;
-    sdc.manual_conf.offset_x = (uint16_t)((2592U - SNAP_WIDTH) / 2) & ~1U;
-    sdc.manual_conf.offset_y = (uint16_t)((1944U - SNAP_HEIGHT) / 2) & ~1U;
-    hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_RESET;
-    CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &sdc, &snap_pitch);
-    hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_READY;
-    if (sdc.output_format == DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1)
-      CAM_EnableYuv(DCMIPP_PIPE1);
-  }
+  return (int)captured;
+}
 
-  printf("[CAM] Stage 3: AREA3 captured %ux%u from (%u,%u)\n",
-         roi_w, roi_h, roi_x, roi_y);
+void CAM_Standby(void)
+{
+  CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
+}
+
+int CAM_SetPipeResolution(uint16_t width, uint16_t height,
+                           uint16_t offset_x, uint16_t offset_y)
+{
+  extern DCMIPP_HandleTypeDef hcamera_dcmipp;
+  uint32_t hw_pitch;
+  CMW_DCMIPP_Conf_t sdc = {0};
+  sdc.output_width      = width;
+  sdc.output_height     = height;
+  sdc.output_format     = DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1;
+  sdc.output_bpp        = 2;
+  sdc.mode              = CMW_Aspect_ratio_manual_roi;
+  sdc.enable_swap       = 0;
+  sdc.enable_gamma_conversion = 0;
+  sdc.manual_conf.width  = width;
+  sdc.manual_conf.height = height;
+  sdc.manual_conf.offset_x = offset_x;
+  sdc.manual_conf.offset_y = offset_y;
+  hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_RESET;
+  if (CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &sdc, &hw_pitch) != CMW_ERROR_NONE) {
+    printf("[CAM] SetPipeResolution %ux%u failed\n", width, height);
+    return -1;
+  }
+  hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_READY;
+  if (sdc.output_format == DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1)
+    CAM_EnableYuv(DCMIPP_PIPE1);
+  printf("[CAM] Pipe reconfigured: %ux%u offset %u,%u\n", width, height, offset_x, offset_y);
   return 0;
 }

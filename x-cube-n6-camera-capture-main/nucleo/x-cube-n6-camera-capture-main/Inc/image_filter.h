@@ -32,9 +32,17 @@
 #define IF_CLEAN_MAX_DIFF  16     /* CLEAN needs max diff ≤ this */
 
 /* ROI sizing (for Stage 3 fallback) */
-#define IF_ROI_MARGIN      20     /* extra px around bbox (detect coords) */
+#define IF_ROI_MARGIN      160    /* extra px around bbox (detect coords) — larger for native-res AREA3 crop */
 #define IF_ROI_MAX_SZ_W    2000   /* max insect width in sensor px (AREA3 supports up to 2592) */
 #define IF_ROI_MAX_SZ_H    1800   /* max insect height in sensor px (AREA3 supports up to 1944) */
+/* Maximum pixels per ROI frame: for 1 frame at 2 bytes/pixel fitting in BATCH_BUF_SIZE.
+   BATCH_BUF_SIZE = 2 × 1296×972×2 = 5,038,848 bytes.
+   Max 1-frame pixels = 5,038,848 / 2 = 2,519,424.  */
+#define IF_MAX_ROI_PIXELS    2519424U  /* max pixels = BATCH_BUF_SIZE/2 = 5,038,848/2 */
+/* Minimum ROI pixels = SNAP width×height (= 1296×972 = 1,259,712).
+   Stage 3 MUST exceed Stage 2 resolution — this ensures the AREA3 crop
+   never falls back to SNAP-center (same-res) output. */
+#define IF_MIN_ROI_PIXELS    1259712U
 
 /* ================================================================
    TYPES

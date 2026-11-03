@@ -315,14 +315,10 @@ int IF_CalcROI(const IF_Result_t *detection,
     if (insect_w > IF_ROI_MAX_SZ_W || insect_h > IF_ROI_MAX_SZ_H)
         return -1;
 
-    /* Safety: reject edge false detections.  A real insect at the sensor
-       edge with suspiciously few hot blocks is almost always a gamma/lighting
-       artifact.  We let IF_ROI_MARGIN absorb 2 block-columns of drift before
-       rejecting: only skip when the raw bbox touches the detection-frame edge
-       AND hot_count is below a generous ceiling. */
-    if ((detection->bbox_x < 16 || detection->bbox_y < 16) &&
-        detection->hot_count <= IF_MAX_HOT_OBJECT / 2)
-        return -1;
+    /* Edge detection with low hot_count is allowed — even at the sensor edge.
+       We previously rejected these, but that forced Stage 3 fallback to 1296×972
+       (same as Stage 2).  Now we proceed with a MINIMUM ROI of SNAP area so
+       Stage 3 always delivers higher resolution than Stage 2. */
 
     /* ROI = insect size + margin */
     w = insect_w + (uint32_t)IF_ROI_MARGIN * 2592 / IF_DETECT_W * 2;
@@ -330,6 +326,72 @@ int IF_CalcROI(const IF_Result_t *detection,
 
     if (w > 2592) w = 2592;
     if (h > 1944) h = 1944;
+
+    /* Round dimensions UP to even FIRST so all subsequent area checks use
+       the actual aligned pixel counts (even alignment at the end preserves
+       them). YUV422 requires 2-pixel alignment for width; height should also
+       be even for consistent AREA3 behavior. */
+    if (w & 1) w += 1; if (w > 2592) w = 2592;
+    if (h & 1) h += 1; if (h > 1944) h = 1944;
+    if (w < 64) w = 64;
+    if (h < 64) h = 64;
+
+    /* Enforce MINIMUM area = IF_MIN_ROI_PIXELS (= 1296×972 = 1,259,712) SO THAT
+       Stage 3 resolution is ALWAYS higher than Stage 2's DCMIPP-downscaled
+       1296×972.  We expand BOTH dimensions proportionally until area meets or
+       exceeds the minimum, handling the case where one dimension clips against
+       the sensor limit (2592×1944). */
+    {
+      uint32_t min_pix = IF_MIN_ROI_PIXELS;
+      if (w * h < min_pix) {
+        /* Expand the dimension with more headroom first. */
+        if (w < 2592 && (w * 1944 > h * 2592 || h >= 1944)) {
+          w = (min_pix + h - 1) / h;          /* ceiling division */
+          if (w > 2592) w = 2592;
+          if (w & 1) w += 1;                  /* keep even */
+          if (w > 2592) w = 2592;
+        }
+        if (w * h < min_pix && h < 1944) {
+          h = (min_pix + w - 1) / w;
+          if (h > 1944) h = 1944;
+          if (h & 1) h += 1;
+          if (h > 1944) h = 1944;
+        }
+        /* Third pass: if the OTHER dimension also needs expansion (rare) */
+        if (w * h < min_pix && w < 2592) {
+          w = (min_pix + h - 1) / h;
+          if (w > 2592) w = 2592;
+          if (w & 1) w += 1;
+          if (w > 2592) w = 2592;
+        }
+        printf("[IF] CalcROI min-area boost: %lux%lu (pixels=%lu target=%lu)\n",
+               (unsigned long)w, (unsigned long)h,
+               (unsigned long)(w * h), (unsigned long)min_pix);
+      }
+    }
+
+    /* Ensure ROI fits in BATCH_BUF_SIZE: area must be ≤ IF_MAX_ROI_PIXELS
+       so that roi_w * roi_h * 2 ≤ BATCH_BUF_SIZE (= 1 frame minimum). */
+    while (w * h > IF_MAX_ROI_PIXELS && w > 64 && h > 64) {
+      uint32_t area = w * h;
+      /* Scale down proportionally.  Choose the dimension that overshoots more. */
+      if (w > h) {
+        w = w * IF_MAX_ROI_PIXELS / area;
+      } else {
+        h = h * IF_MAX_ROI_PIXELS / area;
+      }
+      if (w & 1) w += 1;  /* keep even */
+      if (w > 2592) w = 2592;
+      if (w < 64) w = 64;
+      if (h & 1) h += 1;
+      if (h > 1944) h = 1944;
+      if (h < 64) h = 64;
+    }
+    printf("[IF] CalcROI final-size: %lux%lu (pixels=%lu, min=%lu max=%lu)\n",
+           (unsigned long)w, (unsigned long)h,
+           (unsigned long)(w * h),
+           (unsigned long)IF_MIN_ROI_PIXELS,
+           (unsigned long)IF_MAX_ROI_PIXELS);
 
     /* Center on insect */
     x = (int32_t)insect_cx - (int32_t)(w / 2);
@@ -341,14 +403,19 @@ int IF_CalcROI(const IF_Result_t *detection,
     if ((uint32_t)x + w > 2592) x = (int32_t)(2592 - w);
     if ((uint32_t)y + h > 1944) y = (int32_t)(1944 - h);
 
-    /* Even alignment (YUV422 requires 2-pixel alignment) */
+    /* Even alignment — dimensions are already even from the up-round above */
     *roi_x = (uint16_t)((uint32_t)x & ~1U);
     *roi_y = (uint16_t)((uint32_t)y & ~1U);
-    *roi_w = (uint16_t)(w & ~1U);
-    *roi_h = (uint16_t)(h & ~1U);
+    *roi_w = (uint16_t)w;
+    *roi_h = (uint16_t)h;
 
     if (*roi_w < 64) *roi_w = 64;
     if (*roi_h < 64) *roi_h = 64;
+
+    printf("[IF] CalcROI final: (%u,%u) %ux%u (%lu pixels, %lu bytes/frame)\n",
+           *roi_x, *roi_y, *roi_w, *roi_h,
+           (unsigned long)((uint32_t)(*roi_w) * (*roi_h)),
+           (unsigned long)((uint32_t)(*roi_w) * (*roi_h) * 2));
 
     return 0;
 }

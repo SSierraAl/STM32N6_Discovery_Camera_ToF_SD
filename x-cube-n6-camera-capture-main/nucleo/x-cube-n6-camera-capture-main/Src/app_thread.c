@@ -610,6 +610,19 @@ void sensor_task(void *arg)
                 int rc = Capture_RequestSnapshot(60000);
                 PERF_STOP(t);
                 BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+
+                /* Wait for Stage 3 (ROI capture + SD save) to complete.
+                   g_capture_busy is cleared by camera callback after Stage 3
+                   finishes all captures and saves (lines 1135-1137).  Timeout
+                   after 30 s to prevent deadlock if capture failed. */
+                {
+                    TickType_t wstart = xTaskGetTickCount();
+                    while (g_capture_busy) {
+                        if ((xTaskGetTickCount() - wstart) > pdMS_TO_TICKS(30000)) break;
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    }
+                }
+
 #if TOF_CAPTURE_ACTIVATION_REFRESH
                 if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
                     printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
@@ -842,6 +855,19 @@ void sensor_task(void *arg)
                preserving active latches; a full reset here caused the same
                persistent evidence to trigger again after every photo. */
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
+
+            /* Wait for Stage 3 (ROI capture + SD save) to complete.
+               g_capture_busy is cleared by camera callback after Stage 3
+               finishes all captures and saves.  Timeout after 30 s to
+               prevent deadlock if capture failed. */
+            {
+                TickType_t wstart = xTaskGetTickCount();
+                while (g_capture_busy) {
+                    if ((xTaskGetTickCount() - wstart) > pdMS_TO_TICKS(30000)) break;
+                    vTaskDelay(pdMS_TO_TICKS(10));
+                }
+            }
+
 #if TOF_CAPTURE_ACTIVATION_REFRESH
             if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
                 printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
@@ -1080,65 +1106,69 @@ void camera_task(void *arg)
                    STAGE 3: Software crop each batch frame from the buffer.
                    Only when insect detected — skip fallback crops.
                    --------------------------------------------------------------- */
+                /* ---------------------------------------------------------------
+                    STAGE 3: Sensor-level AREA3 + full DCMIPP DeInit->Init for
+                    clean native-res crop capture.  Uses CAM_CaptureROI() which
+                    does the full DeInit->Init->AREA3->Configure->Capture cycle
+                    to avoid corrupted frames from stale DCMIPP state.
+                    --------------------------------------------------------------- */
                 if (g_detection_result.has_insect) {
-                {
                     uint16_t roi_x, roi_y, roi_w, roi_h;
-                    g_stage3_crops = 0;
                     int roi_ok = IF_CalcROI(&g_detection_result, &roi_x, &roi_y, &roi_w, &roi_h);
                     if (roi_ok != 0) {
-                        roi_w = SNAP_WIDTH; roi_h = SNAP_HEIGHT; roi_x = 0; roi_y = 0;
+                        printf("[MULTI] >>> Stage 3: IF_CalcROI failed, using full SNAP center\n");
+                        roi_w = SNAP_WIDTH; roi_h = SNAP_HEIGHT;
+                        roi_x = (uint16_t)((2592U - SNAP_WIDTH) / 2) & ~1U;
+                        roi_y = (uint16_t)((1944U - SNAP_HEIGHT) / 2) & ~1U;
                     } else {
-                        printf("[MULTI] >>> Stage 3: CAM-ROI (%u,%u) %ux%u", roi_x, roi_y, roi_w, roi_h);
+                        printf("[MULTI] >>> Stage 3: AREA3 (%u,%u) %ux%u @ native 2592x1944", roi_x, roi_y, roi_w, roi_h);
                     }
-                    /* Scale from camera (2592x1944) to SNAP (1296x972) */
-                    roi_x = (uint16_t)((uint32_t)roi_x / 2U);
-                    roi_y = (uint16_t)((uint32_t)roi_y / 2U);
-                    roi_w = (uint16_t)((uint32_t)roi_w / 2U);
-                    roi_h = (uint16_t)((uint32_t)roi_h / 2U);
-                    printf(" -> SNAP-ROI (%u,%u) %ux%u x%d frames\n", roi_x, roi_y, roi_w, roi_h, rc);
-                    if ((uint32_t)roi_w * roi_h * 2 > BATCH_BUF_SIZE) {
-                        printf("[MULTI] >>> Stage 3: ROI %ux%u too large, using 800x600 center\n", roi_w, roi_h);
-                        roi_w = 800; roi_h = 600;
-                        roi_x = (SNAP_WIDTH - roi_w) / 2;
-                        roi_y = (SNAP_HEIGHT - roi_h) / 2;
-                    }
-                    /* Stop PIPE1 so batch_buf is stable for crop.
-                       Do NOT touch PipeState (leave it after stop). */
-                    SCB_InvalidateDCache_by_Addr((uint32_t *)batch_buf, BATCH_BUF_SIZE);
-                    extern uint8_t capture_buf[];
-                    uint32_t frame_sz = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2;
-                    uint32_t roi_sz = (uint32_t)roi_w * roi_h * 2;
-                    for (int f = 0; f < rc; f++) {
-                        uint8_t *src_frame = batch_buf + (uint32_t)f * frame_sz;
-                        memcpy(capture_buf, src_frame, frame_sz);
-                        for (uint32_t y = 0; y < (uint32_t)roi_h; y++) {
-                            uint8_t *src_line = capture_buf + ((uint32_t)roi_y + y) * (SNAP_WIDTH * 2) + (uint32_t)roi_x * 2;
-                            memcpy(batch_buf + y * roi_w * 2, src_line, roi_w * 2);
+                    printf(" %ux%u native, capturing %d frames\n", roi_w, roi_h, rc);
+
+                    /* CAM_CaptureROI internally does: DeInit->Init->AREA3->PipeConfig->Capture->Stop.
+                       Returns captured frame count or -1 on error. */
+                    int area3_frames = CAM_CaptureROI(batch_buf, BATCH_BUF_SIZE, roi_x, roi_y, roi_w, roi_h);
+                    if (area3_frames > 0) {
+                        for (int f = 0; f < area3_frames; f++) {
+                            uint32_t roi_frame_sz = (uint32_t)roi_w * roi_h * 2;
+                            uint8_t *frame = batch_buf + (uint32_t)f * roi_frame_sz;
+                            SCB_InvalidateDCache_by_Addr((uint32_t*)frame, roi_frame_sz);
+                            StorageCmd_t sc3 = {0};
+                            sc3.type = STORAGE_CMD_SAVE;
+                            sc3.image_buf = frame;
+                            sc3.image_size = roi_frame_sz;
+                            sc3.width = roi_w; sc3.height = roi_h;
+                            sc3.pixel_format = 0;
+                            sc3.snap_id = g_next_snap_id++;
+                            sc3.stamp = RTC_CaptureStamp();
+                            xQueueSend(storage_cmd_queue, &sc3, pdMS_TO_TICKS(1000));
+                            printf("[MULTI] >>> Stage 3 frame %d: native AREA3 %ux%u snap=%lu\n",
+                                   f, roi_w, roi_h, (unsigned long)(g_next_snap_id-1));
+                            xSemaphoreTake(storage_done_sem, pdMS_TO_TICKS(5000));
                         }
-                        StorageCmd_t sc3 = {0};
-                        sc3.type = STORAGE_CMD_SAVE;
-                        sc3.image_buf = batch_buf;
-                        sc3.image_size = roi_sz;
-                        sc3.width = roi_w; sc3.height = roi_h;
-                        sc3.pixel_format = 0;
-                        sc3.snap_id = g_next_snap_id++;
-                        sc3.stamp = RTC_CaptureStamp();
-                        if (xQueueSend(storage_cmd_queue, &sc3, pdMS_TO_TICKS(1000)) != pdTRUE) {
-                            printf("[CAM] Stage 3 frame %d: storage queue full\n", f);
-                        } else {
-                            printf("[MULTI] >>> Stage 3 frame %d: cropped %ux%u size=%lu snap=%lu\n",
-                                   f, roi_w, roi_h, (unsigned long)roi_sz, (unsigned long)(g_next_snap_id-1));
-                        }
-                        /* Wait for storage to read crop before next iteration overwrites batch_buf */
-                        xSemaphoreTake(storage_done_sem, pdMS_TO_TICKS(5000));
+                    } else {
+                        printf("[MULTI] >>> Stage 3: CAM_CaptureROI returned %d\n", area3_frames);
                     }
-                    }
+
+                    /* Restore: full AREA3 + SNAP pipe config */
+                    CAM_SetFullFrame();
+                    uint16_t snap_off_x = (uint16_t)((2592U - SNAP_WIDTH) / 2) & ~1U;
+                    uint16_t snap_off_y = (uint16_t)((1944U - SNAP_HEIGHT) / 2) & ~1U;
+                    CAM_SetPipeResolution(SNAP_WIDTH, SNAP_HEIGHT, snap_off_x, snap_off_y);
+                    CAM_Standby();
                 }
-                /* Stage 3 set g_stage3_crops = rc when has_insect, else 0 */
                 printf("=============================================================\n\n");
                 g_capture_stage = CAPTURE_STAGE_DONE;
                 g_detection_result.has_insect = 0;
                 g_capture_busy = 0;
+
+#if WS2812_MODE == 1 || WS2812_MODE == 0
+                /* Turn off flash AFTER Stage 3 completes.
+                   CRITICAL: camera_ready_sem is given at Stage 2 to unblock SD storage,
+                   so Capture_RequestSnapshot would turn light off too early.  We stop
+                   it HERE, in the camera task, after all 3 stages finish. */
+                WS2812_FlashStop();
+#endif
             } else {
 #if PERF_DEBUG_LEVEL >= 1
 #if CAPTURE_MODE == 4
@@ -1147,6 +1177,7 @@ void camera_task(void *arg)
                 printf("[CAM] Batch FAIL\n");
 #endif
 #endif
+                g_capture_busy = 0;
                 xSemaphoreGive(camera_ready_sem);
             }
 #else
@@ -1167,6 +1198,7 @@ void camera_task(void *arg)
 #if PERF_DEBUG_LEVEL >= 1
                 printf("[CAM] FAIL\n");
 #endif
+                g_capture_busy = 0;
                 xSemaphoreGive(camera_ready_sem);
             }
 #endif
@@ -1250,29 +1282,22 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
         return Capture_ReturnWithIlluminationOff(-1);
     }
 
-#if WS2812_MODE == 1
-    WS2812_FlashStop();
-#elif WS2812_MODE == 0
-    WS2812_FlashStop();
-#endif
+    /* NOTE: WS2812_FlashStop is called by the camera task AFTER Stage 3
+       completes (see camera_task loop).  We removed it from here because
+       camera_ready_sem is given during Stage 2, which is BEFORE Stage 3. */
 
 #if CAPTURE_MODE == 4
-    /* Wait for ALL BATCH_FRAMES to be stored before returning */
+    /* For CAPTURE_MODE == 4: camera_task already waits for ALL storage tokens
+       (Stage 2 batch-frames + Stage 3 AREA3 frames) inside its success path.
+       We NO LONGER wait here — the camera task handles every storage_done_sem
+       token.  The only remaining need is the error check below. */
     if (g_last_batch_frames <= 0) {
         /* camera_task signals camera_ready_sem on capture failure as well.
            Do not wait for storage tokens that will never be produced. */
         return Capture_ReturnWithIlluminationOff(-1);
     }
-    int frames_to_wait = g_last_batch_frames;
-    for (int i = 0; i < frames_to_wait; i++) {
-        if (timeout_ms > 0) {
-            uint32_t elapsed = HAL_GetTick() - t_start;
-            if (elapsed >= timeout_ms) return Capture_ReturnWithIlluminationOff(-1);
-            ticks = pdMS_TO_TICKS(timeout_ms - elapsed);
-        } else { ticks = portMAX_DELAY; }
-        if (xSemaphoreTake(storage_done_sem, ticks) != pdTRUE)
-            return Capture_ReturnWithIlluminationOff(-1);
-    }
+    /* NO extra xSemaphoreTake(storage_done_sem) here — camera_task already
+       consumed ALL storage tokens (Stage 2 + Stage 3). */
 #else
     if (timeout_ms > 0) {
         uint32_t elapsed = HAL_GetTick() - t_start;
@@ -1284,5 +1309,14 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
 #endif
     Perf_Stop(&g_perf_timer);
     if (g_last_storage_rc != 0) return Capture_ReturnWithIlluminationOff(-1);
+#if CAPTURE_MODE == 4
+    /* For CAPTURE_MODE == 4, the camera task calls WS2812_FlashStop AFTER
+       Stage 3 completes (line 1170).  We must NOT turn the light off here —
+       Stage 3 still needs illumination for the AREA3 native-res crop.
+       The camera task handles both Stage 2 save AND Stage 3 capture +
+       light-off internally. */
+    return 0;
+#else
     return Capture_ReturnWithIlluminationOff(0);
+#endif
 }

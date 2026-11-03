@@ -5,6 +5,9 @@
 
 ---
 
+
+
+
 ## 1. Overview & Goal
 
 Implement a **three-stage multi-resolution capture pipeline** on the STM32N6570-DK (Discovery) for insect photography. The pipeline captures photos at three different resolutions per trigger event:
