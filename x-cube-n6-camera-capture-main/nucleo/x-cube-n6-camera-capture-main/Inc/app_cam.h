@@ -197,6 +197,10 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
  * @return number of frames captured (0..CALLBACK_FRAMES), -1 on error
  */
 int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
+/** Capture a full-field frame followed by a native crop. Returns the number
+ * of completed images (0, 1 or 2). ticks receives their completion ticks. */
+int CAM_CaptureFullAndCrop(uint8_t *buf, uint32_t size, uint8_t *crop,
+                          uint32_t crop_size, uint32_t ticks[2]);
 
 /** Return HAL tick recorded when a kept Mode-4 frame completed. */
 uint32_t CAM_GetCallbackFrameTick(uint32_t index);

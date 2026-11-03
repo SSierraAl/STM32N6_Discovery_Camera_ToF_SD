@@ -18,7 +18,7 @@
 #include "image_filter.h"
 #include "utils.h"
 
-#if !CAM_NATIVE_ROI
+#if !CAM_NATIVE_ROI && !CAM_OVERVIEW_CROP
 /* Detection frame buffer (640x480 YUV422 = 614 KB) in PSRAM */
 static uint8_t detection_frame[IF_DETECT_FRAME_SZ] ALIGN_32 IN_PSRAM;
 #endif
@@ -66,7 +66,7 @@ volatile SensorState_t g_sensor_state = SENSOR_STATE_IDLE;
 static volatile int g_capture_busy = 0;
 static volatile int g_last_storage_rc = 0;
 static volatile int g_last_batch_frames = 0;
-#if !CAM_NATIVE_ROI
+#if !CAM_NATIVE_ROI && !CAM_OVERVIEW_CROP
 static volatile int g_stage3_crops = 0;
 #endif
 /* Camera task reserves IDs before dispatch; failed writes leave an ID gap. */
@@ -82,7 +82,7 @@ extern SD_HandleTypeDef hsd1;
 extern uint8_t sd_batch_buf[];
 PerfTimer_t g_perf_timer;
 
-#if !CAM_NATIVE_ROI
+#if !CAM_NATIVE_ROI && !CAM_OVERVIEW_CROP
 /* ================================================================
    MULTI-RESOLUTION CAPTURE STATE (Phase 3)
    ================================================================ */
@@ -929,6 +929,76 @@ void sensor_task(void *arg)
 
 
 /* ==================== CAMERA TASK ==================== */
+#if CAM_OVERVIEW_CROP
+static int SaveOverviewCropImage(const char *kind, uint8_t *buffer, uint16_t width, uint16_t height, RTC_Stamp stamp)
+{
+    StorageCmd_t frame = {0};
+    frame.type = STORAGE_CMD_SAVE;
+    frame.image_buf = buffer;
+    frame.image_size = (uint32_t)width * height * 2U;
+    frame.width = width;
+    frame.height = height;
+    frame.snap_id = g_next_snap_id++;
+    frame.stamp = stamp;
+    printf("[CAM][SD] queue %s id=%lu %ux%u bytes=%lu\n", kind,
+           (unsigned long)frame.snap_id, width, height, (unsigned long)frame.image_size);
+    if (xQueueSend(storage_cmd_queue, &frame, pdMS_TO_TICKS(1000)) != pdTRUE) {
+        return -1;
+    }
+    /* SD owns the workspace until its write or recovery attempt finishes. */
+    xSemaphoreTake(storage_done_sem, portMAX_DELAY);
+    printf("[CAM][SD] done %s rc=%d\n", kind, g_last_storage_rc);
+    return g_last_storage_rc;
+}
+
+/* Compare the same sensor window in both exposures on a static target. */
+static void LogBurstLuma(const char *kind, const uint8_t *window, uint32_t pitch)
+{
+    uint32_t sum = 0, count = 0, dark = 0, clipped = 0;
+    for (uint32_t y = 0; y < CAM_BURST_CROP_H; y += 8U) {
+        for (uint32_t x = 0; x < CAM_BURST_CROP_W; x += 8U) {
+            uint8_t luma = window[y * pitch + x * 2U];
+            sum += luma;
+            ++count;
+            dark += luma <= 24U;
+            clipped += luma >= 230U;
+        }
+    }
+    printf("[CAM][LUMA] %s mean=%lu dark=%lu%% near_white=%lu%% samples=%lu\n",
+           kind, (unsigned long)(sum / count), (unsigned long)(100U * dark / count),
+           (unsigned long)(100U * clipped / count), (unsigned long)count);
+}
+
+static void CaptureFullAndCrop(uint8_t *source, uint8_t *crop)
+{
+    uint32_t ticks[2];
+    int captured = CAM_CaptureFullAndCrop(source, MAX_SNAP_FRAME_SIZE,
+                                         crop, BATCH_BUF_SIZE, ticks);
+    PERF_MARK(g_perf_timer, CAM_END);
+#if WS2812_MODE == 0 || WS2812_MODE == 1
+    WS2812_FlashStop();
+#endif
+    if (captured == 0) {
+        g_last_storage_rc = -1;
+        return;
+    }
+
+    LogBurstLuma("full_window",
+                 source + (CAM_BURST_CROP_Y * CAM_FULL_WIDTH + CAM_BURST_CROP_X) * 2U,
+                 CAM_FULL_WIDTH * 2U);
+    if (captured == 2) LogBurstLuma("native_crop", crop, CAM_BURST_CROP_W * 2U);
+    RTC_Stamp stamp = RTC_CaptureStamp();
+    int rc = SaveOverviewCropImage("full_source", source, CAM_FULL_WIDTH, CAM_FULL_HEIGHT,
+                                   RTC_StampForFrame(stamp, ticks[0]));
+    if (captured == 2) {
+        int crop_rc = SaveOverviewCropImage("native_crop", crop, CAM_BURST_CROP_W, CAM_BURST_CROP_H,
+                                            RTC_StampForFrame(stamp, ticks[1]));
+        if (rc == 0) rc = crop_rc;
+    }
+    g_last_storage_rc = rc;
+}
+#endif
+
 void camera_task(void *arg)
 {
     (void)arg;
@@ -941,7 +1011,9 @@ void camera_task(void *arg)
        - CAPTURE_MODE==2: camera_task starts the continuous pipe here. */
 
 
+#if !CAM_OVERVIEW_CROP
     uint32_t frame_size = (uint32_t)SNAP_WIDTH * SNAP_HEIGHT * 2UL;
+#endif
 
     while (1) {
         CameraCmd_t cmd = {0};
@@ -952,7 +1024,9 @@ void camera_task(void *arg)
 
         if (cmd.type == CAM_CMD_SNAP) {
             PERF_MARK(g_perf_timer, CAM_INIT);
+#if !CAM_OVERVIEW_CROP
             int rc = -1;
+#endif
             g_last_batch_frames = 0;
 
 #if CAPTURE_MODE == 1
@@ -976,6 +1050,11 @@ void camera_task(void *arg)
 #endif
                 xSemaphoreGive(camera_ready_sem);
             }
+#elif CAM_OVERVIEW_CROP
+            extern uint8_t batch_buf[];
+            CaptureFullAndCrop(capture_buf, batch_buf);
+            g_capture_busy = 0;
+            xSemaphoreGive(camera_ready_sem);
 #elif CAPTURE_MODE == 4
             extern uint8_t batch_buf[];
 #if CAPTURE_MODE == 4
@@ -1006,10 +1085,7 @@ void camera_task(void *arg)
                 xSemaphoreTake(storage_done_sem, portMAX_DELAY);
                 g_last_batch_frames++;
             }
-<<<<<<< ours
             g_capture_busy = 0;
-=======
->>>>>>> theirs
             xSemaphoreGive(camera_ready_sem);
 #else
             if (rc > 0) {
@@ -1303,7 +1379,7 @@ static int Capture_ReturnWithIlluminationOff(int result)
 int Capture_RequestSnapshot(uint32_t timeout_ms)
 {
     Perf_Start(&g_perf_timer);
-#if !CAM_NATIVE_ROI
+#if !CAM_NATIVE_ROI && !CAM_OVERVIEW_CROP
     uint32_t t_start = g_perf_timer.start_tick;
 #endif
     CameraCmd_t cmd = {0}; cmd.type = CAM_CMD_SNAP;
@@ -1316,7 +1392,7 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
     }
 
     TickType_t ticks = (timeout_ms > 0) ? pdMS_TO_TICKS(timeout_ms) : portMAX_DELAY;
-#if CAM_NATIVE_ROI
+#if CAM_NATIVE_ROI || CAM_OVERVIEW_CROP
     if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) {
         /* End illumination on timeout, but finish draining this transaction
            before another request can reuse its buffers or completion signal. */
@@ -1326,8 +1402,12 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
         return -1;
     }
     Perf_Stop(&g_perf_timer);
+#if CAM_OVERVIEW_CROP
+    return Capture_ReturnWithIlluminationOff(g_last_storage_rc == 0 ? 0 : -1);
+#else
     return Capture_ReturnWithIlluminationOff(
         g_last_batch_frames == CALLBACK_FRAMES && g_last_storage_rc == 0 ? 0 : -1);
+#endif
 #else
     if (xSemaphoreTake(camera_ready_sem, ticks) != pdTRUE) {
         return Capture_ReturnWithIlluminationOff(-1);
@@ -1370,4 +1450,5 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
 #else
     return Capture_ReturnWithIlluminationOff(0);
 #endif
+#endif /* CAM_NATIVE_ROI */
 }

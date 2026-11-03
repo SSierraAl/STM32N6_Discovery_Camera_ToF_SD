@@ -475,11 +475,11 @@ void CAM_Deinit(void)
   assert(CMW_CAMERA_DeInit() == HAL_OK);
 }
 
-#if CAPTURE_MODE == 0
+#if CAPTURE_MODE == 0 || CAM_OVERVIEW_CROP
 static volatile uint32_t g_single_capture_errors;
 #endif
 void CMW_CAMERA_PIPE_ErrorCallback(uint32_t pipe) {
-#if CAPTURE_MODE == 0
+#if CAPTURE_MODE == 0 || CAM_OVERVIEW_CROP
   if (pipe == DCMIPP_PIPE1) ++g_single_capture_errors;
 #else
   (void)pipe;
@@ -913,8 +913,178 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
  *   batch_buf slot — so by the time the hardware actually captures it, the
  *   destination is already correct.
  */
+#if CAM_OVERVIEW_CROP
+/* Change only geometry on the stopped pipe. The general CMW configuration
+   also rewrites gamma and YUV conversion, which are owned by the tuned ISP. */
+static int CAM_SetBurstGeometry(DCMIPP_HandleTypeDef *h, int cropped)
+{
+  DCMIPP_CropConfTypeDef window = {0};
+  window.HSize = cropped ? CAM_BURST_CROP_W : CAM_FULL_WIDTH;
+  window.VSize = cropped ? CAM_BURST_CROP_H : CAM_FULL_HEIGHT;
+  window.HStart = cropped ? CAM_BURST_CROP_X : 0U;
+  window.VStart = cropped ? CAM_BURST_CROP_Y : 0U;
+
+  if (HAL_DCMIPP_PIPE_SetCropConfig(h, DCMIPP_PIPE1, &window) != HAL_OK ||
+      HAL_DCMIPP_PIPE_EnableCrop(h, DCMIPP_PIPE1) != HAL_OK ||
+      HAL_DCMIPP_PIPE_SetPitch(h, DCMIPP_PIPE1, window.HSize * 2U) != HAL_OK)
+  {
+    return -1;
+  }
+
+  /* Crop at native scale. Re-enable the untouched full-frame unity scaler
+     configuration when returning to the boot geometry. */
+  HAL_StatusTypeDef rc = cropped ? HAL_DCMIPP_PIPE_DisableDownsize(h, DCMIPP_PIPE1) :
+                                   HAL_DCMIPP_PIPE_EnableDownsize(h, DCMIPP_PIPE1);
+  return rc == HAL_OK ? 0 : -1;
+}
+
+int CAM_CaptureFullAndCrop(uint8_t *buf, uint32_t size, uint8_t *crop,
+                          uint32_t crop_size, uint32_t ticks[2])
+{
+  if (!g_callback_ready || !buf || size < MAX_SNAP_FRAME_SIZE ||
+      !crop || crop_size < CAM_BURST_CROP_BYTES ||
+      (((uintptr_t)buf | (uintptr_t)crop) & 31U) != 0U)
+  {
+    printf("[CAM][FULL] rejected ready=%d buffer_bytes=%lu expected=%lu\n",
+           g_callback_ready, (unsigned long)size, (unsigned long)MAX_SNAP_FRAME_SIZE);
+    return 0;
+  }
+
+  DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
+  int captured = 0;
+  int crop_config_attempted = 0;
+  int restore_rc = 0;
+  int exposure_mode_rc = 0;
+  int exposure_rc = 0;
+  int gain_rc = 0;
+  HAL_StatusTypeDef mode_rc = HAL_OK;
+  const char *stage = "wake";
+  uint32_t start_tick = HAL_GetTick();
+  uint32_t start_event = g_frame_event_count;
+  uint32_t start_vsync = g_vsync_count;
+  uint32_t warmup_done = 0;
+  if (CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STREAMING) != 0) goto standby;
+  HAL_Delay(35);
+  g_single_capture_errors = 0;
+  PERF_MARK(g_perf_timer, CAM_WARMUP);
+  /* The bundled HAL Start ORs the mode bit, so starting continuous
+     (mode zero) cannot clear a previous snapshot selection. */
+  stage = "warmup_mode";
+  if (HAL_DCMIPP_PIPE_SetCaptureMode(h, DCMIPP_PIPE1, DCMIPP_MODE_CONTINUOUS) != HAL_OK)
+  {
+    g_callback_ready = 0;
+    goto standby;
+  }
+  stage = "warmup_start";
+  if (CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS) != CMW_ERROR_NONE) goto standby;
+
+  /* Match the previously tuned callback-burst wake sequence. */
+  exposure_mode_rc = CMW_CAMERA_SetExposureMode(
+      CAM_EXPOSURE_MODE == 1 ? CMW_EXPOSUREMODE_MANUAL :
+      CAM_EXPOSURE_MODE == 2 ? CMW_EXPOSUREMODE_AUTOFREEZE : CMW_EXPOSUREMODE_AUTO);
+  if (CAM_EXPOSURE_MODE == 1)
+  {
+    exposure_rc = CMW_CAMERA_SetExposure(CAM_EXPOSURE_VALUE);
+    gain_rc = CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
+    CAM_IspUpdate();
+  }
+
+  stage = "warmup_wait";
+  int warmup_ok = 1;
+  for (uint32_t frame = 0; frame < CAM_FULL_WARMUP_FRAMES; ++frame)
+  {
+    if (CAM_WaitNextFrameReady(SNAP_TIMEOUT_MS, NULL) != 0)
+    {
+      warmup_ok = 0;
+      break;
+    }
+    ++warmup_done;
+  }
+  if (HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0) != HAL_OK)
+  {
+    stage = "warmup_stop";
+    g_callback_ready = 0;
+    goto standby;
+  }
+  if (!warmup_ok || g_single_capture_errors) goto standby;
+
+  /* Snapshot mode prevents the following frame from overwriting the source. */
+  PERF_MARK(g_perf_timer, CAM_SNAP);
+  uint32_t event = g_frame_event_count;
+  stage = "snapshot_start";
+  if (CAM_CapturePipe_Start(buf, CMW_MODE_SNAPSHOT) != CMW_ERROR_NONE) goto standby;
+  stage = "snapshot_wait";
+  int full_rc = CAM_WaitFrameAfter(event, SNAP_TIMEOUT_MS, NULL);
+  ticks[0] = HAL_GetTick();
+  if (HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0) != HAL_OK)
+  {
+    stage = "snapshot_stop";
+    g_callback_ready = 0;
+    goto standby;
+  }
+  if (full_rc != 0 || g_single_capture_errors) goto standby;
+  captured = 1;
+
+  /* Full DMA has stopped. Reconfigure only the receiver, leaving the sensor
+     streaming at its known-good exposure and full-field readout. */
+  stage = "crop_config";
+  crop_config_attempted = 1;
+  if (CAM_SetBurstGeometry(h, 1) != 0) goto standby;
+  stage = "crop_start";
+  event = g_frame_event_count;
+  if (CAM_CapturePipe_Start(crop, CMW_MODE_SNAPSHOT) != CMW_ERROR_NONE) goto standby;
+  stage = "crop_wait";
+  int crop_rc = CAM_WaitFrameAfter(event, SNAP_TIMEOUT_MS, NULL);
+  ticks[1] = HAL_GetTick();
+  if (HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0) != HAL_OK)
+  {
+    stage = "crop_stop";
+    g_callback_ready = 0;
+    goto standby;
+  }
+  if (crop_rc == 0 && !g_single_capture_errors) captured = 2;
+
+standby:
+  PERF_MARK(g_perf_timer, CAM_STOP);
+  if (crop_config_attempted && g_callback_ready)
+  {
+    restore_rc = CAM_SetBurstGeometry(h, 0);
+    if (restore_rc != 0) g_callback_ready = 0;
+  }
+  if (g_callback_ready)
+  {
+    mode_rc = HAL_DCMIPP_PIPE_SetCaptureMode(h, DCMIPP_PIPE1, DCMIPP_MODE_CONTINUOUS);
+    if (mode_rc != HAL_OK) g_callback_ready = 0;
+  }
+  int standby_rc = CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
+  if (standby_rc != 0) g_callback_ready = 0;
+  if (captured >= 1) SCB_InvalidateDCache_by_Addr((uint32_t *)buf, MAX_SNAP_FRAME_SIZE);
+  if (captured == 2) SCB_InvalidateDCache_by_Addr((uint32_t *)crop, CAM_BURST_CROP_BYTES);
+  printf("[CAM][BURST] captured=%d/2 stage=%s warmup=%lu/%u frames=%lu vsync=%lu "
+         "errors=%lu restore=%d mode=%d standby=%d ready=%d full_ms=%lu gap_ms=%lu\n",
+         captured, captured == 2 ? "complete" : stage,
+         (unsigned long)warmup_done, CAM_FULL_WARMUP_FRAMES,
+         (unsigned long)(g_frame_event_count - start_event),
+         (unsigned long)(g_vsync_count - start_vsync), (unsigned long)g_single_capture_errors,
+         restore_rc, (int)mode_rc, standby_rc, g_callback_ready,
+         captured >= 1 ? (unsigned long)(ticks[0] - start_tick) : 0UL,
+         captured == 2 ? (unsigned long)(ticks[1] - ticks[0]) : 0UL);
+  printf("[CAM][AE] requested_us=%d requested_gain_mdB=%d mode_rc=%d exposure_rc=%d gain_rc=%d\n",
+         CAM_EXPOSURE_VALUE, CAM_GAIN_VALUE, exposure_mode_rc, exposure_rc, gain_rc);
+#if CAM_SENSOR_REG_DEBUG && (CAPTURE_MODE == 4)
+  if (captured > 0 && standby_rc == 0) CAM_DumpImx335AeState("AFTER_FULL_CROP_STANDBY");
+#endif
+  return captured;
+}
+#endif
+
 int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 {
+#if CAM_OVERVIEW_CROP
+  (void)batch_buf;
+  (void)frame_size;
+  return -1;
+#else
 #if PERF_CAMERA_FRAME_LOG
   uint32_t frame_times[CALLBACK_WARMUP_FRAMES + CALLBACK_FRAMES];
   uint32_t completed_frames = 0;
@@ -1069,6 +1239,7 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   if (captured > 0U) CAM_DumpImx335AeState("AFTER_BATCH_STANDBY");
 #endif
   return (int)captured;
+#endif
 }
 
 uint32_t CAM_GetCallbackFrameTick(uint32_t index)
@@ -1135,6 +1306,7 @@ void CAM_ResetCallbackReady(void)
    callback-batch approach to capture CALLBACK_FRAMES frames.
    Returns number of frames captured, or -1 on error.
    ================================================================ */
+#if !CAM_OVERVIEW_CROP
 int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
                    uint16_t roi_x, uint16_t roi_y,
                    uint16_t roi_w, uint16_t roi_h)
@@ -1285,6 +1457,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
 
   return (int)captured;
 }
+#endif
 
 void CAM_Standby(void)
 {
@@ -1313,6 +1486,12 @@ int CAM_SetPipeResolution(uint16_t width, uint16_t height,
     printf("[CAM] SetPipeResolution %ux%u failed\n", width, height);
     return -1;
   }
+#if CAM_OVERVIEW_CROP
+  if (hw_pitch != (uint32_t)width * 2U) {
+    printf("[CAM] Unexpected DMA pitch %lu for width %u\n", (unsigned long)hw_pitch, width);
+    return -1;
+  }
+#endif
   hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_READY;
   if (sdc.output_format == DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1)
     CAM_EnableYuv(DCMIPP_PIPE1);

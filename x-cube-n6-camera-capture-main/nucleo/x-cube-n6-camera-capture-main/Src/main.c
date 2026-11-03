@@ -203,7 +203,7 @@ uint8_t sd_batch_buf[SD_BATCH_WRITE_BLOCKS * SD_BLOCK_SIZE] ALIGN_32 IN_PSRAM;
     alternates DMA between capture_buf and save_buf automatically).
     NOTE: Not static — referenced via extern by app_thread.c (mode 1)
     and app_cam.c (mode 4). */
-#if CAPTURE_MODE == 1 || CAPTURE_MODE == 4
+#if CAPTURE_MODE == 1 || (CAPTURE_MODE == 4 && !CAM_OVERVIEW_CROP)
 uint8_t save_buf[MAX_SNAP_FRAME_SIZE] ALIGN_32 IN_PSRAM;
 #endif
 
@@ -1207,7 +1207,11 @@ static void main_thread_fct(void *arg)
     printf("[TOF TEST] Camera init skipped\n");
 #elif CAPTURE_MODE == 4
     printf("[INIT] Camera callback-batch init (before tasks start to avoid I2C conflict)...\n");
+#if CAM_OVERVIEW_CROP
+    if (CAM_CallbackInit(capture_buf, MAX_SNAP_FRAME_SIZE, CAM_FULL_WIDTH, CAM_FULL_HEIGHT, SNAP_FPS) != 0) {
+#else
     if (CAM_CallbackInit(capture_buf, MAX_SNAP_FRAME_SIZE, SNAP_WIDTH, SNAP_HEIGHT, SNAP_FPS) != 0) {
+#endif
         printf("[WARN] Camera callback init FAILED! Captures may fail.\n");
     } else {
         printf("[INIT] Camera in STANDBY mode, ready for callback-batch wakeup.\n");

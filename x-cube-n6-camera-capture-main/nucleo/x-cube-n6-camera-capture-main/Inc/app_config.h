@@ -57,12 +57,36 @@
 
 /* Opt-in ToF burst with a fixed, unscaled DCMIPP crop. Coordinates are
    relative to the oriented sensor image. Set the window using a bench target. */
+/** Capture one full-color frame and derive the overview and crop from it. */
+#ifndef CAM_OVERVIEW_CROP
+#define CAM_OVERVIEW_CROP (CAPTURE_MODE == 4)
+#endif
 #ifndef CAM_NATIVE_ROI
-<<<<<<< ours
-#define CAM_NATIVE_ROI 1
-=======
-#define CAM_NATIVE_ROI 0
->>>>>>> theirs
+#define CAM_NATIVE_ROI (CAPTURE_MODE == 4 && !CAM_OVERVIEW_CROP)
+#endif
+#if CAM_OVERVIEW_CROP
+#if CAPTURE_MODE != 4 || CAM_NATIVE_ROI
+#error "Overview and crop require mode 4 and exclusive ownership of Pipe 1"
+#endif
+/** IMX335 full-field dimensions for the DMA source. */
+#define CAM_FULL_WIDTH 2592U
+#define CAM_FULL_HEIGHT 1944U
+/** Discard this many frames after wake before retaining the full frame. */
+#ifndef CAM_FULL_WARMUP_FRAMES
+#define CAM_FULL_WARMUP_FRAMES 5U
+#endif
+/** Fixed, native-scale crop for the second exposure, in oriented sensor pixels. */
+#define CAM_BURST_CROP_X 976U
+#define CAM_BURST_CROP_Y 584U
+#define CAM_BURST_CROP_W 640U
+#define CAM_BURST_CROP_H 768U
+#define CAM_BURST_CROP_BYTES (CAM_BURST_CROP_W * CAM_BURST_CROP_H * 2U)
+#if CAM_FULL_WARMUP_FRAMES < 1 || CAM_BURST_CROP_X % 2 || CAM_BURST_CROP_Y % 2 || \
+    CAM_BURST_CROP_W < 16 || CAM_BURST_CROP_W % 16 || CAM_BURST_CROP_H < 4 || \
+    CAM_BURST_CROP_H % 2 || CAM_BURST_CROP_X + CAM_BURST_CROP_W > CAM_FULL_WIDTH || \
+    CAM_BURST_CROP_Y + CAM_BURST_CROP_H > CAM_FULL_HEIGHT
+#error "Full-frame burst needs warmup and a bounded, DMA-aligned crop"
+#endif
 #endif
 #if CAM_NATIVE_ROI
 #define CAM_NATIVE_ROI_X 976
@@ -194,7 +218,11 @@
 #define SNAP_FRAME_SIZE      (SNAP_WIDTH * SNAP_HEIGHT * 2)
 
 /** Maximum PSRAM buffer for snapshot capture (same as frame size) */
-#define MAX_SNAP_FRAME_SIZE  SNAP_FRAME_SIZE
+#if CAM_OVERVIEW_CROP
+#define MAX_SNAP_FRAME_SIZE (CAM_FULL_WIDTH * CAM_FULL_HEIGHT * 2U)
+#else
+#define MAX_SNAP_FRAME_SIZE SNAP_FRAME_SIZE
+#endif
 
 /* ================================================================
    SECTION 3: SD CARD STORAGE PARAMETERS
@@ -305,7 +333,11 @@
 
 /** Total batch buffer size in bytes = BATCH_FRAMES × SNAP_FRAME_SIZE.
     This buffer is allocated in PSRAM and holds all frames for one detection event. */
-#define BATCH_BUF_SIZE           (BATCH_FRAMES * SNAP_FRAME_SIZE)
+#if CAM_OVERVIEW_CROP
+#define BATCH_BUF_SIZE CAM_BURST_CROP_BYTES
+#else
+#define BATCH_BUF_SIZE (BATCH_FRAMES * SNAP_FRAME_SIZE)
+#endif
 
 /* ================================================================
    SECTION 5: BUTTON / LED PARAMETERS
