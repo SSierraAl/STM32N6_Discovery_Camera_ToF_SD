@@ -197,16 +197,45 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
  * @return number of frames captured (0..CALLBACK_FRAMES), -1 on error
  */
 int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size);
-/** Capture a full-field frame followed by a native crop. Returns the number
- * of completed images (0, 1 or 2). ticks receives their completion ticks. */
+/** Rectangle in native pixels of the oriented image, with exclusive right/bottom edges. */
 typedef struct {
   uint16_t x, y, width, height;
 } CAM_BurstWindow;
-/** Pass NULL for oversize to capture only a full frame. Otherwise oversize
- * reports a detected object that cannot fit in the crop buffer. */
-int CAM_CaptureFullAndCrop(uint8_t *buf, uint32_t size, uint8_t *crop,
-                          uint32_t crop_size, uint32_t ticks[2], CAM_BurstWindow *window,
-                          int *oversize);
+
+/**
+ * @brief Locate a target using the project-supplied detector.
+ * @param source Read-only, tightly packed native YUYV frame.
+ * @param width Image width in pixels.
+ * @param height Image height in pixels.
+ * @param scratch Temporary CPU workspace, separate from source.
+ * @param scratch_bytes Workspace capacity in bytes.
+ * @param box Output rectangle before adding any crop margin.
+ * @return 1 for a box, 0 for no target, negative for a detector error.
+ */
+int CAM_DetectExternal(const uint8_t *source, uint16_t width, uint16_t height,
+                       uint8_t *scratch, uint32_t scratch_bytes, CAM_BurstWindow *box);
+
+/**
+ * @brief Wake, warm up, capture one native YUYV frame, and return to standby.
+ * @param buf 32-byte-aligned PSRAM destination for camera DMA.
+ * @param size Destination capacity in bytes.
+ * @param tick Output HAL tick in ms at snapshot completion, valid on success.
+ * @return 1 when a frame is ready for CPU reads, 0 on failure.
+ */
+int CAM_CaptureFullFrame(uint8_t *buf, uint32_t size, uint32_t *tick);
+
+/**
+ * @brief Locate optical foreground and prepare a native crop window.
+ * @param source Read-only native YUYV frame after camera DMA has stopped.
+ * @param scratch CPU workspace (at least CAM_BURST_CROP_BYTES, aligned to 32 bytes).
+ * @param capacity Workspace and eventual crop output capacity in bytes.
+ * @param object Foreground box before crop margin, or zero when unavailable.
+ * @param window Padded YUYV window, or zero when unavailable or oversized.
+ * @param components Output number of confirmed components (zero when unknown).
+ * @return Static diagnostic string describing the localization outcome.
+ */
+const char *CAM_LocalizeFrame(const uint8_t *source, uint8_t *scratch, uint32_t capacity,
+                              CAM_BurstWindow *object, CAM_BurstWindow *window, uint32_t *components);
 
 /** Return HAL tick recorded when a kept Mode-4 frame completed. */
 uint32_t CAM_GetCallbackFrameTick(uint32_t index);

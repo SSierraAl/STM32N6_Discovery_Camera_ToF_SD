@@ -106,6 +106,7 @@ typedef struct {
     uint32_t         pixel_format;
     uint32_t         snap_id;
     RTC_Stamp        stamp;
+    uint32_t         image_kind; /* Optional raw SD record tag. */
 } StorageCmd_t;
 
 /* ================================================================

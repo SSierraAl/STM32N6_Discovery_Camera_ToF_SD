@@ -241,7 +241,7 @@ static int SD_WaitForReady(void)
     return 0;
 }
 
-static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t w, uint32_t h, uint32_t pixel_format, uint32_t snap_id, RTC_Stamp stamp)
+static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t w, uint32_t h, uint32_t pixel_format, uint32_t snap_id, RTC_Stamp stamp, uint32_t image_kind)
 {
     uint32_t base = g_sd_img_base_block;
     uint32_t batch_blocks = SD_BATCH_WRITE_BLOCKS;
@@ -267,7 +267,8 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
     hdr.magic = SD_HEADER_TAG; hdr.width = w; hdr.height = h;
     hdr.pixel_format = pixel_format; hdr.data_size = img_size;
     RawImage_SetStamp(&hdr, stamp); hdr.checksum = checksum;
-    hdr.snap_id = snap_id; memset(hdr.reserved, 0, sizeof(hdr.reserved));
+    hdr.snap_id = snap_id;
+    hdr.image_kind = image_kind;
 
 #if PERF_DEBUG_LEVEL >= 1
     printf("[SD] #%" PRIu32 " %lux%lu %lu bytes (%.3f MB)\n",
@@ -930,108 +931,283 @@ void sensor_task(void *arg)
 
 /* ==================== CAMERA TASK ==================== */
 #if CAM_OVERVIEW_CROP
-static int SaveOverviewCropImage(const char *kind, uint8_t *buffer, uint16_t width, uint16_t height, RTC_Stamp stamp)
+/**
+ * @brief Queue a packed YUYV frame and wait until storage releases its buffer.
+ * @param kind Label used in UART logs.
+ * @param image_kind Persistent tag used by the PNG exporter.
+ * @param buffer Pixel data. The caller must leave it unchanged until return.
+ * @param width Image width in pixels.
+ * @param height Image height in pixels.
+ * @param stamp Timestamp of the exposure that produced the pixels.
+ * @return 0 on success, a nonzero queue or storage error otherwise.
+ */
+static int SaveOverviewCropImage(const char *kind, RawImageKind_t image_kind, uint8_t *buffer,
+                                 uint16_t width, uint16_t height, RTC_Stamp stamp)
 {
-    StorageCmd_t frame = {0};
-    frame.type = STORAGE_CMD_SAVE;
-    frame.image_buf = buffer;
-    frame.image_size = (uint32_t)width * height * 2U;
-    frame.width = width;
-    frame.height = height;
-    frame.snap_id = g_next_snap_id++;
-    frame.stamp = stamp;
-    printf("[CAM][SD] queue %s id=%lu %ux%u bytes=%lu\n", kind,
-           (unsigned long)frame.snap_id, width, height, (unsigned long)frame.image_size);
-    if (xQueueSend(storage_cmd_queue, &frame, pdMS_TO_TICKS(1000)) != pdTRUE) {
-        return -1;
-    }
-    /* SD owns the workspace until its write or recovery attempt finishes. */
-    xSemaphoreTake(storage_done_sem, portMAX_DELAY);
-    printf("[CAM][SD] done %s rc=%d\n", kind, g_last_storage_rc);
-    return g_last_storage_rc;
+  StorageCmd_t frame = {0};
+  frame.type = STORAGE_CMD_SAVE;
+  frame.image_buf = buffer;
+  frame.image_size = (uint32_t)width * height * 2U;
+  frame.width = width;
+  frame.height = height;
+  frame.snap_id = g_next_snap_id++;
+  frame.stamp = stamp;
+  frame.image_kind = image_kind;
+  printf("[CAM][SD] queue %s id=%lu %ux%u bytes=%lu\n", kind,
+         (unsigned long)frame.snap_id, width, height, (unsigned long)frame.image_size);
+  if (xQueueSend(storage_cmd_queue, &frame, pdMS_TO_TICKS(1000)) != pdTRUE) {
+      return -1;
+  }
+  /* SD owns the workspace until its write or recovery attempt finishes. */
+  xSemaphoreTake(storage_done_sem, portMAX_DELAY);
+  printf("[CAM][SD] done %s rc=%d\n", kind, g_last_storage_rc);
+  return g_last_storage_rc;
 }
 
-/* Compare the same sensor window in both exposures on a static target. */
-static void LogBurstLuma(const char *kind, const uint8_t *window, uint32_t pitch,
-                         const CAM_BurstWindow *roi)
+#if CAM_FIRST_IMAGE_DIVISOR != 1
+/**
+ * @brief Box-filter packed YUYV in place after all native-image reads.
+ * @param image Native frame buffer, overwritten with the configured overview.
+ *
+ * Output advances more slowly than input. Each pair is written only after
+ * all its source samples have been consumed.
+ */
+static void DownsampleFirstImage(uint8_t *image)
 {
-    uint32_t sum = 0, count = 0, dark = 0, clipped = 0;
-    for (uint32_t y = 0; y < roi->height; y += 8U) {
-        for (uint32_t x = 0; x < roi->width; x += 8U) {
-            uint8_t luma = window[y * pitch + x * 2U];
-            sum += luma;
-            ++count;
-            dark += luma <= 24U;
-            clipped += luma >= 230U;
+    const uint32_t scale = CAM_FIRST_IMAGE_DIVISOR;
+    const uint32_t samples = scale * scale;
+    uint8_t *out = image;
+    for (uint32_t y = 0; y < CAM_FIRST_IMAGE_HEIGHT; ++y) {
+        for (uint32_t x = 0; x < CAM_FIRST_IMAGE_WIDTH; x += 2U) {
+            uint32_t y0 = 0, y1 = 0, u = 0, v = 0;
+            for (uint32_t row = 0; row < scale; ++row) {
+                const uint8_t *in = image + ((y * scale + row) * CAM_FULL_WIDTH + x * scale) * 2U;
+                for (uint32_t col = 0; col < scale; ++col) {
+                    y0 += in[col * 2U];
+                    y1 += in[(scale + col) * 2U];
+                    u += in[col * 4U + 1U];
+                    v += in[col * 4U + 3U];
+                }
+            }
+            *out++ = (y0 + samples / 2U) / samples;
+            *out++ = (u + samples / 2U) / samples;
+            *out++ = (y1 + samples / 2U) / samples;
+            *out++ = (v + samples / 2U) / samples;
         }
     }
-    printf("[CAM][LUMA] %s mean=%lu dark=%lu%% near_white=%lu%% samples=%lu\n",
-           kind, (unsigned long)(sum / count), (unsigned long)(100U * dark / count),
-           (unsigned long)(100U * clipped / count), (unsigned long)count);
+    /* Remove dirty CPU cache lines before this slot is reused by camera DMA. */
+    SCB_CleanDCache_by_Addr((uint32_t *)image, CAM_FIRST_IMAGE_WIDTH * CAM_FIRST_IMAGE_HEIGHT * 2U);
+}
+#endif
+
+typedef enum {
+  PHOTO_DUPLICATE,
+  PHOTO_OVERVIEW,
+  PHOTO_CROP,
+  PHOTO_OVERSIZE,
+  PHOTO_MULTI,
+  PHOTO_BLANK
+} PhotoAction_t;
+
+typedef struct {
+  uint32_t tick;
+  int32_t x, y;
+  int valid, edge;
+  PhotoAction_t action;
+} PhotoTrack_t;
+
+/* Camera-task state. The reference is a saved position, not an insect identity. */
+static PhotoTrack_t photo_track;
+
+/**
+ * @brief Classify one exposure before writing pixels to SD.
+ * @param object Unpadded native box. Zero width means no reliable localization.
+ * @param crop Padded native window. Zero width with a valid object means oversized.
+ * @param components Number of confirmed regions. Zero can mean unclassified.
+ * @param blank Whether localization confirmed background or recorded its calibration.
+ * @param tick Frame completion time in HAL milliseconds.
+ * @param next Output candidate saved position. Commit only after a successful write.
+ * @return Storage action or reason to skip storage.
+ */
+static PhotoAction_t SelectPhoto(CAM_BurstWindow object, CAM_BurstWindow crop,
+                                 uint32_t components, int blank, uint32_t tick, PhotoTrack_t *next) {
+  *next = (PhotoTrack_t){0};
+  if (components != 1U)
+  {
+    /* A missed or ambiguous observation breaks continuity. Reset even if the
+       SD write fails so a later reappearance cannot be suppressed. */
+    photo_track.valid = 0;
+    printf("[CAM][TRACK] reason=%s tick_ms=%lu reference=reset\n",
+           blank ? "blank" : object.width ? "multiple_or_unknown" : "no_object",
+           (unsigned long)tick);
+    if (blank) return PHOTO_BLANK;
+    if (components > 1U) return PHOTO_MULTI;
+    if (!object.width) return PHOTO_OVERVIEW;
+    return crop.width ? PHOTO_CROP : PHOTO_OVERSIZE;
+  }
+
+  next->x = object.x + object.width / 2U;
+  next->y = object.y + object.height / 2U;
+  next->tick = tick;
+  next->valid = 1;
+  next->edge = object.x == 0U || object.y == 0U ||
+               object.x + object.width == CAM_FULL_WIDTH ||
+               object.y + object.height == CAM_FULL_HEIGHT;
+  next->action = crop.width ? PHOTO_CROP : PHOTO_OVERSIZE;
+
+  int32_t dx = next->x - photo_track.x;
+  int32_t dy = next->y - photo_track.y;
+  uint32_t distance_sq = (uint32_t)(dx * dx + dy * dy);
+  uint32_t age_ms = tick - photo_track.tick;
+  uint32_t min_px = CAM_TRACK_MIN_DISTANCE_PX;
+  int duplicate = 0;
+  const char *reason = "moved";
+  if (!photo_track.valid) reason = "first";
+  else if (age_ms > CAM_TRACK_MAX_GAP_MS) reason = "expired";
+  else if (next->action != photo_track.action) reason = "output_changed";
+  else if (photo_track.edge && !next->edge) reason = "fully_visible";
+  else if (distance_sq < min_px * min_px)
+  {
+    duplicate = 1;
+    reason = "below_min_distance";
+  }
+  else if (!min_px) reason = "filter_disabled";
+
+  printf("[CAM][TRACK] reason=%s tick_ms=%lu center=(%ld,%ld) last_valid=%d "
+         "last=(%ld,%ld) delta=(%ld,%ld) distance_px2=%lu min_px=%lu age_ms=%lu edge=%d\n",
+         reason, (unsigned long)tick, (long)next->x, (long)next->y, photo_track.valid,
+         (long)photo_track.x, (long)photo_track.y, (long)dx, (long)dy,
+         (unsigned long)distance_sq, (unsigned long)min_px, (unsigned long)age_ms, next->edge);
+
+  /* Keep the last SAVED position on duplicates so small steps accumulate.
+     Compare squared distances to avoid a square root on each trigger. */
+  return duplicate ? PHOTO_DUPLICATE : next->action;
 }
 
-static void CaptureFullAndCrop(uint8_t *source, uint8_t *crop)
-{
-    uint32_t started = HAL_GetTick();
-    uint32_t ticks[2];
-    CAM_BurstWindow roi = {0};
-    int oversize;
-    int captured = CAM_CaptureFullAndCrop(source, MAX_SNAP_FRAME_SIZE,
-                                         crop, BATCH_BUF_SIZE, ticks, &roi, &oversize);
-    PERF_MARK(g_perf_timer, CAM_END);
-#if WS2812_MODE == 0 || WS2812_MODE == 1
-    WS2812_FlashStop();
-#endif
-    uint32_t light_off = HAL_GetTick();
-    if (captured == 0) {
-        g_last_storage_rc = -1;
-        return;
-    }
-
-    if (captured == 2) {
-        LogBurstLuma("full_window", source + (roi.y * CAM_FULL_WIDTH + roi.x) * 2U,
-                     CAM_FULL_WIDTH * 2U, &roi);
-        LogBurstLuma("native_crop", crop, roi.width * 2U, &roi);
-    }
-    RTC_Stamp stamp = RTC_CaptureStamp();
-    uint32_t sd_start = HAL_GetTick();
-    int rc = SaveOverviewCropImage("full_source", source, CAM_FULL_WIDTH, CAM_FULL_HEIGHT,
-                                   RTC_StampForFrame(stamp, ticks[0]));
-    if (captured == 2) {
-        int crop_rc = SaveOverviewCropImage("native_crop", crop, roi.width, roi.height,
-                                            RTC_StampForFrame(stamp, ticks[1]));
-        if (rc == 0) rc = crop_rc;
-    }
-    uint32_t sd_ms = HAL_GetTick() - sd_start;
-    if (rc == 0 && oversize) {
-        /* SD has released the full buffer. Reuse it only now. */
-        uint32_t fallback_start = HAL_GetTick();
-#if WS2812_MODE == 0 || WS2812_MODE == 1
-        WS2812_FlashStart(WS2812_ILLUMINATION_COLOR, WS2812_ILLUMINATION_BRIGHTNESS);
-#endif
-        int fallback = CAM_CaptureFullAndCrop(source, MAX_SNAP_FRAME_SIZE,
-                                              NULL, 0, ticks, &roi, NULL);
-#if WS2812_MODE == 0 || WS2812_MODE == 1
-        WS2812_FlashStop();
-#endif
-        printf("[CAM][FALLBACK] full_frames=%d/2 second_capture_ms=%lu\n",
-               1 + fallback, (unsigned long)(HAL_GetTick() - fallback_start));
-        if (fallback == 1) {
-            stamp = RTC_CaptureStamp();
-            sd_start = HAL_GetTick();
-            rc = SaveOverviewCropImage("full_fallback", source, CAM_FULL_WIDTH, CAM_FULL_HEIGHT,
-                                       RTC_StampForFrame(stamp, ticks[0]));
-            sd_ms += HAL_GetTick() - sd_start;
-        } else {
-            rc = -1;
-        }
-    }
-    g_last_storage_rc = rc;
-    uint32_t done = HAL_GetTick();
-    printf("[CAM][TIME] first_capture_to_light_off_ms=%lu sd_ms=%lu camera_task_total_ms=%lu\n",
-           (unsigned long)(light_off - started), (unsigned long)sd_ms,
-           (unsigned long)(done - started));
+/**
+ * @brief Copy a validated crop from the exact exposure used for localization.
+ * @param source Full native YUYV frame, with DMA stopped.
+ * @param crop Separate output slot, previously used as detector scratch.
+ * @param roi Even-X, even-width crop whose packed rows fit in the output slot.
+ */
+static void CopyNativeCrop(const uint8_t *source, uint8_t *crop, CAM_BurstWindow roi) {
+  uint32_t row_bytes = roi.width * 2U;
+  for (uint32_t y = 0; y < roi.height; ++y)
+  {
+    const uint8_t *row = source + ((roi.y + y) * CAM_FULL_WIDTH + roi.x) * 2U;
+    memcpy(crop + y * row_bytes, row, row_bytes);
+  }
+  /* Storage reads this image with the CPU, then cleans its own SD staging buffer. */
 }
+
+/**
+ * @brief Handle one ToF activation. No waiting for motion or a second ToF hit.
+ * @param source Native DMA frame slot. May be resized in place after crop extraction.
+ * @param crop Separate PSRAM slot shared between detector workspace and crop output.
+ */
+static void CaptureSelectedPhoto(uint8_t *source, uint8_t *crop) {
+  uint32_t started = HAL_GetTick();
+  uint32_t tick;
+  int captured = CAM_CaptureFullFrame(source, MAX_SNAP_FRAME_SIZE, &tick);
+  PERF_MARK(g_perf_timer, CAM_END);
+#if WS2812_MODE == 0 || WS2812_MODE == 1
+  WS2812_FlashStop();
+#endif
+  uint32_t light_off = HAL_GetTick();
+  if (!captured)
+  {
+    g_last_storage_rc = -1;
+    return;
+  }
+
+  CAM_BurstWindow object, roi;
+  uint32_t components;
+  uint32_t detect_start = HAL_GetTick();
+  const char *decision = CAM_LocalizeFrame(source, crop, BATCH_BUF_SIZE, &object, &roi, &components);
+  uint32_t detect_ms = HAL_GetTick() - detect_start;
+  uint32_t select_start = HAL_GetTick();
+  PhotoTrack_t next;
+  int blank = strcmp(decision, "blank_background") == 0 ||
+              strcmp(decision, "empty_reference_saved") == 0;
+  PhotoAction_t action = SelectPhoto(object, roi, components, blank, tick, &next);
+  uint32_t select_ms = HAL_GetTick() - select_start;
+  const char *const action_name[] = {
+    "duplicate", "overview_uncertain", "native_crop", "full_large", "full_multi", "discard_blank"
+  };
+  printf("[CAM][SELECT] action=%s detector=%s components=%lu box=(%u,%u) %ux%u "
+         "detect_ms=%lu select_ms=%lu\n",
+         action_name[action], decision, (unsigned long)components, object.x, object.y, object.width, object.height,
+         (unsigned long)detect_ms, (unsigned long)select_ms);
+  if (action == PHOTO_DUPLICATE || action == PHOTO_BLANK)
+  {
+    g_last_storage_rc = 0;
+    printf("[CAM][TIME] sd_ms=0 camera_task_total_ms=%lu\n",
+           (unsigned long)(HAL_GetTick() - started));
+    return;
+  }
+
+  RTC_Stamp stamp = RTC_StampForFrame(RTC_CaptureStamp(), tick);
+  /* IMPORTANT: Finish all native reads before shrinking the source in place.
+     The copied crop shares the full frame's exposure timestamp. */
+  uint32_t copy_start = HAL_GetTick();
+  if (action == PHOTO_CROP) CopyNativeCrop(source, crop, roi);
+  uint32_t copy_ms = HAL_GetTick() - copy_start;
+  uint32_t resize_ms = 0;
+  uint32_t sd_ms = 0;
+  int rc = 0;
+  uint32_t sd_start;
+  const char *overview_name = "overview";
+  RawImageKind_t overview_kind = RAW_KIND_OVERVIEW;
+  if (action == PHOTO_OVERSIZE || action == PHOTO_MULTI)
+  {
+    /* Write the untouched frame before resizing in place. The storage
+       semaphore returns buffer ownership, so the pair needs no extra frame. */
+    int multi = action == PHOTO_MULTI;
+    sd_start = HAL_GetTick();
+    rc = SaveOverviewCropImage(action_name[action],
+                               multi ? RAW_KIND_FULL_MULTI : RAW_KIND_FULL_LARGE,
+                               source, CAM_FULL_WIDTH, CAM_FULL_HEIGHT, stamp);
+    sd_ms += HAL_GetTick() - sd_start;
+    overview_name = multi ? "overview_multi" : "overview_large";
+    overview_kind = multi ? RAW_KIND_OVERVIEW_MULTI : RAW_KIND_OVERVIEW_LARGE;
+  }
+  else if (action == PHOTO_OVERVIEW)
+  {
+    overview_name = "overview_uncertain";
+    overview_kind = RAW_KIND_OVERVIEW_UNCERTAIN;
+  }
+
+  /* Every accepted detection includes an overview for visual validation. */
+#if CAM_FIRST_IMAGE_DIVISOR != 1
+  uint32_t resize_start = HAL_GetTick();
+  DownsampleFirstImage(source);
+  resize_ms = HAL_GetTick() - resize_start;
+#endif
+  sd_start = HAL_GetTick();
+  int overview_rc = SaveOverviewCropImage(overview_name, overview_kind, source,
+                                         CAM_FIRST_IMAGE_WIDTH, CAM_FIRST_IMAGE_HEIGHT, stamp);
+  sd_ms += HAL_GetTick() - sd_start;
+  if (rc == 0) rc = overview_rc;
+
+  if (action == PHOTO_CROP)
+  {
+    /* Attempt the crop even if the overview write failed. Retry the pair on
+       a later observation by advancing the reference only if both succeeded. */
+    sd_start = HAL_GetTick();
+    int crop_rc = SaveOverviewCropImage("native_crop", RAW_KIND_CROP, crop, roi.width, roi.height, stamp);
+    sd_ms += HAL_GetTick() - sd_start;
+    if (rc == 0) rc = crop_rc;
+  }
+  if (rc == 0) photo_track = next;
+
+  g_last_storage_rc = rc;
+  printf("[CAM][TIME] first_capture_to_light_off_ms=%lu copy_ms=%lu resize_ms=%lu "
+         "sd_ms=%lu camera_task_total_ms=%lu\n",
+         (unsigned long)(light_off - started), (unsigned long)copy_ms,
+         (unsigned long)resize_ms, (unsigned long)sd_ms,
+         (unsigned long)(HAL_GetTick() - started));
+}
+
 #endif
 
 void camera_task(void *arg)
@@ -1087,7 +1263,7 @@ void camera_task(void *arg)
             }
 #elif CAM_OVERVIEW_CROP
             extern uint8_t batch_buf[];
-            CaptureFullAndCrop(capture_buf, batch_buf);
+            CaptureSelectedPhoto(capture_buf, batch_buf);
             g_capture_busy = 0;
             xSemaphoreGive(camera_ready_sem);
 #elif CAPTURE_MODE == 4
@@ -1366,7 +1542,7 @@ void storage_task(void *arg)
         if (cmd.type == STORAGE_CMD_SAVE) {
             PERF_MARK(g_perf_timer, STORAGE);
             uint32_t storage_start = HAL_GetTick();
-            int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp);
+            int rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp, cmd.image_kind);
             if (rc != 0) {
                 /* A single transient card hiccup (timeout / CRC) previously meant this
                    image was silently lost. Reinit the peripheral and retry the SAME
@@ -1376,7 +1552,7 @@ void storage_task(void *arg)
                 printf("[SD] FAIL — attempting recovery + retry...\n");
 #endif
                 if (SD_Reinit() == 0) {
-                    rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp);
+                    rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp, cmd.image_kind);
                 }
             }
             if (rc != 0) g_last_storage_rc = rc;
