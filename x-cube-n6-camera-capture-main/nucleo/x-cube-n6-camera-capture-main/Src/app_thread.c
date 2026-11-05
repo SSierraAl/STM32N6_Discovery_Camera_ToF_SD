@@ -1,3 +1,4 @@
+#include "app_log.h"
 #include "raw_image.h"
 /**
  * @file    app_thread.c
@@ -175,7 +176,7 @@ BaseType_t Capture_RequestSnapOnly(void)
 int SD_Reinit(void)
 {
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[SD] === SD RECOVERY STARTED ===\n");
+    printf(LOG_STORAGE("[SD]") " === SD RECOVERY STARTED ===\n");
 #endif
     uint32_t saved_block = g_sd_img_base_block;
     HAL_SD_Abort(&hsd1);
@@ -205,12 +206,12 @@ int SD_Reinit(void)
     g_sd_img_base_block = saved_block;
     if (status == HAL_OK) {
 #if PERF_DEBUG_LEVEL >= 1
-        printf("[SD] Recovery OK! Next write from block %lu\n", (unsigned long)g_sd_img_base_block);
+        printf(LOG_STORAGE("[SD]") " Recovery OK! Next write from block %lu\n", (unsigned long)g_sd_img_base_block);
 #endif
         return 0;
     } else {
 #if PERF_DEBUG_LEVEL >= 1
-        printf("[SD] Recovery FAILED (HAL=0x%08lX)\n", (unsigned long)status);
+        printf(LOG_STORAGE("[SD]") " Recovery FAILED (HAL=0x%08lX)\n", (unsigned long)status);
 #endif
         return -1;
     }
@@ -233,7 +234,7 @@ static int SD_WaitForReady(void)
     }
     if (wait_ms >= 5000) {
 #if PERF_DEBUG_LEVEL >= 1
-        printf("[SD] timeout before next batch (card still PROGRAMMING after %lu ms)\n",
+        printf(LOG_STORAGE("[SD]") " timeout before next batch (card still PROGRAMMING after %lu ms)\n",
                (unsigned long)wait_ms);
 #endif
         return -1;
@@ -253,7 +254,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         uint32_t total_blocks = (SD_IMG_HEADER_SIZE + img_size + SD_BLOCK_SIZE - 1) / SD_BLOCK_SIZE;
         if ((base + total_blocks - 1) >= hsd1.SdCard.BlockNbr) {
 #if PERF_DEBUG_LEVEL >= 1
-            printf("[SD] OVERFLOW\n");
+            printf(LOG_STORAGE("[SD]") " OVERFLOW\n");
 #endif
             return -1;
         }
@@ -271,14 +272,14 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
     hdr.image_kind = image_kind;
 
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[SD] #%" PRIu32 " %lux%lu %lu bytes (%.3f MB)\n",
+    printf(LOG_STORAGE("[SD]") " #%" PRIu32 " %lux%lu %lu bytes (%.3f MB)\n",
            snap_id, (unsigned long)w, (unsigned long)h, img_size, img_size / 1048576.0f);
 #endif
 
     uint32_t t_wait = HAL_GetTick();
     if (SD_WaitForReady() != 0) {
 #if PERF_DEBUG_LEVEL >= 1
-        printf("[SD] Not ready for first write\n");
+        printf(LOG_STORAGE("[SD]") " Not ready for first write\n");
 #endif
         return -1;
     }
@@ -313,7 +314,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
     Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, 0, st == HAL_OK ? batch_blk : 0);
     if (st != HAL_OK) {
 #if PERF_DEBUG_LEVEL >= 1
-        printf("[SD] header FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
+        printf(LOG_STORAGE("[SD]") " header FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
                (unsigned long)base, (unsigned long)st, (unsigned long)SDMMC2->STA);
 #endif
         return -1;
@@ -354,7 +355,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         t0 = HAL_GetTick();
         if (SD_WaitForReady() != 0) {
 #if PERF_DEBUG_LEVEL >= 1
-            printf("[SD] timeout before block %lu\n", (unsigned long)current_block);
+            printf(LOG_STORAGE("[SD]") " timeout before block %lu\n", (unsigned long)current_block);
 #endif
             return -1;
         }
@@ -372,7 +373,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         Perf_SD_RecordBatch(&g_perf_timer, wait_ms, write_ms, gap_ms, st == HAL_OK ? blocks_in_batch : 0);
         if (st != HAL_OK) {
 #if PERF_DEBUG_LEVEL >= 1
-            printf("[SD] FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
+            printf(LOG_STORAGE("[SD]") " FAIL block %lu HAL=0x%08lX STA=0x%08lX\n",
                    (unsigned long)current_block, (unsigned long)st, (unsigned long)SDMMC2->STA);
 #endif
             return -1;
@@ -383,14 +384,14 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
         if (PERF_SD_BATCH_PRINT_EVERY > 0 && (local_batch_count % PERF_SD_BATCH_PRINT_EVERY) == 0) {
             uint32_t done_bytes = img_offset + blocks_in_batch * SD_BLOCK_SIZE;
             float pct = (100.0f * done_bytes) / img_size;
-            printf("[SD] #%lu wait=%lums write=%lums gap=%lums | %.1f%%\n",
+            printf(LOG_STORAGE("[SD]") " #%lu wait=%lums write=%lums gap=%lums | %.1f%%\n",
                (unsigned long)local_batch_count, (unsigned long)wait_ms, (unsigned long)write_ms, (unsigned long)gap_ms, pct);
         }
 #elif PERF_DEBUG_LEVEL >= 1
         if ((local_batch_count % 64) == 0) {
             uint32_t done_bytes = img_offset + blocks_in_batch * SD_BLOCK_SIZE;
             float pct = (100.0f * done_bytes) / img_size;
-            printf("[SD] ... %.1f%%\n", pct);
+            printf(LOG_STORAGE("[SD]") " ... %.1f%%\n", pct);
         }
 #endif
         img_offset += blocks_in_batch * SD_BLOCK_SIZE;
@@ -400,7 +401,7 @@ static int SD_StoreRawImage(const uint8_t *img_buf, uint32_t img_size, uint32_t 
     g_sd_img_base_block = current_block;
     /* Cycle completion belongs to Capture_RequestSnapshot, after all frames. */
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[SD] OK blocks %lu..%lu (%lu batches)\n",
+    printf(LOG_STORAGE("[SD]") " OK blocks %lu..%lu (%lu batches)\n",
            (unsigned long)base, (unsigned long)(current_block - 1), (unsigned long)local_batch_count);
 #endif
     return 0;
@@ -413,7 +414,7 @@ void sensor_task(void *arg)
     extern volatile int system_ready;
     while (!system_ready) vTaskDelay(pdMS_TO_TICKS(500));
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY
-    printf("[TOF TEST] sensor_task v3 started\n");
+    printf(LOG_TOF("[TOF TEST]") " sensor_task v3 started\n");
 #endif
 
     if (VL53L5CX_Init(&hi2c1) != 0) {
@@ -506,7 +507,7 @@ void sensor_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(BTN_DEBOUNCE_MS));
             if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_SET) {
                 btn_refresh_armed = 0;
-                printf("[BTN] PC13 pressed — refreshing baseline(s)...\n");
+                printf(LOG_TOF("[BTN]") " PC13 pressed — refreshing baseline(s)...\n");
                 BSP_LED_Off(LED_GREEN);
                 BSP_LED_On(LED_RED);
                 VL53L5CX_RefreshBaseline_Manual();
@@ -551,7 +552,7 @@ void sensor_task(void *arg)
                     pdMS_TO_TICKS(TOF_CAPTURE_REFRESH_WINDOW_SECS * 1000UL)) {
                 consecutive_captures = 0;
                 consecutive_window_active = 0;
-                printf("[ADAPT] Window expired, counter reset\n");
+                printf(LOG_TOF("[ADAPT]") " Window expired, counter reset\n");
             }
 #endif
 
@@ -608,7 +609,7 @@ void sensor_task(void *arg)
                     consecutive_captures = 1;
                 }
                 consecutive_window_active = 0;
-                printf("[ADAPT] Camera activation %u/%u\n",
+                printf(LOG_TOF("[ADAPT]") " Camera activation %u/%u\n",
                        (unsigned)consecutive_captures,
                        (unsigned)TOF_CAPTURE_MAX_DETECTIONS);
 #endif
@@ -620,7 +621,7 @@ void sensor_task(void *arg)
                 BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
 #if TOF_CAPTURE_ACTIVATION_REFRESH
                 if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
-                    printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
+                    printf(LOG_TOF("[ADAPT]") " Maximum activations reached, refreshing baseline\n");
                     VL53L5CX_StopRanging();
                     vTaskDelay(pdMS_TO_TICKS(50));
                     VL53L5CX_StartRanging();
@@ -628,12 +629,12 @@ void sensor_task(void *arg)
                     VL53L5CX_LearnBaseline();
                     consecutive_captures = 0;
                     consecutive_window_active = 0;
-                    printf("[ADAPT] Baseline refresh complete\n");
+                    printf(LOG_TOF("[ADAPT]") " Baseline refresh complete\n");
                 } else {
                     VL53L5CX_StartRanging();
                     consecutive_window_start = xTaskGetTickCount();
                     consecutive_window_active = 1;
-                    printf("[ADAPT] Window opened for %lu s\n",
+                    printf(LOG_TOF("[ADAPT]") " Window opened for %lu s\n",
                            (unsigned long)TOF_CAPTURE_REFRESH_WINDOW_SECS);
                 }
 #else
@@ -683,7 +684,7 @@ void sensor_task(void *arg)
                Preserve the learned baseline and the currently active weak
                zones so persistent 2% noise is not treated as a new edge. */
             VL53L5CX_ZoneDetectorAfterCapture();
-            printf("[ADAPT] Camera re-armed; weak track cleared\n");
+            printf(LOG_TOF("[ADAPT]") " Camera re-armed; weak track cleared\n");
         }
 #endif
 
@@ -693,7 +694,7 @@ void sensor_task(void *arg)
                 pdMS_TO_TICKS(TOF_CAPTURE_REFRESH_WINDOW_SECS * 1000UL)) {
             consecutive_captures = 0;
             consecutive_window_active = 0;
-            printf("[ADAPT] Window expired, counter reset\n");
+            printf(LOG_TOF("[ADAPT]") " Window expired, counter reset\n");
         }
 #endif
 
@@ -737,7 +738,7 @@ void sensor_task(void *arg)
     (VL53L5CX_DET_RESOLUTION == 4)
             VL53L5CX_PrintZoneSnapshot("drift");
 #endif
-            printf("[ADAPT] Persistent stable drift, refreshing baseline\n");
+            printf(LOG_TOF("[ADAPT]") " Persistent stable drift, refreshing baseline\n");
             g_sensor_state = SENSOR_STATE_PAUSED;
             VL53L5CX_StopRanging();
             vTaskDelay(pdMS_TO_TICKS(50));
@@ -750,11 +751,11 @@ void sensor_task(void *arg)
 #endif
             g_sensor_state = SENSOR_STATE_RUNNING;
             cooldown = TOF_CAPTURE_COOLDOWN_FRAMES;
-            printf("[ADAPT] Stable-drift baseline refresh complete\n");
+            printf(LOG_TOF("[ADAPT]") " Stable-drift baseline refresh complete\n");
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
             capture_rearm_holdoff_start = xTaskGetTickCount();
             capture_rearm_holdoff_active = 1;
-            printf("[ADAPT] Level/track recovery for %lu s; ToF remains active\n",
+            printf(LOG_TOF("[ADAPT]") " Level/track recovery for %lu s; ToF remains active\n",
                    (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
             continue;
@@ -831,7 +832,7 @@ void sensor_task(void *arg)
                 consecutive_captures = 1;
             }
             consecutive_window_active = 0;
-            printf("[ADAPT] Camera activation %u/%u class=%u\n",
+            printf(LOG_TOF("[ADAPT]") " Camera activation %u/%u class=%u\n",
                    (unsigned)consecutive_captures,
                    (unsigned)TOF_CAPTURE_MAX_DETECTIONS,
                    (unsigned)tof_event_class);
@@ -852,7 +853,7 @@ void sensor_task(void *arg)
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
 #if TOF_CAPTURE_ACTIVATION_REFRESH
             if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
-                printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
+                printf(LOG_TOF("[ADAPT]") " Maximum activations reached, refreshing baseline\n");
                 VL53L5CX_StopRanging();
                 vTaskDelay(pdMS_TO_TICKS(50));
                 VL53L5CX_StartRanging();
@@ -860,18 +861,18 @@ void sensor_task(void *arg)
                 VL53L5CX_LearnBaseline();
                 consecutive_captures = 0;
                 consecutive_window_active = 0;
-                printf("[ADAPT] Baseline refresh complete\n");
+                printf(LOG_TOF("[ADAPT]") " Baseline refresh complete\n");
 #if TOF_CAPTURE_REARM_HOLDOFF_SECS > 0
                 capture_rearm_holdoff_start = xTaskGetTickCount();
                 capture_rearm_holdoff_active = 1;
-                printf("[ADAPT] Level/track recovery for %lu s; ToF remains active\n",
+                printf(LOG_TOF("[ADAPT]") " Level/track recovery for %lu s; ToF remains active\n",
                        (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
             } else {
                 VL53L5CX_StartRanging();
                 consecutive_window_start = xTaskGetTickCount();
                 consecutive_window_active = 1;
-                printf("[ADAPT] Window opened for %lu s\n",
+                printf(LOG_TOF("[ADAPT]") " Window opened for %lu s\n",
                        (unsigned long)TOF_CAPTURE_REFRESH_WINDOW_SECS);
             }
 #else
@@ -925,14 +926,14 @@ static int SaveOverviewCropImage(const char *kind, RawImageKind_t image_kind, ui
   frame.snap_id = g_next_snap_id++;
   frame.stamp = stamp;
   frame.image_kind = image_kind;
-  printf("[CAM][SD] queue %s id=%lu %ux%u bytes=%lu\n", kind,
+  printf(LOG_CAMERA("[CAM]") "[SD] queue %s id=%lu %ux%u bytes=%lu\n", kind,
          (unsigned long)frame.snap_id, width, height, (unsigned long)frame.image_size);
   if (xQueueSend(storage_cmd_queue, &frame, pdMS_TO_TICKS(1000)) != pdTRUE) {
       return -1;
   }
   /* SD owns the workspace until its write or recovery attempt finishes. */
   xSemaphoreTake(storage_done_sem, portMAX_DELAY);
-  printf("[CAM][SD] done %s rc=%d\n", kind, g_last_storage_rc);
+  printf(LOG_CAMERA("[CAM]") "[SD] done %s rc=%d\n", kind, g_last_storage_rc);
   return g_last_storage_rc;
 }
 
@@ -993,6 +994,12 @@ static PhotoTrack_t photo_track;
 
 /**
  * @brief Classify one exposure before writing pixels to SD.
+ *
+ * This function controls storage only. ToF triggers and baseline learning are
+ * controlled by sensor_task. Distance is measured from the last successfully
+ * saved position so rejected small steps accumulate. No individual identity
+ * is inferred from a box. A full candidate pair must finish before committing
+ * the next reference. See docs/MASSIF-Camera-Pipeline.md for backend extension.
  * @param object Unpadded native box. Zero width means no reliable localization.
  * @param crop Padded native window. Zero width with a valid object means oversized.
  * @param components Number of confirmed regions. Zero can mean unclassified.
@@ -1009,7 +1016,7 @@ static PhotoAction_t SelectPhoto(CAM_BurstWindow object, CAM_BurstWindow crop,
     /* A missed or ambiguous observation breaks continuity. Reset even if the
        SD write fails so a later reappearance cannot be suppressed. */
     photo_track.valid = 0;
-    printf("[CAM][TRACK] reason=%s tick_ms=%lu reference=reset\n",
+    printf(LOG_CAMERA("[CAM]") "[TRACK] reason=%s tick_ms=%lu reference=reset\n",
            blank ? "blank" : object.width ? "multiple_or_unknown" : "no_object",
            (unsigned long)tick);
     if (blank) return PHOTO_BLANK;
@@ -1045,7 +1052,7 @@ static PhotoAction_t SelectPhoto(CAM_BurstWindow object, CAM_BurstWindow crop,
   }
   else if (!min_px) reason = "filter_disabled";
 
-  printf("[CAM][TRACK] reason=%s tick_ms=%lu center=(%ld,%ld) last_valid=%d "
+  printf(LOG_CAMERA("[CAM]") "[TRACK] reason=%s tick_ms=%lu center=(%ld,%ld) last_valid=%d "
          "last=(%ld,%ld) delta=(%ld,%ld) distance_px2=%lu min_px=%lu age_ms=%lu edge=%d\n",
          reason, (unsigned long)tick, (long)next->x, (long)next->y, photo_track.valid,
          (long)photo_track.x, (long)photo_track.y, (long)dx, (long)dy,
@@ -1106,14 +1113,14 @@ static void CaptureSelectedPhoto(uint8_t *source, uint8_t *crop) {
   const char *const action_name[] = {
     "duplicate", "overview_uncertain", "native_crop", "full_large", "full_multi", "discard_blank"
   };
-  printf("[CAM][SELECT] action=%s detector=%s components=%lu box=(%u,%u) %ux%u "
+  printf(LOG_CAMERA("[CAM]") "[SELECT] action=%s detector=%s components=%lu box=(%u,%u) %ux%u "
          "detect_ms=%lu select_ms=%lu\n",
          action_name[action], decision, (unsigned long)components, object.x, object.y, object.width, object.height,
          (unsigned long)detect_ms, (unsigned long)select_ms);
   if (action == PHOTO_DUPLICATE || action == PHOTO_BLANK)
   {
     g_last_storage_rc = 0;
-    printf("[CAM][TIME] sd_ms=0 camera_task_total_ms=%lu\n",
+    printf(LOG_CAMERA("[CAM]") "[TIME] sd_ms=0 camera_task_total_ms=%lu\n",
            (unsigned long)(HAL_GetTick() - started));
     return;
   }
@@ -1173,7 +1180,7 @@ static void CaptureSelectedPhoto(uint8_t *source, uint8_t *crop) {
   if (rc == 0) photo_track = next;
 
   g_last_storage_rc = rc;
-  printf("[CAM][TIME] first_capture_to_light_off_ms=%lu copy_ms=%lu resize_ms=%lu "
+  printf(LOG_CAMERA("[CAM]") "[TIME] first_capture_to_light_off_ms=%lu copy_ms=%lu resize_ms=%lu "
          "sd_ms=%lu camera_task_total_ms=%lu\n",
          (unsigned long)(light_off - started), (unsigned long)copy_ms,
          (unsigned long)resize_ms, (unsigned long)sd_ms,
@@ -1218,7 +1225,7 @@ void camera_task(void *arg)
             PERF_MARK(g_perf_timer, CAM_END);
             if (rc == 0) {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[CAM] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
+                printf(LOG_CAMERA("[CAM]") " OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
 #endif
                 xSemaphoreGive(camera_ready_sem);
                 StorageCmd_t sc = {0};
@@ -1229,7 +1236,7 @@ void camera_task(void *arg)
                 xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000));
             } else {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[CAM] FAIL\n");
+                printf(LOG_CAMERA("[CAM]") " FAIL\n");
 #endif
                 xSemaphoreGive(camera_ready_sem);
             }
@@ -1275,9 +1282,9 @@ void camera_task(void *arg)
                 g_last_batch_frames = rc;
 #if PERF_DEBUG_LEVEL >= 1
 #if CAPTURE_MODE == 4
-                printf("[CAM] Callback-Batch: %d frames captured (continuous)\n", rc);
+                printf(LOG_CAMERA("[CAM]") " Callback-Batch: %d frames captured (continuous)\n", rc);
 #else
-                printf("[CAM] Batch: %d frames captured\n", rc);
+                printf(LOG_CAMERA("[CAM]") " Batch: %d frames captured\n", rc);
 #endif
 #endif
 
@@ -1386,7 +1393,7 @@ void camera_task(void *arg)
 #endif
                     if (xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000)) != pdTRUE) {
 #if PERF_DEBUG_LEVEL >= 1
-                        printf("[CAM] Storage queue full, dropping frame %d\n", f);
+                        printf(LOG_CAMERA("[CAM]") " Storage queue full, dropping frame %d\n", f);
 #endif
                     }
                 }
@@ -1466,9 +1473,9 @@ void camera_task(void *arg)
             } else {
 #if PERF_DEBUG_LEVEL >= 1
 #if CAPTURE_MODE == 4
-                printf("[CAM] Callback-Batch FAIL\n");
+                printf(LOG_CAMERA("[CAM]") " Callback-Batch FAIL\n");
 #else
-                printf("[CAM] Batch FAIL\n");
+                printf(LOG_CAMERA("[CAM]") " Batch FAIL\n");
 #endif
 #endif
                 g_capture_busy = 0;
@@ -1480,7 +1487,7 @@ void camera_task(void *arg)
             PERF_MARK(g_perf_timer, CAM_END);
             if (rc == 0) {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[CAM] OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
+                printf(LOG_CAMERA("[CAM]") " OK %lu ms\n", (unsigned long)Perf_PhaseElapsed(&g_perf_timer, PERF_PHASE_START, PERF_PHASE_CAM_DEINIT));
 #endif
                 xSemaphoreGive(camera_ready_sem);
                 StorageCmd_t sc = {0};
@@ -1491,7 +1498,7 @@ void camera_task(void *arg)
                 xQueueSend(storage_cmd_queue, &sc, pdMS_TO_TICKS(1000));
             } else {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[CAM] FAIL\n");
+                printf(LOG_CAMERA("[CAM]") " FAIL\n");
 #endif
                 g_capture_busy = 0;
                 xSemaphoreGive(camera_ready_sem);
@@ -1521,7 +1528,7 @@ void storage_task(void *arg)
                    image ONCE before giving up, since g_sd_img_base_block was restored
                    to the block this image was supposed to start at. */
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[SD] FAIL — attempting recovery + retry...\n");
+                printf(LOG_STORAGE("[SD]") " FAIL — attempting recovery + retry...\n");
 #endif
                 if (SD_Reinit() == 0) {
                     rc = SD_StoreRawImage(cmd.image_buf, cmd.image_size, cmd.width, cmd.height, cmd.pixel_format, cmd.snap_id, cmd.stamp, cmd.image_kind);
@@ -1533,11 +1540,11 @@ void storage_task(void *arg)
 #endif
             if (rc == 0) {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[SD] OK %lu ms\n", (unsigned long)storage_elapsed);
+                printf(LOG_STORAGE("[SD]") " OK %lu ms\n", (unsigned long)storage_elapsed);
 #endif
             } else {
 #if PERF_DEBUG_LEVEL >= 1
-                printf("[SD] FAIL %lu ms — image LOST after retry\n", (unsigned long)storage_elapsed);
+                printf(LOG_STORAGE("[SD]") " FAIL %lu ms — image LOST after retry\n", (unsigned long)storage_elapsed);
 #endif
                 SD_Reinit();
             }
@@ -1635,3 +1642,4 @@ int Capture_RequestSnapshot(uint32_t timeout_ms)
 #endif
 #endif /* CAM_NATIVE_ROI */
 }
+

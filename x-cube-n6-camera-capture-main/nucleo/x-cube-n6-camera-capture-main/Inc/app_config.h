@@ -69,6 +69,14 @@
 /** IMX335 full-field dimensions for the DMA source. */
 #define CAM_FULL_WIDTH 2592U
 #define CAM_FULL_HEIGHT 1944U
+/** ANSI backgrounds on human-readable module tags. Set to 0 for plain
+    serial logs or tools that expect exact bracket prefixes. CSV stays plain. */
+#ifndef APP_LOG_ANSI_COLORS
+#define APP_LOG_ANSI_COLORS 1
+#endif
+#if APP_LOG_ANSI_COLORS != 0 && APP_LOG_ANSI_COLORS != 1
+#error "APP_LOG_ANSI_COLORS must be 0 or 1"
+#endif
 /** Saved overview divisor. The detector always receives the native source. */
 #ifndef CAM_FIRST_IMAGE_DIVISOR
 #define CAM_FIRST_IMAGE_DIVISOR 2U
@@ -96,7 +104,8 @@
 #ifndef CAM_DYNAMIC_CROP_MARGIN
 #define CAM_DYNAMIC_CROP_MARGIN 96U
 #endif
-/** Also save the configured overview when a native crop is saved. */
+/** Legacy compatibility switch. The validation pipeline always saves an
+    overview with an accepted target. Retained for older build configurations. */
 #ifndef CAM_SAVE_CROP_OVERVIEW
 #define CAM_SAVE_CROP_OVERVIEW 1
 #endif
@@ -994,3 +1003,4 @@
 #endif /* VL53L5CX_DUAL_SENSOR */
 
 #endif /* APP_CONFIG */
+

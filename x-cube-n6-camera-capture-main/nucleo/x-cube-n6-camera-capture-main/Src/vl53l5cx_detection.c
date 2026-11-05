@@ -1,3 +1,4 @@
+#include "app_log.h"
 /**
  * *****************************************************************************
  * @file    vl53l5cx_detection.c
@@ -319,32 +320,32 @@ int VL53L5CX_Init(I2C_HandleTypeDef *hi2c)
 
     s_hi2c = hi2c;
     s_dev.platform.address = 0x29;
-    printf("[ToF] Waiting for sensor to respond...\n");
+    printf(LOG_TOF("[ToF]") " Waiting for sensor to respond...\n");
     for (uint8_t retry = 0; retry < 10; retry++) {
         init_status = vl53l5cx_is_alive(&s_dev, &is_alive);
         if (is_alive && init_status == 0) break;
-        printf("[ToF] Not ready (retry %d/10)...\n", retry + 1);
+        printf(LOG_TOF("[ToF]") " Not ready (retry %d/10)...\n", retry + 1);
         vTaskDelay(pdMS_TO_TICKS(300));
     }
 
     if (!is_alive || init_status != 0) {
-        printf("[ToF] ERROR: Sensor not detected!\n");
+        printf(LOG_TOF("[ToF]") " ERROR: Sensor not detected!\n");
         return -1;
     }
 
     for (uint8_t r = 0; r < 3; r++) {
         init_status = vl53l5cx_init(&s_dev);
         if (init_status == 0) break;
-        printf("[ToF] Init retry %d/3...\n", r + 1);
+        printf(LOG_TOF("[ToF]") " Init retry %d/3...\n", r + 1);
         vTaskDelay(pdMS_TO_TICKS(200));
     }
 
     if (init_status != 0) {
-        printf("[ToF] ERROR: Init failed (status=%d)!\n", init_status);
+        printf(LOG_TOF("[ToF]") " ERROR: Init failed (status=%d)!\n", init_status);
         return -2;
     }
 
-    printf("[ToF] Sensor initialized successfully!\n");
+    printf(LOG_TOF("[ToF]") " Sensor initialized successfully!\n");
     return 0;
 }
 
@@ -431,7 +432,7 @@ void VL53L5CX_PowerUp(void)
 void VL53L5CX_PowerDown(void)
 {
     HAL_GPIO_WritePin(GPIOD, GPIO_PIN_0, GPIO_PIN_RESET);
-    printf("[ToF] Sensor powered down\n");
+    printf(LOG_TOF("[ToF]") " Sensor powered down\n");
 }
 
 /* ================================================================
@@ -454,7 +455,7 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
 #ifndef VL53L5CX_DISABLE_MOTION_INDICATOR
     int motion_st = vl53l5cx_motion_indicator_init(&s_dev, &s_motion_config, resolution);
     if (motion_st) {
-        printf("[ToF] WARN: Motion indicator init failed: %d\n", motion_st);
+        printf(LOG_TOF("[ToF]") " WARN: Motion indicator init failed: %d\n", motion_st);
         s_motion_initialized = 0;
     } else {
         s_motion_config.min_nb_for_global_detection = VL53L5CX_DET_MOTION_MIN_ZONES;
@@ -465,11 +466,11 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
            above would have no effect on the sensor. */
         motion_st = vl53l5cx_motion_indicator_set_resolution(&s_dev, &s_motion_config, resolution);
         if (motion_st) {
-            printf("[ToF] WARN: Motion indicator re-apply failed: %d (plugin defaults remain)\n",
+            printf(LOG_TOF("[ToF]") " WARN: Motion indicator re-apply failed: %d (plugin defaults remain)\n",
                    motion_st);
         }
         s_motion_initialized = 1;
-        printf("[ToF] Motion indicator enabled (global_zones=%d, accum=%d, noise_sigma=%d)\n",
+        printf(LOG_TOF("[ToF]") " Motion indicator enabled (global_zones=%d, accum=%d, noise_sigma=%d)\n",
                VL53L5CX_DET_MOTION_MIN_ZONES, VL53L5CX_DET_MOTION_PERSIST_FRAMES,
                VL53L5CX_DET_MOTION_EXTRA_NOISE);
     }
@@ -478,7 +479,7 @@ void VL53L5CX_Configure(uint8_t resolution, int integration_ms, int freq_hz)
 #endif
 
     target_st |= vl53l5cx_get_target_order(&s_dev, &active_target_order);
-    printf("[ToF] Configured: res=%d, int=%dms, freq=%dHz, mode=%d, target=%s(%u), target_st=%d\n",
+    printf(LOG_TOF("[ToF]") " Configured: res=%d, int=%dms, freq=%dHz, mode=%d, target=%s(%u), target_st=%d\n",
            resolution, integration_ms, freq_hz, (int)VL53L5CX_RANGING_MODE,
            active_target_order == VL53L5CX_TARGET_ORDER_CLOSEST ?
                "CLOSEST" : (active_target_order == VL53L5CX_TARGET_ORDER_STRONGEST ?
@@ -490,13 +491,13 @@ void VL53L5CX_StartRanging(void)
 {
     vl53l5cx_start_ranging(&s_dev);
     vTaskDelay(pdMS_TO_TICKS(200));
-    printf("[ToF] Ranging started\n");
+    printf(LOG_TOF("[ToF]") " Ranging started\n");
 }
 
 void VL53L5CX_StopRanging(void)
 {
     vl53l5cx_stop_ranging(&s_dev);
-    printf("[ToF] Ranging stopped\n");
+    printf(LOG_TOF("[ToF]") " Ranging stopped\n");
 }
 
 /* ================================================================
@@ -563,7 +564,7 @@ void VL53L5CX_ResetBaseline(void)
      (!TEST_TOF_MODE && VL53L5CX_DET_HIGH_SENS_CAMERA))
     TestResetDetectionState();
 #endif
-    printf("[ToF] Baseline reset\n");
+    printf(LOG_TOF("[ToF]") " Baseline reset\n");
 }
 
 void VL53L5CX_LearnBaseline(void)
@@ -590,7 +591,7 @@ void VL53L5CX_LearnBaseline(void)
         min_distance[z] = INT16_MAX;
 #endif
 
-    printf("[BASELINE] Learning %d samples + %d settle frames...\n",
+    printf(LOG_TOF("[BASELINE]") " Learning %d samples + %d settle frames...\n",
            baseline_samples, settle_frames);
 
     /* Let the ranging engine converge before measuring the reference. This
@@ -649,7 +650,7 @@ void VL53L5CX_LearnBaseline(void)
     /* Baseline samples and settle frames must never remain in either temporal
        detector history. The next live frames will prime fresh history. */
     VL53L5CX_ResetDetectionFilterState();
-    printf("\n[BASELINE] Done. Valid zones: %d/%d\n", valid_count, VL53L5CX_DET_NUM_ZONES);
+    printf("\n" LOG_TOF("[BASELINE]") " Done. Valid zones: %d/%d\n", valid_count, VL53L5CX_DET_NUM_ZONES);
     VL53L5CX_PrintBaselineFrame();
 #if TEST_TOF_MODE && VL53L5CX_DET_ZONE_SURVEY && (VL53L5CX_DET_RESOLUTION == 4)
     /* Baseline is already per zone. Sample count and observed distance span
@@ -907,13 +908,13 @@ int VL53L5CX_Update(void)
     if (s_baseline_ready &&
         (uint32_t)(HAL_GetTick() - s_last_full_baseline_tick) >=
             refresh_interval_ms) {
-        printf("[ToF] Periodic refresh since last baseline...\n");
+        printf(LOG_TOF("[ToF]") " Periodic refresh since last baseline...\n");
         vl53l5cx_stop_ranging(&s_dev);
         vTaskDelay(pdMS_TO_TICKS(50));
         vl53l5cx_start_ranging(&s_dev);
         vTaskDelay(pdMS_TO_TICKS(200));
         VL53L5CX_LearnBaseline();
-        printf("[ToF] Periodic refresh done.\n");
+        printf(LOG_TOF("[ToF]") " Periodic refresh done.\n");
         /* The latest s_results belongs to baseline learning. Wait for a
            fresh ranging frame before running the camera detector. */
         return 0;
@@ -935,13 +936,13 @@ int VL53L5CX_Update(void)
 #endif
             if (!tof_busy) {
                 frame_counter = 0;
-                printf("[ToF] Periodic refresh...\n");
+                printf(LOG_TOF("[ToF]") " Periodic refresh...\n");
                 vl53l5cx_stop_ranging(&s_dev);
                 vTaskDelay(pdMS_TO_TICKS(50));
                 vl53l5cx_start_ranging(&s_dev);
                 vTaskDelay(pdMS_TO_TICKS(200));
                 VL53L5CX_LearnBaseline();
-                printf("[ToF] Periodic refresh done.\n");
+                printf(LOG_TOF("[ToF]") " Periodic refresh done.\n");
             }
         }
     }
@@ -1454,7 +1455,7 @@ int VL53L5CX_TestDetectionStep(uint8_t event_policy)
                         s_baseline_signal[z] = s_test_stable_sig[z];
                     if (distance_change >= VL53L5CX_DET_LOCAL_DIST_WEAK_MM)
                         s_baseline_distance[z] = (uint16_t)s_test_stable_dist[z];
-                    printf("[ADAPT] Zone %u baseline sig %lu->%lu dist %u->%u (stable window: %u frames, max jitter 1%%/1mm)\n",
+                    printf(LOG_TOF("[ADAPT]") " Zone %u baseline sig %lu->%lu dist %u->%u (stable window: %u frames, max jitter 1%%/1mm)\n",
                            (unsigned)z, (unsigned long)old_signal,
                            (unsigned long)s_baseline_signal[z],
                            (unsigned)old_distance,
@@ -2316,14 +2317,14 @@ void VL53L5CX_External_PrintAllZoneParams(void)
 void VL53L5CX_RefreshBaseline_Manual(void)
 {
 #if VL53L5CX_DUAL_SENSOR
-    printf("[BTN] Refreshing PRIMARY baseline (waking from sleep)...\n");
+    printf(LOG_TOF("[BTN]") " Refreshing PRIMARY baseline (waking from sleep)...\n");
     /* Wake the camera ToF if it is parked in ST sleep. Already-active
        states (mid detection cycle) simply skip the wake sequence (and
        any on-wake re-learn inside VL53L5CX_Primary_Wake). */
     if (!VL53L5CX_Primary_IsActive())
         VL53L5CX_Primary_Wake();
 #else
-    printf("[BTN] Refreshing PRIMARY baseline...\n");
+    printf(LOG_TOF("[BTN]") " Refreshing PRIMARY baseline...\n");
 #endif
 
     /* Documented refresh procedure (same as periodic/adaptive refresh) */
@@ -2344,7 +2345,7 @@ void VL53L5CX_RefreshBaseline_Manual(void)
 
     /* External guardian: always on, refresh in place. */
     if (VL53L5CX_External_GetState() != EXTERNAL_STATE_IDLE) {
-        printf("[BTN] Refreshing EXTERNAL (guardian) baseline...\n");
+        printf(LOG_TOF("[BTN]") " Refreshing EXTERNAL (guardian) baseline...\n");
         vl53l5cx_stop_ranging(&s_dev_ext);
         vTaskDelay(pdMS_TO_TICKS(50));
         vl53l5cx_start_ranging(&s_dev_ext);
@@ -2354,5 +2355,6 @@ void VL53L5CX_RefreshBaseline_Manual(void)
     }
 #endif
 
-    printf("[BTN] Baseline refresh done\n");
+    printf(LOG_TOF("[BTN]") " Baseline refresh done\n");
 }
+

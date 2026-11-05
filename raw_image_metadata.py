@@ -47,3 +47,12 @@ def image_filename(header, index, suffix=''):
     # snap_id uniquely separates burst frames even when DS3231 UTC is the same second.
     tail = ''.join(f'_{part}' for part in (image_kind_label(header), suffix) if part)
     return f"IMG_{stamp}_{header.get('snap_id', 0):06d}_{index:04d}{tail}.png"
+
+
+
+def snapshot_list_label(header, index, pixel_format):
+    """Describe a saved record in the same order as the viewer columns."""
+    name = image_filename(header, index, 'original')
+    resolution = f"{header['width']}x{header['height']}"
+    category = image_kind_label(header) or 'legacy / unspecified'
+    return f"{name} | {resolution} | {category} | {pixel_format} | {time_label(header)}"

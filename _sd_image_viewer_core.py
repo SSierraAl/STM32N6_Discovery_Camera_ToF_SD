@@ -5,7 +5,7 @@ STM32 SD Card Snapshot Visualizer - Modern PySide6 Edition
 import sys
 import os
 import struct
-from raw_image_metadata import parse_header, time_label, image_filename, image_kind_label
+from raw_image_metadata import parse_header, time_label, image_filename, image_kind_label, snapshot_list_label
 import time
 import subprocess
 import threading
@@ -1436,11 +1436,9 @@ class SDVisualizer(QMainWindow):
         self.image_name_label.setText("Select a snapshot")
         for s in self.snapshots:
             fmt = FMT_NAME.get(s.header['pixel_format'], "?")
-            ts = time_label(s.header)
-            kind = image_kind_label(s.header)
-            prefix = f"#{s.idx+1:03d} | {kind} | " if kind else f"#{s.idx+1:03d} | "
-            self.listbox.addItem(f"{prefix}{s.header['width']}x{s.header['height']} | {fmt} | {ts}")
-            self.listbox.item(self.listbox.count() - 1).setToolTip(image_filename(s.header, s.idx, "original"))
+            label = snapshot_list_label(s.header, s.idx, fmt)
+            self.listbox.addItem(label)
+            self.listbox.item(self.listbox.count() - 1).setToolTip(label)
 
         self.statusBar().showMessage(f"Scan complete. Found {len(self.snapshots)} snapshots.")
 
@@ -1737,3 +1735,4 @@ if __name__ == "__main__":
     window = SDVisualizer()
     window.show()
     sys.exit(app.exec())
+

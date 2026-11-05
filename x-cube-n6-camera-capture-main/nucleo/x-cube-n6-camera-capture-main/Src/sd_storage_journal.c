@@ -1,3 +1,4 @@
+#include "app_log.h"
 /*
  * Persistent raw-SD append journal shared transparently by CAPTURE_MODE 0/4.
  *
@@ -144,13 +145,13 @@ static int sdj_create_fresh(SD_HandleTypeDef *hsd)
     if (sdj_write_record(hsd, SDJ_BLOCK_A, &fresh) != 0) {
         fresh.sequence = 1U;
         if (sdj_write_record(hsd, SDJ_BLOCK_B, &fresh) != 0) {
-            printf("[SD META] Fresh journal creation FAILED on both A/B slots\n");
+            printf(LOG_STORAGE("[SD META]") " Fresh journal creation FAILED on both A/B slots\n");
             return -1;
         }
         g_state = fresh;
         g_state_slot = 1U;
         g_state_loaded = 1U;
-        printf("[SD META] Fresh journal created on B: next_block=%lu next_id=0\n",
+        printf(LOG_STORAGE("[SD META]") " Fresh journal created on B: next_block=%lu next_id=0\n",
                (unsigned long)SD_SNAP_BASE_BLOCK);
         return 0;
     }
@@ -164,10 +165,10 @@ static int sdj_create_fresh(SD_HandleTypeDef *hsd)
         g_state = fresh;
         g_state_slot = 1U;
     } else {
-        printf("[SD META] Warning: journal B refresh failed; continuing with valid A\n");
+        printf(LOG_STORAGE("[SD META]") " Warning: journal B refresh failed; continuing with valid A\n");
     }
 
-    printf("[SD META] Fresh journal: next_block=%lu next_id=0\n",
+    printf(LOG_STORAGE("[SD META]") " Fresh journal: next_block=%lu next_id=0\n",
            (unsigned long)SD_SNAP_BASE_BLOCK);
     return 0;
 }
@@ -181,7 +182,7 @@ static int sdj_load(SD_HandleTypeDef *hsd)
     int vb = (sdj_read_record(hsd, SDJ_BLOCK_B, &b) == 0) && sdj_record_valid(&b, hsd);
 
     if (!va && !vb) {
-        printf("[SD META] No valid A/B journal; starting fresh at block %lu / ID 0\n",
+        printf(LOG_STORAGE("[SD META]") " No valid A/B journal; starting fresh at block %lu / ID 0\n",
                (unsigned long)SD_SNAP_BASE_BLOCK);
         return sdj_create_fresh(hsd);
     }
@@ -194,7 +195,7 @@ static int sdj_load(SD_HandleTypeDef *hsd)
         g_state_slot = 1U;
     }
     g_state_loaded = 1U;
-    printf("[SD META] Loaded seq=%lu next_block=%lu next_id=%lu\n",
+    printf(LOG_STORAGE("[SD META]") " Loaded seq=%lu next_block=%lu next_id=%lu\n",
            (unsigned long)g_state.sequence,
            (unsigned long)g_state.next_block,
            (unsigned long)g_state.next_snap_id);
@@ -219,7 +220,7 @@ static int sdj_reserve_image(SD_HandleTypeDef *hsd, uint32_t image_blocks,
     if (end64 > 0xFFFFFFFFULL) return -1;
     uint32_t end = (uint32_t)end64;
     if (hsd->SdCard.BlockNbr != 0U && end > hsd->SdCard.BlockNbr) {
-        printf("[SD META] Card full: need blocks %lu..%lu, card has %lu\n",
+        printf(LOG_STORAGE("[SD META]") " Card full: need blocks %lu..%lu, card has %lu\n",
                (unsigned long)start, (unsigned long)(end - 1U),
                (unsigned long)hsd->SdCard.BlockNbr);
         return -1;
@@ -236,7 +237,7 @@ static int sdj_reserve_image(SD_HandleTypeDef *hsd, uint32_t image_blocks,
     uint8_t target_slot = (g_state_slot == 0U) ? 1U : 0U;
     uint32_t target_block = target_slot ? SDJ_BLOCK_B : SDJ_BLOCK_A;
     if (sdj_write_record(hsd, target_block, &next) != 0) {
-        printf("[SD META] Reserve FAILED; image write cancelled before touching image area\n");
+        printf(LOG_STORAGE("[SD META]") " Reserve FAILED; image write cancelled before touching image area\n");
         return -1;
     }
 
@@ -285,7 +286,7 @@ HAL_StatusTypeDef SDJ_HAL_SD_Init(SD_HandleTypeDef *hsd)
         if (st == HAL_OK) return HAL_OK;
         if (attempt + 1U >= SDJ_INIT_TRIES) break;
 
-        printf("[SD] Init retry %lu/%lu after HAL=%lu\n",
+        printf(LOG_STORAGE("[SD]") " Init retry %lu/%lu after HAL=%lu\n",
                (unsigned long)(attempt + 2U), (unsigned long)SDJ_INIT_TRIES,
                (unsigned long)st);
         (void)HAL_SD_DeInit(hsd);
@@ -328,13 +329,13 @@ HAL_StatusTypeDef SDJ_HAL_SD_WriteBlocks(SD_HandleTypeDef *hsd, const uint8_t *p
         g_logical_end = BlockAdd + image_blocks;
         g_physical_start = physical_start;
 
-        printf("[SD META] Reserve id=%lu logical=%lu physical=%lu next=%lu\n",
+        printf(LOG_STORAGE("[SD META]") " Reserve id=%lu logical=%lu physical=%lu next=%lu\n",
                (unsigned long)persistent_id, (unsigned long)BlockAdd,
                (unsigned long)physical_start, (unsigned long)g_state.next_block);
     }
 
     if (!g_map_active || BlockAdd < g_logical_start || BlockAdd >= g_logical_end) {
-        printf("[SD META] Refusing untracked write at image block %lu\n",
+        printf(LOG_STORAGE("[SD META]") " Refusing untracked write at image block %lu\n",
                (unsigned long)BlockAdd);
         return HAL_ERROR;
     }
@@ -344,7 +345,7 @@ HAL_StatusTypeDef SDJ_HAL_SD_WriteBlocks(SD_HandleTypeDef *hsd, const uint8_t *p
     uint64_t mapped_end = (uint64_t)g_physical_start +
                           (uint64_t)(g_logical_end - g_logical_start);
     if (physical_end > mapped_end) {
-        printf("[SD META] Refusing write beyond reserved image range\n");
+        printf(LOG_STORAGE("[SD META]") " Refusing write beyond reserved image range\n");
         return HAL_ERROR;
     }
 
@@ -353,3 +354,4 @@ HAL_StatusTypeDef SDJ_HAL_SD_WriteBlocks(SD_HandleTypeDef *hsd, const uint8_t *p
         g_map_active = 0U;
     return st;
 }
+

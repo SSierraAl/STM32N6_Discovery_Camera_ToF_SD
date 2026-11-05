@@ -1,3 +1,4 @@
+#include "app_log.h"
 /**
  * ******************************************************************************
  * @file    app_cam.c
@@ -132,7 +133,7 @@ int CAM_SetSensorROI(uint16_t x_start, uint16_t y_start,
     uint32_t exposure_us = (uint32_t)((unsigned long long)shutter *
                                      1000000ULL /
                                      ((unsigned long long)SNAP_FPS * vmax));
-    printf("[CAM] SetSensorROI: (%u,%u) %ux%u → VMAX=%lu SHUTTER=%lu → exposure=%lu us (target=%lu us)\n",
+    printf(LOG_CAMERA("[CAM]") " SetSensorROI: (%u,%u) %ux%u → VMAX=%lu SHUTTER=%lu → exposure=%lu us (target=%lu us)\n",
            x_start, y_start, width, height,
            (unsigned long)vmax, (unsigned long)shutter,
            (unsigned long)exposure_us, (unsigned long)CAM_EXPOSURE_VALUE);
@@ -226,7 +227,7 @@ int CAM_SetSensorROI(uint16_t x_start, uint16_t y_start,
   if (ret) return -1;
   HAL_Delay(50);
 
-  printf("[CAM] Sensor ROI configured: %dx%d from (%u,%u)\n",
+  printf(LOG_CAMERA("[CAM]") " Sensor ROI configured: %dx%d from (%u,%u)\n",
          width, height, x_start, y_start);
   return 0;
 }
@@ -278,7 +279,7 @@ static void CAM_DumpImx335AeState(const char *tag)
   int rs = CMW_I2C_READREG16(CAMERA_IMX335_ADDRESS, 0x3058U, s, sizeof(s));
   int rg = CMW_I2C_READREG16(CAMERA_IMX335_ADDRESS, 0x30E8U, g, sizeof(g));
   if (rv || rs || rg) {
-    printf("[IMX335][AE][%s] read failed: VMAX=%d SHS1=%d GAIN=%d\n", tag, rv, rs, rg);
+    printf(LOG_CAMERA("[IMX335]") "[AE][%s] read failed: VMAX=%d SHS1=%d GAIN=%d\n", tag, rv, rs, rg);
     return;
   }
   uint32_t vmax = v[0] | ((uint32_t)v[1] << 8) | (((uint32_t)v[2] & 0x0FU) << 16);
@@ -289,7 +290,7 @@ static void CAM_DumpImx335AeState(const char *tag)
      Deliberately do not infer line timing from requested SNAP_FPS.
      This is an estimate, not a timing measurement or per-frame metadata. */
   uint32_t exposure_est_us = (uint32_t)(((uint64_t)lines * 1000000U + 67500U) / 135000U);
-  printf("[IMX335][AE][%s] policy=%d VMAX=%lu SHS1=%lu lines=%lu "
+  printf(LOG_CAMERA("[IMX335]") "[AE][%s] policy=%d VMAX=%lu SHS1=%lu lines=%lu "
          "exposure_est_us=%lu (nominal 135000 lines/s) gain_reg=%lu gain_mdB=%lu\n",
          tag, CAM_EXPOSURE_MODE, (unsigned long)vmax, (unsigned long)shs1,
          (unsigned long)lines, (unsigned long)exposure_est_us,
@@ -375,7 +376,7 @@ static void DCMIPP_PipeInitCapture(CAM_conf_t *cam_conf, int sw, int sh, CAM_con
 #endif
   CAM_InitCropConfig(&dc.manual_conf, sw, sh, conf);
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Full field=%lux%lu+%lu+%lu output=%dx%d\n",
+  printf(LOG_CAMERA("[CAM]") " Full field=%lux%lu+%lu+%lu output=%dx%d\n",
          (unsigned long)dc.manual_conf.width, (unsigned long)dc.manual_conf.height,
          (unsigned long)dc.manual_conf.offset_x, (unsigned long)dc.manual_conf.offset_y,
          conf->capture_width, conf->capture_height);
@@ -399,11 +400,11 @@ int CAM_Init(CAM_conf_t *conf)
     for (int attempt = 1; attempt <= 3; attempt++) {
       ret = CMW_CAMERA_GetSensorName(&sensor);
       if (ret == CMW_ERROR_NONE) break;
-      printf("[CAM] I2C not ready (attempt %d/3, ret=%d)\n", attempt, ret);
+      printf(LOG_CAMERA("[CAM]") " I2C not ready (attempt %d/3, ret=%d)\n", attempt, ret);
       vTaskDelay(pdMS_TO_TICKS(200));
     }
     if (ret != CMW_ERROR_NONE) {
-      printf("[CAM] FATAL: Cannot detect sensor after 3 retries (ret=%d)\n", ret);
+      printf(LOG_CAMERA("[CAM]") " FATAL: Cannot detect sensor after 3 retries (ret=%d)\n", ret);
       assert(0);
     }
   }
@@ -414,12 +415,12 @@ int CAM_Init(CAM_conf_t *conf)
   cam_conf.mirror_flip = CAM_getFlipMode(sensor);
   ret = CMW_CAMERA_Init(&cam_conf, NULL);
   if (ret != CMW_ERROR_NONE) {
-    printf("[CAM] Init failed (ret=%d), retrying with delay...\n", ret);
+    printf(LOG_CAMERA("[CAM]") " Init failed (ret=%d), retrying with delay...\n", ret);
     vTaskDelay(pdMS_TO_TICKS(500));
     ret = CMW_CAMERA_Init(&cam_conf, NULL);
   }
   if (ret != CMW_ERROR_NONE) {
-    printf("[CAM] FATAL: Init failed after retry (ret=%d)\n", ret);
+    printf(LOG_CAMERA("[CAM]") " FATAL: Init failed after retry (ret=%d)\n", ret);
     assert(0);
   }
   assert(cam_conf.width && cam_conf.height);
@@ -440,7 +441,7 @@ int CAM_CapturePipe_Start(uint8_t *dst, uint32_t mode)
   int ret = CMW_CAMERA_Start(DCMIPP_PIPE1, dst, mode);
 #if PERF_DEBUG_LEVEL >= 1
   if (ret != CMW_ERROR_NONE) {
-    printf("[CAM] Start failed mode=%lu ret=%d\n", (unsigned long)mode, ret);
+    printf(LOG_CAMERA("[CAM]") " Start failed mode=%lu ret=%d\n", (unsigned long)mode, ret);
   }
 #endif
   return ret;
@@ -558,7 +559,7 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
 
   PERF_MARK(g_perf_timer, CAM_INIT);
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Init camera %dx%d@%d YUV422 ...\n", width, height, fps);
+  printf(LOG_CAMERA("[CAM]") " Init camera %dx%d@%d YUV422 ...\n", width, height, fps);
 #endif
 
   CAM_conf_t conf = {0};
@@ -579,14 +580,14 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
     CMW_CAMERA_GetExposure(&re);
     CMW_CAMERA_GetGain(&rg);
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[CAM] Exposure=%ld Gain=%ld\n", (long)re, (long)rg);
+    printf(LOG_CAMERA("[CAM]") " Exposure=%ld Gain=%ld\n", (long)re, (long)rg);
 #endif
   }
 
   DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
   PERF_MARK(g_perf_timer, CAM_WARMUP);
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Full-field single: %dx%d, %d warmups reuse one buffer\n", width, height, warmup_frames);
+  printf(LOG_CAMERA("[CAM]") " Full-field single: %dx%d, %d warmups reuse one buffer\n", width, height, warmup_frames);
 #endif
 #if CAPTURE_MODE == 0
   g_single_capture_errors = 0;
@@ -614,7 +615,7 @@ int CAM_CaptureSingleFrame(uint8_t *buf, int buf_size, int width, int height, in
   HAL_StatusTypeDef stop_rc = HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
 #if CAPTURE_MODE == 0
   if (g_single_capture_errors || stop_rc != HAL_OK) {
-    printf("[CAM] Single rejected: pipe errors=%lu stop=%d\n",
+    printf(LOG_CAMERA("[CAM]") " Single rejected: pipe errors=%lu stop=%d\n",
            (unsigned long)g_single_capture_errors, (int)stop_rc);
     CAM_Deinit();
     return -1;
@@ -643,7 +644,7 @@ int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count, 
   if (!batch_buf || frame_size < min_size || frame_count < 1) return -1;
 
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Batch init %dx%d@%d (%d frames)...\n", width, height, fps, frame_count);
+  printf(LOG_CAMERA("[CAM]") " Batch init %dx%d@%d (%d frames)...\n", width, height, fps, frame_count);
 #endif
   CAM_conf_t conf = {0};
   conf.capture_width = width;
@@ -668,7 +669,7 @@ int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count, 
   CAM_IspUpdate();
 
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Warmup %d frames...\n", SNAP_WARMUP_FRAMES);
+  printf(LOG_CAMERA("[CAM]") " Warmup %d frames...\n", SNAP_WARMUP_FRAMES);
 #endif
   CAM_ResetFrameCounter(SNAP_WARMUP_FRAMES);
   uint32_t t0 = HAL_GetTick();
@@ -696,7 +697,7 @@ int CAM_CaptureBatchFrames(uint8_t *batch_buf, int frame_size, int frame_count, 
   HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0);
   CAM_Deinit();
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Batch: %d/%d in %lu ms\n", captured, frame_count, (unsigned long)(HAL_GetTick()-t0));
+  printf(LOG_CAMERA("[CAM]") " Batch: %d/%d in %lu ms\n", captured, frame_count, (unsigned long)(HAL_GetTick()-t0));
 #endif
   return captured;
 }
@@ -711,7 +712,7 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size, int width, int
   if (warmup_frames < 0) warmup_frames = 0;
 
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Init %dx%d@%d YUV422...\n", width, height, fps);
+  printf(LOG_CAMERA("[CAM]") " Init %dx%d@%d YUV422...\n", width, height, fps);
 #endif
   CAM_conf_t conf = {0};
   conf.capture_width = width;
@@ -728,13 +729,13 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size, int width, int
     CMW_CAMERA_SetGain(CAM_GAIN_VALUE);
 #if PERF_DEBUG_LEVEL >= 2
     int32_t re, rg; CMW_CAMERA_GetExposure(&re); CMW_CAMERA_GetGain(&rg);
-    printf("[CAM] exposure=%ld gain=%ld\n", (long)re, (long)rg);
+    printf(LOG_CAMERA("[CAM]") " exposure=%ld gain=%ld\n", (long)re, (long)rg);
 #endif
   }
 
   DCMIPP_HandleTypeDef *h = CMW_CAMERA_GetDCMIPPHandle();
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Start continuous...\n");
+  printf(LOG_CAMERA("[CAM]") " Start continuous...\n");
 #endif
   CAM_CapturePipe_Start(buf, CMW_MODE_CONTINUOUS);
 
@@ -744,13 +745,13 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size, int width, int
     CAM_IspUpdate();
 #if PERF_DEBUG_LEVEL >= 1
     int32_t re, rg; CMW_CAMERA_GetExposure(&re); CMW_CAMERA_GetGain(&rg);
-    printf("[CAM] Post-start exp=%ld gain=%ld\n", (long)re, (long)rg);
+    printf(LOG_CAMERA("[CAM]") " Post-start exp=%ld gain=%ld\n", (long)re, (long)rg);
 #endif
   }
 
   if (warmup_frames > 0) {
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[CAM] Warmup %d frames...\n", warmup_frames);
+    printf(LOG_CAMERA("[CAM]") " Warmup %d frames...\n", warmup_frames);
 #endif
     CAM_ResetFrameCounter(warmup_frames);
     uint32_t t0 = HAL_GetTick();
@@ -762,7 +763,7 @@ static int CAM_InitAndStartContinuous(uint8_t *buf, int buf_size, int width, int
       }
     }
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[CAM] Warmup done (%lu frames). RUNNING.\n", (unsigned long)g_frame_count);
+    printf(LOG_CAMERA("[CAM]") " Warmup done (%lu frames). RUNNING.\n", (unsigned long)g_frame_count);
 #endif
   }
   return 0;
@@ -785,7 +786,7 @@ int CAM_ContinuousSnap(uint8_t *dest, uint32_t fs)
   SCB_CleanDCache_by_Addr((uint32_t*)dest, fs);
   CAM_CapturePipe_Start(capture_buf, CMW_MODE_CONTINUOUS);
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] ContinuousSnap in %lu ms\n", (unsigned long)(HAL_GetTick()-t0));
+  printf(LOG_CAMERA("[CAM]") " ContinuousSnap in %lu ms\n", (unsigned long)(HAL_GetTick()-t0));
 #endif
   return 0;
 }
@@ -813,7 +814,7 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   uint32_t t0 = HAL_GetTick();
   uint8_t captured = 0;
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] BatchSnap: %d frames...\n", BATCH_FRAMES);
+  printf(LOG_CAMERA("[CAM]") " BatchSnap: %d frames...\n", BATCH_FRAMES);
 #endif
 
   for (uint8_t i = 0; i < BATCH_FRAMES; i++) {
@@ -838,7 +839,7 @@ int CAM_ContinuousBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 
   uint32_t elapsed = HAL_GetTick() - t0;
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] BatchSnap: %lu frames in %lu ms\n", (unsigned long)captured, (unsigned long)elapsed);
+  printf(LOG_CAMERA("[CAM]") " BatchSnap: %lu frames in %lu ms\n", (unsigned long)captured, (unsigned long)elapsed);
 #endif
   return (int)captured;
 }
@@ -856,14 +857,14 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
 {
   uint32_t t0 = HAL_GetTick();
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Callback-Batch init: full init + warmup + standby...\n");
+  printf(LOG_CAMERA("[CAM]") " Callback-Batch init: full init + warmup + standby...\n");
 #endif
 
   /* Reuse the proven standby init path. */
   int rc = CAM_InitAndStartContinuous(buf, buf_size, width, height, fps, SNAP_WARMUP_FRAMES);
   if (rc != 0) {
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[CAM] Callback init FAILED rc=%d\n", rc);
+    printf(LOG_CAMERA("[CAM]") " Callback init FAILED rc=%d\n", rc);
 #endif
     return -1;
   }
@@ -882,7 +883,7 @@ int CAM_CallbackInit(uint8_t *buf, int buf_size, int width, int height, int fps)
   g_callback_ready = 1;
 
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Callback-Batch init done in %lu ms.\n", (unsigned long)(HAL_GetTick() - t0));
+  printf(LOG_CAMERA("[CAM]") " Callback-Batch init done in %lu ms.\n", (unsigned long)(HAL_GetTick() - t0));
 #endif
   return 0;
 }
@@ -1061,7 +1062,7 @@ static const char *CAM_FindForeground(const uint8_t *source, uint8_t *scratch,
   }
 
   if (ignored_mark_cells)
-    printf("[CAM][BG] ignored_fixed_mark_cells=%lu\n", (unsigned long)ignored_mark_cells);
+    printf(LOG_CAMERA("[CAM]") "[BG] ignored_fixed_mark_cells=%lu\n", (unsigned long)ignored_mark_cells);
   if (components == 0U)
     return foreground == ignored_mark_cells && brighter == 0U ?
            "blank_background" : "no_connected_object";
@@ -1111,7 +1112,7 @@ int CAM_CaptureFullFrame(uint8_t *buf, uint32_t size, uint32_t *tick) {
   if (!g_callback_ready || !buf || !tick || size < MAX_SNAP_FRAME_SIZE ||
       ((uintptr_t)buf & 31U) != 0U)
   {
-    printf("[CAM][FULL] rejected ready=%d buffer_bytes=%lu expected=%lu\n",
+    printf(LOG_CAMERA("[CAM]") "[FULL] rejected ready=%d buffer_bytes=%lu expected=%lu\n",
            g_callback_ready, (unsigned long)size, (unsigned long)MAX_SNAP_FRAME_SIZE);
     return 0;
   }
@@ -1200,14 +1201,14 @@ standby:
   int standby_rc = CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
   if (standby_rc != 0) g_callback_ready = 0;
   if (captured >= 1) SCB_InvalidateDCache_by_Addr((uint32_t *)buf, MAX_SNAP_FRAME_SIZE);
-  printf("[CAM][FULL] captured=%d stage=%s warmup=%lu/%u frames=%lu vsync=%lu "
+  printf(LOG_CAMERA("[CAM]") "[FULL] captured=%d stage=%s warmup=%lu/%u frames=%lu vsync=%lu "
          "errors=%lu mode=%d standby=%d ready=%d full_ms=%lu\n",
          captured, stage, (unsigned long)warmup_done, CAM_FULL_WARMUP_FRAMES,
          (unsigned long)(g_frame_event_count - start_event),
          (unsigned long)(g_vsync_count - start_vsync), (unsigned long)g_single_capture_errors,
          (int)mode_rc, standby_rc, g_callback_ready,
          captured ? (unsigned long)(*tick - start_tick) : 0UL);
-  printf("[CAM][AE] requested_us=%d requested_gain_mdB=%d mode_rc=%d exposure_rc=%d gain_rc=%d\n",
+  printf(LOG_CAMERA("[CAM]") "[AE] requested_us=%d requested_gain_mdB=%d mode_rc=%d exposure_rc=%d gain_rc=%d\n",
          CAM_EXPOSURE_VALUE, CAM_GAIN_VALUE, exposure_mode_rc, exposure_rc, gain_rc);
 #if CAM_SENSOR_REG_DEBUG && (CAPTURE_MODE == 4)
   if (captured > 0 && standby_rc == 0) CAM_DumpImx335AeState("AFTER_FULL_STANDBY");
@@ -1271,7 +1272,7 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   if (!h) return -1;
 
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Callback-Batch: wakeup + %d frames (zero-copy DMA, no restart)...\n", CALLBACK_FRAMES);
+  printf(LOG_CAMERA("[CAM]") " Callback-Batch: wakeup + %d frames (zero-copy DMA, no restart)...\n", CALLBACK_FRAMES);
 #endif
 
   /* ---------------------------------------------------------------
@@ -1288,7 +1289,7 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   uint32_t last_event = g_frame_event_count;
   if (CMW_CAMERA_DoubleBufferStart(DCMIPP_PIPE1, raw_buf[0], raw_buf[1], CMW_MODE_CONTINUOUS) != CMW_ERROR_NONE) {
 #if PERF_DEBUG_LEVEL >= 1
-    printf("[CAM] Double-buffer start failed after callback wake\n");
+    printf(LOG_CAMERA("[CAM]") " Double-buffer start failed after callback wake\n");
 #endif
     CAM_WriteSensorReg(IMX335_REG_MODE_SELECT, IMX335_MODE_STANDBY);
     return -1;
@@ -1315,7 +1316,7 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
      --------------------------------------------------------------- */
   PERF_MARK(g_perf_timer, CAM_WARMUP);
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Callback warmup %d + capture %d frames...\n", CALLBACK_WARMUP_FRAMES, CALLBACK_FRAMES);
+  printf(LOG_CAMERA("[CAM]") " Callback warmup %d + capture %d frames...\n", CALLBACK_WARMUP_FRAMES, CALLBACK_FRAMES);
 #endif
   {
     const uint32_t total = (uint32_t)CALLBACK_WARMUP_FRAMES + (uint32_t)CALLBACK_FRAMES;
@@ -1330,13 +1331,13 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 
       if (CAM_WaitFrameAfter(last_event, 120, &frame_ms) != 0) {
 #if PERF_DEBUG_LEVEL >= 1
-        printf("[CAM] Frame wait timeout at k=%lu\n", (unsigned long)k);
+        printf(LOG_CAMERA("[CAM]") " Frame wait timeout at k=%lu\n", (unsigned long)k);
 #endif
         break;
       }
       last_event++;
       if (g_frame_event_count != last_event) {
-        printf("[CAM] Missed frame completion in callback burst\n");
+        printf(LOG_CAMERA("[CAM]") " Missed frame completion in callback burst\n");
         captured = 0;
         break;
       }
@@ -1356,7 +1357,7 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
         uint32_t address_slot = slot == 0U ? DCMIPP_MEMORY_ADDRESS_0 : DCMIPP_MEMORY_ADDRESS_1;
         if (HAL_DCMIPP_PIPE_SetMemoryAddress(h, DCMIPP_PIPE1, address_slot,
                                             (uint32_t)next) != HAL_OK) {
-          printf("[CAM] Failed to arm callback burst DMA slot\n");
+          printf(LOG_CAMERA("[CAM]") " Failed to arm callback burst DMA slot\n");
           captured = 0;
           break;
         }
@@ -1377,7 +1378,7 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
   /* Return to standby. */
   PERF_MARK(g_perf_timer, CAM_STOP);
   if (HAL_DCMIPP_CSI_PIPE_Stop(h, DCMIPP_PIPE1, DCMIPP_VIRTUAL_CHANNEL0) != HAL_OK) {
-    printf("[CAM] Callback burst stop failed, capture disabled until reboot\n");
+    printf(LOG_CAMERA("[CAM]") " Callback burst stop failed, capture disabled until reboot\n");
     g_callback_ready = 0;
     captured = 0;
   }
@@ -1389,14 +1390,14 @@ int CAM_CallbackBatchSnap(uint8_t *batch_buf, uint32_t frame_size)
 #if PERF_CAMERA_FRAME_LOG
   /* UART output must not delay rearming or stopping the DMA pipe. */
   for (uint32_t k = 0; k < completed_frames; k++) {
-    printf("[CAM] %s[%lu] wait=%lu ms\n",
+    printf(LOG_CAMERA("[CAM]") " %s[%lu] wait=%lu ms\n",
            k < CALLBACK_WARMUP_FRAMES ? "warmup" : "capture",
            (unsigned long)(k < CALLBACK_WARMUP_FRAMES ? k : k - CALLBACK_WARMUP_FRAMES),
            (unsigned long)frame_times[k]);
   }
 #endif
 #if PERF_DEBUG_LEVEL >= 1
-  printf("[CAM] Callback-Batch: %d/%d frames in %lu ms (continuous, zero-copy)\n",
+  printf(LOG_CAMERA("[CAM]") " Callback-Batch: %d/%d frames in %lu ms (continuous, zero-copy)\n",
          (unsigned)captured, CALLBACK_FRAMES, (unsigned long)capture_elapsed_ms);
 #endif
 #if CAM_SENSOR_REG_DEBUG && (CAPTURE_MODE == 4)
@@ -1442,7 +1443,7 @@ static void CAM_DumpRowStats(const uint8_t *buf, uint16_t w, uint16_t h,
       uint32_t off = rows[ri] * pitch + sample_pix[pi] * 2;
       sum_y += buf[off];
     }
-    printf("[CAM] %s row=%lu meanY=%u\n",
+    printf(LOG_CAMERA("[CAM]") " %s row=%lu meanY=%u\n",
            label, (unsigned long)rows[ri], (unsigned)(sum_y / np));
   }
 }
@@ -1484,7 +1485,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
 
   uint32_t captured = 0;
 
-  printf("[CAM] Stage 3: AREA3 (%u,%u) %ux%u native 2592x1944 capture %lu frames\n",
+  printf(LOG_CAMERA("[CAM]") " Stage 3: AREA3 (%u,%u) %ux%u native 2592x1944 capture %lu frames\n",
          roi_x, roi_y, roi_w, roi_h, (unsigned long)max_frames);
 
   /* ---------------------------------------------------------------
@@ -1499,7 +1500,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
     cam_conf.fps = SNAP_FPS;
     cam_conf.mirror_flip = CAM_getFlipMode(sensor);
     if (CMW_CAMERA_Init(&cam_conf, NULL) != CMW_ERROR_NONE) {
-      printf("[CAM] Stage 3: CMW_CAMERA_Init failed\n");
+      printf(LOG_CAMERA("[CAM]") " Stage 3: CMW_CAMERA_Init failed\n");
       return -1;
     }
   }
@@ -1529,7 +1530,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
     dc.manual_conf.offset_y = 0;
     hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_RESET;
     if (CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &dc, &hw_pitch) != CMW_ERROR_NONE) {
-      printf("[CAM] Stage 3: SetPipeConfig failed\n");
+      printf(LOG_CAMERA("[CAM]") " Stage 3: SetPipeConfig failed\n");
       CMW_CAMERA_DeInit();
       return -1;
     }
@@ -1546,7 +1547,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
      The DCMIPP pipe is NOT running yet, so the CSI receiver stays clean.
      --------------------------------------------------------------- */
   if (CAM_SetSensorROI(roi_x, roi_y, roi_w, roi_h) != 0) {
-    printf("[CAM] Stage 3: CAM_SetSensorROI failed\n");
+    printf(LOG_CAMERA("[CAM]") " Stage 3: CAM_SetSensorROI failed\n");
     CMW_CAMERA_DeInit();
     return -1;
   }
@@ -1560,7 +1561,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
   {
     extern uint8_t save_buf[];
     if (CMW_CAMERA_DoubleBufferStart(DCMIPP_PIPE1, capture_buf, save_buf, CMW_MODE_CONTINUOUS) != CMW_ERROR_NONE) {
-      printf("[CAM] Stage 3: DoubleBufferStart failed\n");
+      printf(LOG_CAMERA("[CAM]") " Stage 3: DoubleBufferStart failed\n");
       CMW_CAMERA_DeInit();
       return -1;
     }
@@ -1570,7 +1571,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
   {
     uint32_t actual_exposure = 0;
     CMW_CAMERA_GetExposure(&actual_exposure);
-    printf("[CAM] Stage 3: ROI active — CMW exposure=%lu us (target=%lu us)\n",
+    printf(LOG_CAMERA("[CAM]") " Stage 3: ROI active — CMW exposure=%lu us (target=%lu us)\n",
            (unsigned long)actual_exposure, (unsigned long)CAM_EXPOSURE_VALUE);
   }
 
@@ -1586,7 +1587,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
 
     for (uint32_t k = 0; k < total; k++) {
       if (CAM_WaitNextFrameReady(120, NULL) != 0) {
-        printf("[CAM] Stage 3: frame wait timeout at k=%lu\n", (unsigned long)k);
+        printf(LOG_CAMERA("[CAM]") " Stage 3: frame wait timeout at k=%lu\n", (unsigned long)k);
         break;
       }
 
@@ -1608,7 +1609,7 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
       }
     }
 
-    printf("[CAM] Stage 3: Captured %d/%lu ROI frames\n", (int)captured, (unsigned long)max_frames);
+    printf(LOG_CAMERA("[CAM]") " Stage 3: Captured %d/%lu ROI frames\n", (int)captured, (unsigned long)max_frames);
   }
 
   /* ---------------------------------------------------------------
@@ -1647,18 +1648,19 @@ int CAM_SetPipeResolution(uint16_t width, uint16_t height,
   sdc.manual_conf.offset_y = offset_y;
   hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_RESET;
   if (CMW_CAMERA_SetPipeConfig(DCMIPP_PIPE1, &sdc, &hw_pitch) != CMW_ERROR_NONE) {
-    printf("[CAM] SetPipeResolution %ux%u failed\n", width, height);
+    printf(LOG_CAMERA("[CAM]") " SetPipeResolution %ux%u failed\n", width, height);
     return -1;
   }
 #if CAM_OVERVIEW_CROP
   if (hw_pitch != (uint32_t)width * 2U) {
-    printf("[CAM] Unexpected DMA pitch %lu for width %u\n", (unsigned long)hw_pitch, width);
+    printf(LOG_CAMERA("[CAM]") " Unexpected DMA pitch %lu for width %u\n", (unsigned long)hw_pitch, width);
     return -1;
   }
 #endif
   hcamera_dcmipp.PipeState[DCMIPP_PIPE1] = HAL_DCMIPP_PIPE_STATE_READY;
   if (sdc.output_format == DCMIPP_PIXEL_PACKER_FORMAT_YUV422_1)
     CAM_EnableYuv(DCMIPP_PIPE1);
-  printf("[CAM] Pipe reconfigured: %ux%u offset %u,%u\n", width, height, offset_x, offset_y);
+  printf(LOG_CAMERA("[CAM]") " Pipe reconfigured: %ux%u offset %u,%u\n", width, height, offset_x, offset_y);
   return 0;
 }
+

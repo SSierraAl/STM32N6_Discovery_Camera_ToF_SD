@@ -209,7 +209,12 @@ typedef struct {
  * @param height Image height in pixels.
  * @param scratch Temporary CPU workspace, separate from source.
  * @param scratch_bytes Workspace capacity in bytes.
- * @param box Output rectangle before adding any crop margin.
+ * @param box Output rectangle before adding any crop margin. Use native image
+ *            coordinates after undoing model resize, letterbox and rotation.
+ *
+ * The current external contract returns one box and no component count. Its
+ * results are kept as uncertain associations by the distance filter. Add a
+ * component-count or multi-box interface only with matching policy changes.
  * @return 1 for a box, 0 for no target, negative for a detector error.
  */
 int CAM_DetectExternal(const uint8_t *source, uint16_t width, uint16_t height,
@@ -226,6 +231,12 @@ int CAM_CaptureFullFrame(uint8_t *buf, uint32_t size, uint32_t *tick);
 
 /**
  * @brief Locate optical foreground and prepare a native crop window.
+ *
+ * Select CAM_CROP_DETECTOR in app_config.h to change the backend. Both backends
+ * receive the same stopped native frame. Report the object box before padding
+ * in oriented native coordinates. Scratch is reused by the later crop copy.
+ * Several connected regions can belong to one insect. The component count is
+ * a storage-policy input and must not be used as an individual insect count.
  * @param source Read-only native YUYV frame after camera DMA has stopped.
  * @param scratch CPU workspace (at least CAM_BURST_CROP_BYTES, aligned to 32 bytes).
  * @param capacity Workspace and eventual crop output capacity in bytes.
@@ -324,3 +335,4 @@ int CAM_CaptureROI(uint8_t *buf, uint32_t buf_size,
                    uint16_t roi_w, uint16_t roi_h);
 
 #endif /* APP_CAM_H */
+
