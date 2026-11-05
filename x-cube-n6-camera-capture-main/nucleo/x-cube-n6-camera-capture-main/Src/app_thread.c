@@ -618,19 +618,6 @@ void sensor_task(void *arg)
                 int rc = Capture_RequestSnapshot(60000);
                 PERF_STOP(t);
                 BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
-
-                /* Wait for Stage 3 (ROI capture + SD save) to complete.
-                   g_capture_busy is cleared by camera callback after Stage 3
-                   finishes all captures and saves (lines 1135-1137).  Timeout
-                   after 30 s to prevent deadlock if capture failed. */
-                {
-                    TickType_t wstart = xTaskGetTickCount();
-                    while (g_capture_busy) {
-                        if ((xTaskGetTickCount() - wstart) > pdMS_TO_TICKS(30000)) break;
-                        vTaskDelay(pdMS_TO_TICKS(10));
-                    }
-                }
-
 #if TOF_CAPTURE_ACTIVATION_REFRESH
                 if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
                     printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
@@ -863,19 +850,6 @@ void sensor_task(void *arg)
                preserving active latches; a full reset here caused the same
                persistent evidence to trigger again after every photo. */
             BSP_LED_Off(LED_RED); BSP_LED_On(LED_GREEN);
-
-            /* Wait for Stage 3 (ROI capture + SD save) to complete.
-               g_capture_busy is cleared by camera callback after Stage 3
-               finishes all captures and saves.  Timeout after 30 s to
-               prevent deadlock if capture failed. */
-            {
-                TickType_t wstart = xTaskGetTickCount();
-                while (g_capture_busy) {
-                    if ((xTaskGetTickCount() - wstart) > pdMS_TO_TICKS(30000)) break;
-                    vTaskDelay(pdMS_TO_TICKS(10));
-                }
-            }
-
 #if TOF_CAPTURE_ACTIVATION_REFRESH
             if (consecutive_captures >= TOF_CAPTURE_MAX_DETECTIONS) {
                 printf("[ADAPT] Maximum activations reached, refreshing baseline\n");
@@ -894,7 +868,6 @@ void sensor_task(void *arg)
                        (unsigned long)TOF_CAPTURE_REARM_HOLDOFF_SECS);
 #endif
             } else {
-                vTaskDelay(pdMS_TO_TICKS(800)); /* let temp sensor settle before resume */
                 VL53L5CX_StartRanging();
                 consecutive_window_start = xTaskGetTickCount();
                 consecutive_window_active = 1;
@@ -902,7 +875,6 @@ void sensor_task(void *arg)
                        (unsigned long)TOF_CAPTURE_REFRESH_WINDOW_SECS);
             }
 #else
-            vTaskDelay(pdMS_TO_TICKS(800));
             VL53L5CX_StartRanging();
 #endif
             g_sensor_state = SENSOR_STATE_RUNNING;

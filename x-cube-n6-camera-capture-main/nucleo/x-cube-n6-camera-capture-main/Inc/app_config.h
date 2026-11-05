@@ -71,7 +71,7 @@
 #define CAM_FULL_HEIGHT 1944U
 /** Saved overview divisor. The detector always receives the native source. */
 #ifndef CAM_FIRST_IMAGE_DIVISOR
-#define CAM_FIRST_IMAGE_DIVISOR 3U
+#define CAM_FIRST_IMAGE_DIVISOR 2U
 #endif
 #if CAM_FIRST_IMAGE_DIVISOR < 1 || CAM_FIRST_IMAGE_DIVISOR > 4
 #error "CAM_FIRST_IMAGE_DIVISOR must be 1, 2, 3 or 4"
@@ -98,7 +98,7 @@
 #endif
 /** Also save the configured overview when a native crop is saved. */
 #ifndef CAM_SAVE_CROP_OVERVIEW
-#define CAM_SAVE_CROP_OVERVIEW 0
+#define CAM_SAVE_CROP_OVERVIEW 1
 #endif
 /** Maximum age of the last saved position eligible for duplicate suppression (ms). */
 #ifndef CAM_TRACK_MAX_GAP_MS
