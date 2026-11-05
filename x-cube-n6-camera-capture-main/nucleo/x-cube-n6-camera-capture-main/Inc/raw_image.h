@@ -25,10 +25,22 @@
 #define RAW_TIME_TAG 0x31435452U /* RTC1, little endian. */
 #define RAW_TIME_VALID            0x01U
 #define RAW_TIME_RTC_POST_CAPTURE 0x02U
+/* Self-identifying record kinds at byte 44. Zero means legacy/unspecified. */
+typedef enum {
+    RAW_KIND_OVERVIEW = 0x314B0001U,
+    RAW_KIND_CROP = 0x314B0002U,
+    RAW_KIND_FULL_LARGE = 0x314B0003U,
+    RAW_KIND_FULL_MULTI = 0x314B0004U,
+    RAW_KIND_OVERVIEW_UNCERTAIN = 0x314B0005U,
+    RAW_KIND_OVERVIEW_MULTI = 0x314B0006U,
+    RAW_KIND_OVERVIEW_LARGE = 0x314B0007U
+} RawImageKind_t;
+
 typedef struct {
     uint32_t magic, width, height, pixel_format, data_size, timestamp, checksum, snap_id;
     uint32_t time_tag, time_flags, capture_tick;
-    uint8_t reserved[20];
+    uint32_t image_kind;
+    uint8_t reserved[16];
 } sd_image_header_t;
 _Static_assert(sizeof(sd_image_header_t)==64,"Raw image header must occupy 64 bytes");
 static inline void RawImage_SetStamp(sd_image_header_t *h, RTC_Stamp s) {

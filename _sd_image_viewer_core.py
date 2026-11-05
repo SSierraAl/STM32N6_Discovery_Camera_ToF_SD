@@ -5,7 +5,7 @@ STM32 SD Card Snapshot Visualizer - Modern PySide6 Edition
 import sys
 import os
 import struct
-from raw_image_metadata import parse_header, time_label, image_filename
+from raw_image_metadata import parse_header, time_label, image_filename, image_kind_label
 import time
 import subprocess
 import threading
@@ -1091,6 +1091,12 @@ class InteractiveGraphicsView(QGraphicsView):
         
         self.current_scale = 1.0
 
+    def _update_scale(self):
+        self.current_scale = self.transform().m11()
+        mode = (Qt.TransformationMode.FastTransformation if self.current_scale >= 1.0
+                else Qt.TransformationMode.SmoothTransformation)
+        self.image_item.setTransformationMode(mode)
+
     def set_image(self, qimage):
         # Reuse the persistent item (no scene.clear()) — cheaper and
         # flicker-free when switching between images.
@@ -1101,13 +1107,16 @@ class InteractiveGraphicsView(QGraphicsView):
     def fit_to_window(self):
         if not self.image_item.pixmap().isNull():
             self.fitInView(self.scene.sceneRect(), Qt.AspectRatioMode.KeepAspectRatio)
-            self.current_scale = self.transform().m11()
+            if self.transform().m11() > 1.0:
+                self.resetTransform()
+                self.centerOn(self.image_item)
+            self._update_scale()
 
     def set_explicit_scale(self, scale_factor):
         if not self.image_item.pixmap().isNull():
             self.resetTransform()
             self.scale(scale_factor, scale_factor)
-            self.current_scale = scale_factor
+            self._update_scale()
 
     def wheelEvent(self, event):
         zoom_in_factor = 1.15
@@ -1118,7 +1127,7 @@ class InteractiveGraphicsView(QGraphicsView):
                 self.scale(zoom_in_factor, zoom_in_factor)
             else:
                 self.scale(zoom_out_factor, zoom_out_factor)
-            self.current_scale = self.transform().m11()
+            self._update_scale()
 
 
 class SDVisualizer(QMainWindow):
@@ -1237,6 +1246,11 @@ class SDVisualizer(QMainWindow):
         right_layout = QVBoxLayout(right_widget)
         right_layout.setContentsMargins(0, 0, 0, 0)
 
+        self.image_name_label = QLabel("Select a snapshot")
+        self.image_name_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.image_name_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.image_name_label.setWordWrap(True)
+        right_layout.addWidget(self.image_name_label)
         self.viewer = InteractiveGraphicsView()
         right_layout.addWidget(self.viewer, 1)
 
@@ -1252,7 +1266,7 @@ class SDVisualizer(QMainWindow):
         self.scale_group = QButtonGroup(self)
         
         scales = [("Fit to Window", 0), ("0.25", 0.25), ("0.5", 0.5), 
-                  ("0.75", 0.75), ("1.0", 1.0), ("1.5", 1.5), ("2.0", 2.0)]
+                  ("0.75", 0.75), ("100% (native)", 1.0), ("1.5", 1.5), ("2.0", 2.0)]
         
         for i, (text, val) in enumerate(scales):
             rb = QRadioButton(text)
@@ -1395,6 +1409,7 @@ class SDVisualizer(QMainWindow):
         self.statusBar().showMessage("Scanning SD Card using variable stride...")
         self._load_seq += 1
         self.current_snap = None
+        self.image_name_label.setText("Select a snapshot")
         self.listbox.clear()
         self.snapshots.clear()
         self._set_ui_busy(True)
@@ -1418,10 +1433,14 @@ class SDVisualizer(QMainWindow):
         self._set_ui_busy(False)
         self.snapshots = results
         self.current_snap = None
+        self.image_name_label.setText("Select a snapshot")
         for s in self.snapshots:
             fmt = FMT_NAME.get(s.header['pixel_format'], "?")
             ts = time_label(s.header)
-            self.listbox.addItem(f"#{s.idx+1:03d} | {s.header['width']}x{s.header['height']} | {fmt} | {ts}")
+            kind = image_kind_label(s.header)
+            prefix = f"#{s.idx+1:03d} | {kind} | " if kind else f"#{s.idx+1:03d} | "
+            self.listbox.addItem(f"{prefix}{s.header['width']}x{s.header['height']} | {fmt} | {ts}")
+            self.listbox.item(self.listbox.count() - 1).setToolTip(image_filename(s.header, s.idx, "original"))
 
         self.statusBar().showMessage(f"Scan complete. Found {len(self.snapshots)} snapshots.")
 
@@ -1446,9 +1465,11 @@ class SDVisualizer(QMainWindow):
                for n in ("scan_thread", "extract_thread", "delete_thread", "format_thread")):
             return
         self.current_snap = self.snapshots[row]
+        self.image_name_label.setText(image_filename(self.current_snap.header, self.current_snap.idx, "original"))
 
         if self.current_snap.qimage:
             self.viewer.set_image(self.current_snap.qimage)
+            self.scale_group.button(0).setChecked(True)
             self.statusBar().showMessage("Loaded from cache.")
             return
 
@@ -1652,6 +1673,7 @@ class SDVisualizer(QMainWindow):
         self.listbox.clear()
         self.snapshots.clear()
         self.current_snap = None
+        self.image_name_label.setText("Select a snapshot")
         self.request_drive_list()
         self.statusBar().showMessage("Format complete.")
         dialog(self, "info", "Success", msg)

@@ -3,7 +3,7 @@
 STM32 SD Card Snapshot Visualizer
 """
 
-import struct
+from raw_image_metadata import image_kind_label, parse_header
 import sys
 import os
 import time
@@ -107,20 +107,10 @@ def close_drive():
 
 
 def parse_hdr(b):
-    # Firmware header writes 8 u32 fields first; the remaining bytes are reserved.
-    if len(b) < HEADER_SIZE:
+    header = parse_header(b)
+    if header is None:
         raise ValueError("Header too short")
-    head = struct.unpack('<8I', b[:32])
-    return {
-        'magic': head[0],
-        'width': head[1],
-        'height': head[2],
-        'pixel_format': head[3],
-        'data_size': head[4],
-        'timestamp': head[5],
-        'checksum': head[6],
-        'snap_id': head[7],
-    }
+    return header
 
 
 def get_drives():
@@ -572,7 +562,9 @@ class SDVisualizer(ctk.CTk):
                 if scale > 1.1:
                     img = ImageEnhance.Sharpness(img).enhance(1.4)
 
-            filename = f"snapshot_{self.current_snap.idx:03d}_{suffix}.png"
+            kind = image_kind_label(self.current_snap.header)
+            label = f'_{kind}' if kind else ''
+            filename = f"snapshot_{self.current_snap.idx:03d}{label}_{suffix}.png"
             path = os.path.join(out_dir, filename)
             img.save(path)
             messagebox.showinfo("Guardado", f"Imagen guardada:\n{path}")

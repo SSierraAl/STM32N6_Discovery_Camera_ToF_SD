@@ -55,8 +55,6 @@
 #endif
 #endif
 
-/* Opt-in ToF burst with a fixed, unscaled DCMIPP crop. Coordinates are
-   relative to the oriented sensor image. Set the window using a bench target. */
 /** Capture one full-color frame and derive the overview and crop from it. */
 #ifndef CAM_OVERVIEW_CROP
 #define CAM_OVERVIEW_CROP (CAPTURE_MODE == 4)
@@ -71,18 +69,45 @@
 /** IMX335 full-field dimensions for the DMA source. */
 #define CAM_FULL_WIDTH 2592U
 #define CAM_FULL_HEIGHT 1944U
+/** Saved overview divisor. The detector always receives the native source. */
+#ifndef CAM_FIRST_IMAGE_DIVISOR
+#define CAM_FIRST_IMAGE_DIVISOR 2U
+#endif
+#if CAM_FIRST_IMAGE_DIVISOR < 1 || CAM_FIRST_IMAGE_DIVISOR > 4
+#error "CAM_FIRST_IMAGE_DIVISOR must be 1, 2, 3 or 4"
+#endif
+#define CAM_FIRST_IMAGE_WIDTH  (CAM_FULL_WIDTH / CAM_FIRST_IMAGE_DIVISOR)
+#define CAM_FIRST_IMAGE_HEIGHT (CAM_FULL_HEIGHT / CAM_FIRST_IMAGE_DIVISOR)
+
+/** Detector selection for the native crop. The external backend is project supplied. */
+#define CAM_CROP_DETECTOR_WHITE 0
+#define CAM_CROP_DETECTOR_EXTERNAL 1
+#ifndef CAM_CROP_DETECTOR
+#define CAM_CROP_DETECTOR CAM_CROP_DETECTOR_WHITE
+#endif
+#if CAM_CROP_DETECTOR != CAM_CROP_DETECTOR_WHITE && CAM_CROP_DETECTOR != CAM_CROP_DETECTOR_EXTERNAL
+#error "Invalid CAM_CROP_DETECTOR"
+#endif
 /** Discard this many frames after wake before retaining the full frame. */
 #ifndef CAM_FULL_WARMUP_FRAMES
 #define CAM_FULL_WARMUP_FRAMES 5U
 #endif
-/** Fixed, native-scale crop for the second exposure, in oriented sensor pixels. */
-#define CAM_BURST_CROP_X 976U
-#define CAM_BURST_CROP_Y 584U
-#define CAM_BURST_CROP_W 640U
-#define CAM_BURST_CROP_H 768U
-/** Native pixels of context for localization uncertainty and motion. */
+/** Native pixels of context around the detected object. */
 #ifndef CAM_DYNAMIC_CROP_MARGIN
 #define CAM_DYNAMIC_CROP_MARGIN 96U
+#endif
+/** Also save the configured overview when a native crop is saved. */
+#ifndef CAM_SAVE_CROP_OVERVIEW
+#define CAM_SAVE_CROP_OVERVIEW 1
+#endif
+/** Maximum age of the last saved position eligible for duplicate suppression (ms). */
+#ifndef CAM_TRACK_MAX_GAP_MS
+#define CAM_TRACK_MAX_GAP_MS 20000U
+#endif
+/** Minimum center displacement to save again, in native 5 MP pixels.
+    Set to 0 to disable distance-based suppression. */
+#ifndef CAM_TRACK_MIN_DISTANCE_PX
+#define CAM_TRACK_MIN_DISTANCE_PX 64U
 #endif
 /** White-background detector thresholds in YUYV luma units and grid cells. */
 #define CAM_ROI_GRID_STEP 16U
@@ -90,22 +115,25 @@
 #define CAM_ROI_LUMA_DELTA 26U
 #define CAM_ROI_MIN_COMPONENT 3U
 #define CAM_ROI_MAX_FOREGROUND_PCT 30U
-/** Suppress foreground repeated at the same position and similar contrast. */
-#ifndef CAM_ROI_RESIDENT_MIN_MS
-#define CAM_ROI_RESIDENT_MIN_MS 2000U
+/** Bench fixture mark in native pixels. Set MAX_SIZE to 0 for a clean or moved background.
+    Only isolated components no larger than MAX_SIZE and wholly within +/-32 px
+    of this measured location are ignored. Larger objects crossing it remain eligible. */
+#ifndef CAM_ROI_FIXED_MARK_MAX_SIZE
+#define CAM_ROI_FIXED_MARK_MAX_SIZE 32U
 #endif
-#ifndef CAM_ROI_RESIDENT_DELTA
-#define CAM_ROI_RESIDENT_DELTA 16U
+#ifndef CAM_ROI_FIXED_MARK_X
+#define CAM_ROI_FIXED_MARK_X 1264U
+#endif
+#ifndef CAM_ROI_FIXED_MARK_Y
+#define CAM_ROI_FIXED_MARK_Y 1200U
 #endif
 /** Fixed PSRAM budget for one native-scale crop and detector scratch. */
 #define CAM_BURST_CROP_BYTES (2U * 1024U * 1024U)
 /** Reject captures with a median brightness shift beyond this range. */
 #define CAM_ROI_MAX_REFERENCE_SHIFT 32
-#if CAM_FULL_WARMUP_FRAMES < 1 || CAM_BURST_CROP_X % 2 || CAM_BURST_CROP_Y % 2 || \
-    CAM_BURST_CROP_W < 16 || CAM_BURST_CROP_W % 16 || CAM_BURST_CROP_H < 4 || \
-    CAM_BURST_CROP_H % 2 || CAM_BURST_CROP_X + CAM_BURST_CROP_W > CAM_FULL_WIDTH || \
-    CAM_BURST_CROP_Y + CAM_BURST_CROP_H > CAM_FULL_HEIGHT
-#error "Full-frame burst needs warmup and a bounded, DMA-aligned crop"
+#if CAM_FULL_WARMUP_FRAMES < 1 || CAM_SAVE_CROP_OVERVIEW < 0 || CAM_SAVE_CROP_OVERVIEW > 1 || \
+    CAM_TRACK_MAX_GAP_MS < 1 || CAM_TRACK_MIN_DISTANCE_PX > CAM_FULL_WIDTH
+#error "Invalid camera capture or photo selection settings"
 #endif
 #endif
 #if CAM_NATIVE_ROI
@@ -207,7 +235,7 @@
     Current user setting: 12000 mdB = 12 dB (register 40).
     Shared across modes; brightness/noise require bench comparison. */
 #ifndef CAM_GAIN_VALUE
-#define CAM_GAIN_VALUE       13200
+#define CAM_GAIN_VALUE       12000
 #endif
 
 
