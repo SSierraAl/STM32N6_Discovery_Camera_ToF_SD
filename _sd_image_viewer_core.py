@@ -1435,8 +1435,7 @@ class SDVisualizer(QMainWindow):
         self.current_snap = None
         self.image_name_label.setText("Select a snapshot")
         for s in self.snapshots:
-            fmt = FMT_NAME.get(s.header['pixel_format'], "?")
-            label = snapshot_list_label(s.header, s.idx, fmt)
+            label = snapshot_list_label(s.header, s.idx)
             self.listbox.addItem(label)
             self.listbox.item(self.listbox.count() - 1).setToolTip(label)
 

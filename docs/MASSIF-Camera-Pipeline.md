@@ -34,7 +34,7 @@ The sensor task currently waits during camera processing and SD writes. Conseque
 | `SD_StoreRawImage(...)` | `Src/app_thread.c` | Stores the header and pixel payload through the raw block writer and journal. The buffer is read-only until completion. |
 | `image_kind_label(header)` | `raw_image_metadata.py` | Maps persistent category values to readable labels. Unknown and legacy values return an empty label. |
 | `image_filename(header, index, suffix)` | `raw_image_metadata.py` | Generates a Windows-compatible PNG name from UTC, image ID, scan index, category and optional export suffix. |
-| `snapshot_list_label(header, index, pixel_format)` | `raw_image_metadata.py` | Produces the viewer row in the order filename, resolution, category, format, time. |
+| `snapshot_list_label(header, index)` | `raw_image_metadata.py` | Produces the viewer row in the order number, resolution, category, time, filename. |
 
 ### Coordinate rules
 
@@ -132,7 +132,7 @@ Enable ANSI/VT100 interpretation in the serial terminal. If escape codes appear 
 
 The decorators allocate no buffers or state and add no extra printf calls. They add approximately 12 transmitted bytes per colored tag, roughly 1 ms on a 115200-baud 8N1 UART. Disable color for timing comparisons.
 
-The viewer row is filename, resolution, category, format and time. A tooltip repeats the full row. The filename is also shown above the image and can be selected for copying. Use 100% native scale for sharpness inspection and Save Original for native PNG output. Fit-to-window changes display scale. Export at current scale changes output pixel dimensions.
+The viewer row is number, resolution, category, time and filename. A tooltip repeats the full row. The filename is also shown above the image and can be selected for copying. Use 100% native scale for sharpness inspection and Save Original for native PNG output. Fit-to-window changes display scale. Export at current scale changes output pixel dimensions.
 
 ## 9. Verification after a change
 

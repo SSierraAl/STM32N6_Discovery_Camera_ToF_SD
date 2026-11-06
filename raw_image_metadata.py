@@ -50,9 +50,11 @@ def image_filename(header, index, suffix=''):
 
 
 
-def snapshot_list_label(header, index, pixel_format):
+def snapshot_list_label(header, index):
     """Describe a saved record in the same order as the viewer columns."""
     name = image_filename(header, index, 'original')
     resolution = f"{header['width']}x{header['height']}"
     category = image_kind_label(header) or 'legacy / unspecified'
-    return f"{name} | {resolution} | {category} | {pixel_format} | {time_label(header)}"
+    captured_at = utc_datetime(header)
+    time = captured_at.strftime('%Y-%m-%d %H:%M:%SZ') if captured_at else time_label(header)
+    return f"#{index + 1:03d} | {resolution} | {category} | {time} | {name}"
