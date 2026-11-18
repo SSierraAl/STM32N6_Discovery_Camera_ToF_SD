@@ -1,6 +1,6 @@
 # MASSIF camera pipeline and extension guide
 
-For the main sequence and settings, start with [How it works](how-it-works.md). This guide describes the overview/crop path used with `CAPTURE_MODE=4`, `CAM_BINNING=1`, `CAM_EXPOSURE_MODE=1` and `CAM_OVERVIEW_CROP=1` on `feature-cameraToF`.
+This guide describes the overview/crop path used with `CAPTURE_MODE=4`, `CAM_BINNING=1`, `CAM_EXPOSURE_MODE=1` and `CAM_OVERVIEW_CROP=1` on `feature-cameraToF`.
 
 ## 1. Capture and save order
 
@@ -116,7 +116,7 @@ The full YUYV source occupies 10,077,696 bytes (about 9.61 MiB). The buffer shar
 
 PSRAM reference storage is NOLOAD. Calibration fills the reference before the ready flag is set. Never read it based only on its apparent memory contents. DMA destinations require the existing cache and alignment discipline.
 
-SD records retain the existing 64-byte header. `image_kind` occupies byte offset 44, previously reserved, and identifies the storage category. Old records with zero or unknown values retain legacy behavior in the viewer. The firmware saves the next write position on the card before writing the image. Keep the current pixels intact until the SD task signals that it has finished.
+SD records retain the existing 64-byte header. `image_kind` occupies byte offset 44, previously reserved, and identifies the storage category. Old records with zero or unknown values retain legacy behavior in the viewer. The firmware saves the next write position on the card before writing the image. The image buffer remains valid and unchanged until the SD task signals completion.
 
 ## 8. Terminal colors and viewer
 
@@ -132,12 +132,12 @@ Enable ANSI/VT100 interpretation in the serial terminal. If escape codes appear 
 
 The decorators allocate no buffers or state and add no extra printf calls. They add approximately 12 transmitted bytes per colored tag, roughly 1 ms on a 115200-baud 8N1 UART. Disable color for timing comparisons.
 
-The viewer row is number, resolution, category, time and filename. A tooltip repeats the full row. The filename is also shown above the image and can be selected for copying. Use 100% native scale for sharpness inspection and Save Original for native PNG output. Fit-to-window changes display scale. Export at current scale changes output pixel dimensions.
+The viewer row is number, resolution, category, time and filename. A tooltip repeats the full row. The filename is also shown above the image and can be selected for copying. The 100% view displays pixels at their original scale. **Save Original** exports a PNG at the stored resolution. Fit-to-window changes display scale. Export at current scale changes output pixel dimensions.
 
-## 9. Verification after a change
+## 9. Camera pipeline validation
 
-Build and flash with STM32CubeIDE. Start with the passage empty and check `empty_reference_saved`. Then test an empty trigger, one small object, movement below and above the saved-position threshold, disappearance and reappearance, a target touching an edge, an oversized target and two separated targets. Include a larger target crossing the fixture-mark location if the exclusion is enabled.
+Camera validation uses an empty-passage reference confirmed by `empty_reference_saved`. The [bench verification matrix](firmware-guide.md#bench-verification) defines the target conditions and expected outputs. When fixture-mark exclusion is enabled, the test set includes a larger target crossing the excluded region.
 
-For each accepted event, verify paired timestamps and the expected category. Compare the crop with the same region of its overview. Confirm that blank and duplicate cases skip SD writes, and that baseline refresh, recovery and cooldown messages still follow the working ToF sequence.
+Paired records share an exposure timestamp, and the native crop covers the corresponding area of the overview. Confirmed blank and duplicate exposures create no SD records. The post-capture logs document baseline refresh and cooldown.
 
-Use `full_ms`, `detect_ms`, `select_ms`, `copy_ms`, `resize_ms`, `sd_ms` and `camera_task_total_ms` together. `detect_ms` measures localization, while `select_ms` includes diagnostic printing in the policy function. Neither is an end-to-end trigger latency. Full-resolution SD writes and CPU overview resizing can dominate the interval before the next ToF observation is processed.
+`detect_ms` measures image localization. `select_ms` measures the selection stage including its diagnostic output. CPU resizing and full-resolution SD writes extend the interval before ToF processing resumes. [Performance metrics](how-it-works.md#performance-metrics)

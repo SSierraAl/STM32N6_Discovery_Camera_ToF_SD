@@ -1,6 +1,6 @@
 # MASSIF firmware and operating modes
 
-[Repository README](../README.md) · [How it works](how-it-works.md) · [Camera pipeline and extension guide](MASSIF-Camera-Pipeline.md)
+[Repository README](../README.md) · [System operation and performance](how-it-works.md) · [Camera pipeline and extension guide](MASSIF-Camera-Pipeline.md)
 
 The profiles below describe the source and firmware defaults on `feature-cameraToF`. Compile-time overrides can select another path. Record the commit and your effective defines with each bench run.
 
@@ -86,7 +86,7 @@ sequenceDiagram
 | --- | --- |
 | `CAPTURE_MODE=4`, `CAM_OVERVIEW_CROP=0`, explicit `CAM_NATIVE_ROI=0` | Older multi-resolution path. The first callback frame is scaled from 1296 × 972 to 640 × 480 for `IF_Process()`. The firmware saves the batch, then attempts separate IMX335 AREA3 cropped exposures with `CAM_CaptureROI()`. Keep the expected 1296 × 972 input when investigating this path and validate it separately. |
 | `CAPTURE_MODE=1` | Continuous camera with ToF-triggered frame copy via `CAM_ContinuousStart()` and `CAM_ContinuousSnap()`. Uses the compiled snapshot dimensions. |
-| `TEST_TOF_MODE=1` with `CAPTURE_MODE=4` | Board LED and console events with camera and SD initialization bypassed. Use it to check range readings and triggers on the bench. |
+| `TEST_TOF_MODE=1` with `CAPTURE_MODE=4` | Board LED and console events with camera and SD initialization bypassed. Supports bench tests of range readings and trigger behavior. |
 
 ## ToF trigger and baseline
 
@@ -102,13 +102,13 @@ The 4 × 4 detector subtracts the cross-zone median change to isolate localized 
 
 The sensor task checks new frames during cooldown. Each frame reduces the five-frame counter and triggers are allowed once it reaches zero. The default high-sensitivity mode clears old frame comparisons after the camera request and refreshes the baseline after each request, even when the camera saves zero files. For three seconds after the refresh, the detector allows level and fast-edge triggers once the cooldown clears. It also refreshes the baseline after five minutes without a full update. A full refresh can include a target that is still in the passage.
 
-Use `TOFEVT` for accepted detector events, `TOFMISS` for blocked candidates and `TOFCAL` for per-zone calibration detail when enabled. `[CAM][SELECT]` reports the independent optical decision. The [ToF field notes](archive/project/TOF_DETECTION_FIELD_GUIDE.md) provide historical calibration methods. Use the active header and source for current settings.
+`TOFEVT` records accepted events, `TOFMISS` records blocked candidates, and `TOFCAL` reports per-zone calibration data when enabled. `[CAM][SELECT]` reports the independent optical decision. The [ToF field notes](archive/project/TOF_DETECTION_FIELD_GUIDE.md) provide historical calibration methods. The active header and source define the current settings.
 
 ## Camera, optical detection and ROI
 
 | Component | Main files and functions |
 | --- | --- |
-| IMX335, camera middleware and DCMIPP | [`app_cam.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_cam.c), [`app_cam.h`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/app_cam.h), [CMW](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_camera.c) and [IMX335 adapter](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/sensors/cmw_imx335.c). Start with `CAM_Init()`, `DCMIPP_PipeInitCapture()` and the selected acquisition function. |
+| IMX335, camera middleware and DCMIPP | [`app_cam.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_cam.c), [`app_cam.h`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/app_cam.h), [CMW](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/cmw_camera.c) and [IMX335 adapter](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Lib/Camera_Middleware/sensors/cmw_imx335.c). `CAM_Init()` and `DCMIPP_PipeInitCapture()` configure the camera before the mode-specific acquisition function runs. |
 | Default optical localization | `CAM_LocalizeFrame()`, `CAM_FindForeground()` and `CAM_FitBurstWindow()` in [`app_cam.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_cam.c). |
 | Position filtering and output generation | `SelectPhoto()`, `CopyNativeCrop()`, `DownsampleFirstImage()` and `SaveOverviewCropImage()` in [`app_thread.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_thread.c). |
 | Fixed DCMIPP crop | `CAM_InitCropConfig()` and `DCMIPP_PipeInitCapture()` in [`app_cam.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_cam.c). |
@@ -127,11 +127,11 @@ Capture modes write sector-aligned records using 512-byte blocks. Each record st
 - **Recovery** can leave a gap after a reservation or part of an overview/crop pair. The pair is two independent records. The firmware's successful-position reference advances only after the required writes succeed. The runtime append bound comes from the available card blocks.
 - **Host decoder** uses [`raw_image_metadata.py`](../raw_image_metadata.py) and [`_sd_image_viewer_core.py`](../_sd_image_viewer_core.py) to parse headers and scan records. The viewer shows number, resolution, category, time and filename. Review how the viewer finds the first image and reads the saved write position before changing the sector layout.
 
-## Configure the firmware
+## Firmware configuration
 
-Start with [`Inc/app_config.h`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/app_config.h). It mixes guarded defaults, fixed defines and derived sizes. Check the active conditionals and CubeIDE compiler defines before assuming the value from a comment applies. Build profiles select the camera path before hardware initialization.
+The configuration header defines compile-time defaults and derived values. Active preprocessor conditions and CubeIDE compiler definitions determine the final configuration. The selected mode determines which camera path is initialized. [`Inc/app_config.h`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/app_config.h)
 
-| Header group | Controls to look for | Current profile or dependency |
+| Subsystem | Configuration parameters | Default behavior and dependencies |
 | --- | --- | --- |
 | Capture and ROI | `CAPTURE_MODE`, `CAM_OVERVIEW_CROP`, `CAM_NATIVE_ROI`, `CAM_BINNING`, `SNAP_*` | Select the profile first. `CAM_BINNING` refers to DCMIPP output scaling where applicable. The default profile explicitly acquires full-field regardless of the default nominal 1296 × 972 `SNAP_*` dimensions. |
 | Overview, localization and position | `CAM_FIRST_IMAGE_DIVISOR`, `CAM_FULL_WARMUP_FRAMES`, `CAM_CROP_DETECTOR`, `CAM_DYNAMIC_CROP_MARGIN`, `CAM_ROI_*`, `CAM_TRACK_*` | Divisor 2, five warmup frames, white-background detector, 96 px margin, 64 px movement threshold and 20 s gap. Coordinates and margins are native pixels. |
@@ -143,13 +143,13 @@ Start with [`Inc/app_config.h`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n
 
 ## Bench verification
 
-| Check | Expected observation |
-| --- | --- |
-| On-demand | One full-field frame per press. Hold the button to verify there is one capture until release. Check that the ring is off during SD writes. |
-| Default mode, empty reference | Start with the passage clear. Confirm a valid ToF baseline, then `empty_reference_saved` on a qualifying empty camera exposure and no record for a subsequent confirmed blank. |
-| Default mode, optical decisions | Test one centered target, small and large movement, exit/re-entry, an edge target, an oversized target and multiple separated components. Check selection logs, dimensions, matching timestamps on pairs and alignment with the overview. |
-| Fixed-window callback burst | Trigger once. Confirm two separately timed 640 × 768 frames with the expected framing and the light off before storage. Check `PERF_CAMERA_FRAME_LOG` when investigating frame timing. |
-| ToF events and recovery | Record empty-trap and target trials with `TOFEVT`, `TOFMISS` and baseline and cooldown messages. Compare with camera selection and SD output. Test noisy conditions and the elapsed interval before detection resumes. |
-| SD and reboot | With a dedicated test card, verify append after a reboot, recovery after a card error, and decoding of both legacy and categorized records. Confirm saved record IDs and account for any incomplete pair. |
+| Test | Procedure | Expected observation |
+| --- | --- | --- |
+| On-demand capture | Press and hold USER, then release it. | One full-field capture per press. The ring is off during the SD write. |
+| Optical reference | Acquire the ToF baseline with an empty passage, then acquire a qualifying camera exposure of the same scene. | `empty_reference_saved` confirms reference acquisition. A later confirmed blank exposure creates no image record. |
+| Image selection | Present a centered target, vary its displacement, remove and reintroduce it, then test edge, oversized and separated targets. | Classification and output follow the selection rules. Paired images share a timestamp, and the crop aligns with the corresponding region of the overview. |
+| Fixed-window callback batch | Initiate one capture with the fixed-window configuration. | Two 640 × 768 images with distinct capture times and the expected framing. The light turns off before storage. `PERF_CAMERA_FRAME_LOG` provides frame timing when enabled. |
+| ToF detection and recovery | Run empty-passage and controlled-target trials, including trials with mechanical disturbance. | The ToF, camera and SD logs distinguish accepted triggers, blocked candidates and saved images. Baseline and cooldown logs show the return to detection. |
+| SD persistence | Reboot with existing captures, exercise recovery after a card error, and scan legacy and categorized records. | New records append to the existing data. Image IDs and categories match the decoded records. Any incomplete pair is identified separately. |
 
-See [What limits performance](how-it-works.md#what-limits-performance) for the timing fields to compare. `select_ms` includes time spent printing the decision logs. Record the log settings and SD card when comparing runs.
+Timing comparisons report the SD card and logging configuration. `select_ms` includes time spent printing decision logs. [Performance metrics](how-it-works.md#performance-metrics)

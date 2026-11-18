@@ -1,8 +1,6 @@
 # MASSIF insect imaging firmware
 
-MASSIF uses a time-of-flight (ToF) sensor to watch for insects in a trap. When the sensor detects a change, the STM32N6 lights the passage, takes a photo and checks what to save. The unit runs on its own after programming. A Windows viewer exports the images from the microSD card.
-
-Start with [How it works](docs/how-it-works.md) for the full flow, the main settings and what affects capture speed.
+The MASSIF imaging system records insect passage through a trap. A multizone time-of-flight (ToF) sensor triggers an illuminated capture on the STM32N6. The firmware compares the captured image with an empty-passage reference to determine whether to store an overview alone or pair it with a crop or a full-resolution image. Blank and repeat detections can be discarded. Images are stored on microSD and exported with a Windows viewer.
 
 ## Hardware and firmware
 
@@ -16,22 +14,28 @@ Start with [How it works](docs/how-it-works.md) for the full flow, the main sett
 
 ## Capture modes
 
-| Use | Build configuration | Output |
+| Mode | Build configuration | Output |
 | --- | --- | --- |
 | Automatic capture **(default on `feature-cameraToF`)** | `CAPTURE_MODE=4`, `CAM_OVERVIEW_CROP=1` | One 5 MP exposure per accepted ToF event. The image check decides whether to save an overview alone or an overview paired with a crop or a full-size image. Blank and repeat images can be skipped. |
-| On-demand capture | `CAPTURE_MODE=0`, `TEST_TOF_MODE=0` | Press USER (PC13) for one 2592 × 1944 full-field record with the default mode-0 settings. Useful for camera, light and card checks. |
+| On-demand capture | `CAPTURE_MODE=0`, `TEST_TOF_MODE=0` | One 2592 × 1944 full-field image per press of USER (PC13) with the default mode-0 settings. |
 | Callback-batch capture | `CAPTURE_MODE=4`, `CAM_OVERVIEW_CROP=0`, `CAM_NATIVE_ROI=1` | Two separately timed 640 × 768 frames of the configured fixed window by default. |
-| ToF detection only | `CAPTURE_MODE=4`, `TEST_TOF_MODE=1` | The serial log and board LED show detections. Press USER to learn the empty passage again. |
+| ToF detection only | `CAPTURE_MODE=4`, `TEST_TOF_MODE=1` | The serial log and board LED show detections. USER initiates a new ToF baseline measurement. |
 
 The [firmware guide](docs/firmware-guide.md#operating-modes) covers the remaining capture variants, task flow and configuration dependencies.
 
-## Build and first capture
+## Build and initial validation
 
 1. Check out `feature-cameraToF`. In STM32CubeIDE, choose **File → Import → General → Existing Projects into Workspace** and select the [CubeIDE project directory](x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32CubeIDE/NUCLEO-N657X0-Q). Leave **Copy projects into workspace** unchecked so the linked sources resolve in the checkout.
 2. Select the profile in [`Inc/app_config.h`](x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/app_config.h), build the project and use the included ST-LINK Debug configuration. The profile is compiled into the image. Rebuild and reload it after changing the header.
 3. Use a dedicated capture microSD card. The firmware writes images directly to the card. Use the viewer to open or export them.
-4. Open the target UART at **115200 baud, 8N1**. In on-demand mode, press USER and look for a saved snapshot. In the default mode, keep the passage empty during ToF baseline learning and through the **first accepted camera exposure**. That image teaches the camera what the empty passage looks like. Look for `empty_reference_saved`, then introduce a test target and look for the camera selection and SD save messages.
-5. When writing has completed, stop the firmware and move the card to the host. Scan it and verify the result in the viewer.
+4. Open the target UART at **115200 baud, 8N1**. In automatic mode, an empty passage is required during ToF baseline acquisition and during the first camera exposure used to establish the image reference.
+5. Complete the applicable bench test below. After storage completes, stop the firmware and scan the card in the viewer.
+
+| Test condition | Expected observation |
+| --- | --- |
+| USER press in on-demand mode | One full-field image on the card. |
+| First qualifying exposure with the passage empty in automatic mode | The camera reports `empty_reference_saved` and creates no image record. |
+| A test target crossing the passage after reference acquisition | The camera reports its selection in `[CAM][SELECT]`. When the selected action calls for storage, the corresponding image records are present on the card. |
 
 ## Inspect captures on Windows
 
@@ -46,12 +50,13 @@ Select the physical microSD, **Refresh**, then **Scan Snapshots**. Inspect image
 
 ## Documentation
 
-| Guide | Use |
+| Document | Scope |
 | --- | --- |
-| [Firmware and operating modes](docs/firmware-guide.md) | Follow startup, ToF, camera/ROI and SD from the entry points to the stored records. Includes configuration and bench checks. |
-| [Camera pipeline and extension guide](docs/MASSIF-Camera-Pipeline.md) | See how the camera finds objects, makes crops, reuses image buffers and can call an external detector. |
-| [Optical analysis](docs/reference/optical-analysis.md) | Compare the 6, 8 and 10 mm f/8 lenses. |
-| [Python image filter](docs/reference/python-image-filter.md) | Understand the separate host-side image-filtering experiment. [Spanish reference](docs/reference/python-image-filter-es.md). |
-| [Engineering archive](docs/archive/README.md) | Find earlier designs, bench observations, experiments and field notes. |
+| [System operation and performance](docs/how-it-works.md) | Detection and capture sequence, image selection, nominal settings and performance metrics. |
+| [Firmware and operating modes](docs/firmware-guide.md) | Firmware entry points, operating modes, configuration and bench validation. |
+| [Camera pipeline and extension guide](docs/MASSIF-Camera-Pipeline.md) | Image analysis, crop geometry, buffer reuse and the external detector interface. |
+| [Optical analysis](docs/reference/optical-analysis.md) | Comparison of 6, 8 and 10 mm f/8 lenses. |
+| [Python image filter](docs/reference/python-image-filter.md) | Host-side image filtering experiment. [Spanish reference](docs/reference/python-image-filter-es.md). |
+| [Engineering archive](docs/archive/README.md) | Earlier designs, bench observations, experiments and field notes. |
 
 The [firmware project](x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main) contains `Src/`, `Inc/`, `Lib/` and the ST package. The repository root contains the [SD viewer](SD_Image_Viewer.py), the [ToF zone monitor](vl53l5cx_zone_monitor.py) and the [ToF datalogger](vl53l5cx_datalogger.py). The ToF tools read measurements printed over the serial port. Enable `VL53L5CX_DET_DEBUG_ZFRAME` in the firmware for live zone readings.
