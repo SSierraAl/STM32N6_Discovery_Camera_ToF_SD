@@ -7,8 +7,8 @@ Build and flash with STM32CubeIDE using the project at
 The CubeIDE project uses linked sources, so import it in place. Use the repository
 [README](README.md) for startup and the [firmware guide](docs/firmware-guide.md)
 for source entry points, operating modes and verification. The
-[camera pipeline guide](docs/MASSIF-Camera-Pipeline.md) describes buffer ownership,
-the optical detector interface and crop selection.
+[camera pipeline guide](docs/MASSIF-Camera-Pipeline.md) describes when image buffers can be reused, the optical detector interface
+and crop selection.
 
 ## 2. Code Style Guidelines
 

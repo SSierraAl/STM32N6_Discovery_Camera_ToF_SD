@@ -1,18 +1,18 @@
 # MASSIF camera pipeline and extension guide
 
-This guide describes the overview/crop path used with `CAPTURE_MODE=4`, `CAM_BINNING=1`, `CAM_EXPOSURE_MODE=1` and `CAM_OVERVIEW_CROP=1` on `feature-cameraToF`.
+For the main sequence and settings, start with [How it works](how-it-works.md). This guide describes the overview/crop path used with `CAPTURE_MODE=4`, `CAM_BINNING=1`, `CAM_EXPOSURE_MODE=1` and `CAM_OVERVIEW_CROP=1` on `feature-cameraToF`.
 
-## 1. Ownership and execution order
+## 1. Capture and save order
 
-1. `sensor_task()` runs the ToF detector. An accepted ToF event starts a camera transaction through `Capture_RequestSnapshot()`.
+1. `sensor_task()` runs the ToF detector. An accepted ToF event asks the camera for a photo through `Capture_RequestSnapshot()`.
 2. `camera_task()` calls `CaptureSelectedPhoto()`. `CAM_CaptureFullFrame()` wakes the IMX335, discards the configured warmup frames, captures a stopped 2592 × 1944 YUYV image, invalidates the DMA destination cache, and returns the sensor to standby.
-3. The LED is stopped before optical analysis. `CAM_LocalizeFrame()` finds foreground in the retained exposure and returns the object box, a bounded crop window and a connected-component count.
+3. The light turns off before the image check. `CAM_LocalizeFrame()` finds foreground in the retained exposure and returns the object box, a bounded crop window and a connected-component count.
 4. `SelectPhoto()` decides whether to discard, save a context image, save an overview/crop pair, or save a full-resolution/overview pair. This decision concerns storage after acquisition.
-5. For a crop, `CopyNativeCrop()` copies native YUYV rows into the crop slot before any source resize. `DownsampleFirstImage()` then reduces the full source in place for the overview. Both files carry the same exposure timestamp.
-6. For multiple components or an oversized crop, the full native frame is written first. After storage releases the buffer, the same source is reduced to make its overview. This requires no second full-frame allocation.
-7. `SaveOverviewCropImage()` queues each record and waits until `storage_task()` finishes writing or recovery. The camera returns the completion semaphore after the transaction finishes. Only then does the sensor task resume its baseline/recovery/cooldown sequence.
+5. For a crop, `CopyNativeCrop()` copies native YUYV rows into the crop buffer before resizing the original image. `DownsampleFirstImage()` then reduces the full source in place for the overview. Both files carry the same exposure timestamp.
+6. For multiple components or an oversized crop, the full native frame is written first. After the SD write finishes, the same source is reduced to make its overview. This requires no second full-frame allocation.
+7. `SaveOverviewCropImage()` queues each record and waits until `storage_task()` finishes writing or recovery. The camera signals when the request is complete. The sensor task then refreshes the baseline when required and applies the cooldown.
 
-The ToF orchestration is taken from the default branch `STM32N6_Discovery_Camera_ToF_SD` at commit `1e172171f71d2bca84c5fa94f2bc231903a67846`. Its trigger, baseline, latch and cooldown behavior is independent of the optical storage policy. Changes to optical detection should stay within the camera functions below.
+The ToF task follows the implementation from the default branch `STM32N6_Discovery_Camera_ToF_SD` at commit `1e172171f71d2bca84c5fa94f2bc231903a67846`. The ToF task decides when to take a photo. The camera functions below decide which images to save.
 
 The sensor task currently waits during camera processing and SD writes. Consequently, longer storage operations increase the interval between processed ToF observations. An insect that enters and leaves during this interval may be missed even when the ToF hardware is ranging.
 
@@ -20,18 +20,18 @@ The sensor task currently waits during camera processing and SD writes. Conseque
 
 | Function | File | Inputs, outputs and reason for the boundary |
 |---|---|---|
-| `Capture_RequestSnapshot(timeout_ms)` | `Src/app_thread.c` | Queues one camera request and waits for completion. Timeout is in milliseconds. Buffer ownership must be released before a later transaction reuses it. |
-| `CaptureSelectedPhoto(source, crop)` | `Src/app_thread.c` | Runs one complete acquisition, localization, selection and storage transaction. `source` is the native DMA slot. `crop` is the separate PSRAM workspace. |
+| `Capture_RequestSnapshot(timeout_ms)` | `Src/app_thread.c` | Queues one camera request and waits for completion. Timeout is in milliseconds. Wait until pending SD writes finish before reusing any image buffer. |
+| `CaptureSelectedPhoto(source, crop)` | `Src/app_thread.c` | Takes one photo, finds the object, chooses what to save and writes the images. `source` holds the full-resolution image. `crop` is a separate buffer in external RAM. |
 | `CAM_CaptureFullFrame(buf, size, tick)` | `Src/app_cam.c`, declared in `Inc/app_cam.h` | `buf` must be 32-byte aligned and hold a native YUYV frame. `size` is bytes. Returns 1 for a valid stopped frame, otherwise 0. `tick` receives completion time in HAL milliseconds on success. |
 | `CAM_LocalizeFrame(source, scratch, capacity, object, window, components)` | `Src/app_cam.c` | `source` is read-only native YUYV. `scratch` must be separate and aligned. `capacity` is bytes. `object` is the unpadded native box. `window` includes margin and alignment when it fits. `components` counts accepted connected regions. Returns a static diagnostic string. |
 | `CAM_FindForeground(source, scratch, object, count)` | `Src/app_cam.c` | Built-in detector. Samples native luma, compares with the calibration grid and groups foreground. Writes a union box and region count. |
 | `CAM_FitBurstWindow(box, capacity, window)` | `Src/app_cam.c` | Converts an unpadded native box to a padded, clipped, aligned YUYV window. Returns 1 if packed rows fit, otherwise 0. Failure leaves no valid crop output. |
 | `CAM_DetectExternal(source, width, height, scratch, scratch_bytes, box)` | Public contract in `Inc/app_cam.h` | Project-supplied ML or other detector. Returns 1 for a valid box, 0 for no target, negative for an error. Input is full native YUYV. The project must provide and build an implementation when selecting this backend. |
 | `SelectPhoto(object, crop, components, blank, tick, next)` | `Src/app_thread.c` | Applies the storage policy. Receives the unpadded box, padded crop, component count and positive blank classification. `next` is a candidate saved position. Returns a `PhotoAction_t`. |
-| `CopyNativeCrop(source, crop, roi)` | `Src/app_thread.c` | Copies packed native rows from the same exposure used for localization. The validated ROI must fit the destination slot. |
+| `CopyNativeCrop(source, crop, roi)` | `Src/app_thread.c` | Copies packed native rows from the same exposure used for localization. The validated ROI must fit the destination buffer. |
 | `DownsampleFirstImage(image)` | `Src/app_thread.c` | Box-filters YUYV in place using the compile-time divisor. Requires all native reads and crop extraction to have completed first. Compiled only when the divisor differs from 1. |
-| `SaveOverviewCropImage(kind, image_kind, buffer, width, height, stamp)` | `Src/app_thread.c` | `kind` is a UART label, `image_kind` is the persistent record category, dimensions are pixels and `stamp` identifies the exposure. Blocks until storage releases the pixels. Returns 0 on success, nonzero on error. |
-| `SD_StoreRawImage(...)` | `Src/app_thread.c` | Stores the header and pixel payload through the raw block writer and journal. The buffer is read-only until completion. |
+| `SaveOverviewCropImage(kind, image_kind, buffer, width, height, stamp)` | `Src/app_thread.c` | `kind` is a UART label, `image_kind` is the persistent record category, dimensions are pixels and `stamp` identifies the exposure. Waits for the SD write to finish. Returns 0 on success, nonzero on error. |
+| `SD_StoreRawImage(...)` | `Src/app_thread.c` | Writes the header and pixels at the reserved card position. Leave the buffer untouched until the write finishes. |
 | `image_kind_label(header)` | `raw_image_metadata.py` | Maps persistent category values to readable labels. Unknown and legacy values return an empty label. |
 | `image_filename(header, index, suffix)` | `raw_image_metadata.py` | Generates a Windows-compatible PNG name from UTC, image ID, scan index, category and optional export suffix. |
 | `snapshot_list_label(header, index)` | `raw_image_metadata.py` | Produces the viewer row in the order number, resolution, category, time, filename. |
@@ -100,7 +100,7 @@ The working ToF configuration and `sensor_task()` should be validated as a unit.
 
 ## 6. Replacing the detector with ML
 
-1. Keep native acquisition, buffer ownership and storage unchanged while introducing the backend.
+1. Have the new detector read the full-size image and write only to the scratch buffer provided to it.
 2. Implement `CAM_DetectExternal()` in a source file included by the STM32CubeIDE project. Select `CAM_CROP_DETECTOR_EXTERNAL` in `app_config.h`.
 3. Prepare the tensor from read-only YUYV, accounting for the model's channel order, quantization, resizing and letterbox padding. Keep tensor and model workspace within a measured memory budget. Scratch provided to the function is temporary and later overwritten by the crop copy.
 4. Convert the returned model box to native image coordinates. Undo padding and scaling on each axis before applying camera bounds. Return the unpadded object rectangle. Do not add the crop margin in the model backend.
@@ -112,11 +112,11 @@ To change storage decisions, edit `SelectPhoto()`. To change crop margins and bo
 
 ## 7. Memory and SD format
 
-The full YUYV source occupies 10,077,696 bytes (about 9.61 MiB). The crop/scratch slot reserves 2 MiB. The empty reference adds 19,764 bytes in PSRAM. Other firmware and storage allocations require additional space. The detector reuses the crop slot before crop extraction. One full source plus one crop slot is sufficient for the current sequence.
+The full YUYV source occupies 10,077,696 bytes (about 9.61 MiB). The buffer shared by the detector and crop takes 2 MiB. The empty reference adds 19,764 bytes in PSRAM. Other firmware and storage allocations require additional space. The detector uses the crop buffer before crop extraction. One full source plus one crop buffer is sufficient for the current sequence.
 
 PSRAM reference storage is NOLOAD. Calibration fills the reference before the ready flag is set. Never read it based only on its apparent memory contents. DMA destinations require the existing cache and alignment discipline.
 
-SD records retain the existing 64-byte header. `image_kind` occupies byte offset 44, previously reserved, and identifies the storage category. Old records with zero or unknown values retain legacy behavior in the viewer. The journal reserves storage before writing, and storage owns queued pixels until the completion semaphore is returned.
+SD records retain the existing 64-byte header. `image_kind` occupies byte offset 44, previously reserved, and identifies the storage category. Old records with zero or unknown values retain legacy behavior in the viewer. The firmware saves the next write position on the card before writing the image. Keep the current pixels intact until the SD task signals that it has finished.
 
 ## 8. Terminal colors and viewer
 
