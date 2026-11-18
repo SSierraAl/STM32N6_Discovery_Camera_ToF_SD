@@ -54,6 +54,41 @@ The bench configuration contains an explicit exclusion for the measured fixed ma
 
 The sampled grid and connected-component traversal are O(N) in grid cells. Selection of a saved position is O(1). No NPU inference is executed by the built-in detector.
 
+### Image algorithm and coordinate example
+
+The native frame is packed YUYV. The detector reads the Y byte at each sampled position, so its output is based on brightness. For a grid cell at column i and row j, the sample is taken half a grid step from the upper-left corner and clipped at the image boundary. At a step of 16 pixels, the ceiling of the frame dimensions divided by 16 yields a 162 × 122 grid. Individual components are found by a breadth-first search over the four orthogonal neighbors.
+
+The first reference uses the median sampled brightness as its acceptance criterion. For a later frame, a histogram of sample-minus-reference differences supplies the global brightness shift. After this shift is applied to the reference, a dark difference of at least `CAM_ROI_LUMA_DELTA` marks foreground. If the reference is too dark, the estimated brightness shift is outside its limit, or more than 30% of grid cells are dark foreground, the detector returns the corresponding diagnostic classification. An uncertain result can produce an overview for inspection. A confirmed blank produces no image record.
+
+For a component whose grid columns are 60–63 and rows are 40–43 inclusive, the native box runs from `(960, 640)` to the exclusive endpoint `(1024, 704)`. The default 96-pixel margin produces a 256 × 256 crop with origin `(864, 544)`. It occupies 131,072 bytes in packed YUYV. At the default overview divisor of two, the same field of view corresponds to a 128 × 128 area starting at `(432, 272)` in the overview. These coordinates illustrate the mapping for a box away from an image edge. Near an edge, `CAM_FitBurstWindow()` clips the crop to the native frame. It rounds the horizontal crop bounds to 16-pixel positions where the frame boundary permits and the vertical bounds to even rows. The capacity test is based on packed row length and crop height.
+
+### Buffer flow by output type
+
+```mermaid
+flowchart TD
+    DMA["DCMIPP writes native frame"] --> Local["Read luminance and calculate crop"]
+    Local --> Save{"Output selection"}
+    Save -->|Crop pair| Copy["Copy native crop to second buffer"]
+    Save -->|Full-image pair| Write["Write full frame and wait"]
+    Save -->|Overview only| Scale["Downsample native buffer in place"]
+    Copy --> Scale
+    Write --> Scale
+    Scale --> SD["Write overview, then any copied crop"]
+```
+
+| Stage | Native buffer | Secondary buffer |
+| --- | --- | --- |
+| Acquisition | DCMIPP writes 10,077,696 bytes for the 2592 × 1944 frame. The CPU reads the frame after the pipe stops and its cache lines are invalidated. | Reserved for the detector and crop. |
+| Localization | The CPU reads sampled luma from the native buffer. | The detector stores sampled luma, then the foreground mask and a queue of 16-bit grid indices. |
+| Crop extraction | The source is still full-resolution. Crop rows are read using the native frame stride. | The crop overwrites detector workspace, with tightly packed rows of `2 × crop width` bytes. |
+| Full-frame fallback | The full image is written before its buffer is reduced. The camera waits for SD completion. | Detector workspace can be discarded. |
+| Overview generation | `DownsampleFirstImage()` averages input samples into the start of the native buffer. It separately averages luma for each output pixel and shared U/V values for each output pixel pair. | A prepared crop remains available at its original resolution. |
+| SD transfer | The queued pixels remain valid until the corresponding write finishes. The overview occupies 2,519,424 bytes at the default divisor. | A queued crop remains valid until its write finishes. |
+
+The storage task copies image bytes into a separate staging buffer for sector writes. Passing a pointer to an image buffer does not copy its contents into the queue. The camera can therefore reuse memory only after it receives the SD completion signal. [SD storage and image reconstruction](sd-storage-and-reconstruction.md)
+
+[Acquisition and localization](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_cam.c) · [Image selection and buffer flow](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_thread.c)
+
 ## 4. Storage selection and saved-position filtering
 
 | Observation | Action |

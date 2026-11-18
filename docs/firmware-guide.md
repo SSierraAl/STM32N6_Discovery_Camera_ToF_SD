@@ -10,7 +10,7 @@ The profiles below describe the source and firmware defaults on `feature-cameraT
 flowchart TD
     ToF["VL53L5CX and ToF policy"] --> Request["Camera request and illumination"]
     Request --> DMA["IMX335, DCMIPP and PSRAM"]
-    DMA --> Decision{"Optical save decision"}
+    DMA --> Decision{"Which images should be stored?"}
     Decision -->|Accepted| SD["Write images to SD"]
     Decision -->|Blank or duplicate| Resume["Complete request"]
     SD --> Resume
@@ -90,6 +90,8 @@ sequenceDiagram
 
 ## ToF trigger and baseline
 
+The detector guide describes spatial residuals, thresholds, and the trigger and refresh rules. [ToF detection and spatial analysis](tof-detection.md)
+
 The default [`app_config.h`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/app_config.h) selects one VL53L5CX, 16 zones, autonomous ranging mode 3, 45 ms integration, 15 Hz requested and closest-target order. `VL53L5CX_LearnBaseline()` discards 15 settling samples before attempting 30 baseline samples. It records per-zone signal and distance references. This reference lives in the range detector and is separate from the image of the empty passage.
 
 | Logic | Main functions and files |
@@ -120,12 +122,14 @@ Full-field YUYV uses 10,077,696 bytes per frame. The default pipeline uses one n
 
 ## Raw SD storage and time
 
+The storage guide follows the record from the camera buffer through the raw card format to the reconstructed image. [SD storage and image reconstruction](sd-storage-and-reconstruction.md)
+
 Capture modes write sector-aligned records using 512-byte blocks. Each record starts with a 64-byte [`sd_image_header_t`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/raw_image.h), then the pixels and any bytes needed to fill the last sector. The header records dimensions, format, size, persistent image ID, UTC validity, tick and image category. `RTC_CaptureStamp()` in [`ds3231.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/ds3231.c) supplies RTC metadata. UTC comes from an RTC sample taken after capture. The capture tick is a boot-relative millisecond timer. Use both fields to inspect ordering, and check the valid flag before relying on UTC.
 
 - **On-demand writer** runs directly in [`main.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/main.c). **Autonomous writer** runs in `storage_task()` in [`app_thread.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/app_thread.c). Both use the HAL entry points wrapped by [`raw_image.h`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/raw_image.h).
 - **Saved SD write position.** The firmware calls this the SD journal. The code in [`sd_storage_journal.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/sd_storage_journal.c) alternates between two copies with checksums at sectors 3070 and 3071. Each copy stores where to write the next image and which image ID to use. `sdj_load()` selects the latest valid record. `sdj_reserve_image()` checks physical capacity and saves the next block and ID before writing the pixels. `SDJ_HAL_SD_WriteBlocks()` remaps the logical write to the reserved location. The CubeIDE project includes this code through [`perf_debug.c`](../x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Src/perf_debug.c).
 - **Recovery** can leave a gap after a reservation or part of an overview/crop pair. The pair is two independent records. The firmware's successful-position reference advances only after the required writes succeed. The runtime append bound comes from the available card blocks.
-- **Host decoder** uses [`raw_image_metadata.py`](../raw_image_metadata.py) and [`_sd_image_viewer_core.py`](../_sd_image_viewer_core.py) to parse headers and scan records. The viewer shows number, resolution, category, time and filename. Review how the viewer finds the first image and reads the saved write position before changing the sector layout.
+- **Host decoder** uses [`raw_image_metadata.py`](../raw_image_metadata.py) and [`_sd_image_viewer_core.py`](../_sd_image_viewer_core.py) to parse headers and scan records. The viewer shows number, resolution, category, time and filename. The image scan searches for headers at the current and legacy data bases. The reset operation separately clears the saved write position.
 
 ## Firmware configuration
 

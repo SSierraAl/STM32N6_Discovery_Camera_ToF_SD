@@ -23,20 +23,6 @@ The MASSIF imaging system records insect passage through a trap. A multizone tim
 
 The [firmware guide](docs/firmware-guide.md#operating-modes) covers the remaining capture variants, task flow and configuration dependencies.
 
-## Build and initial validation
-
-1. Check out `feature-cameraToF`. In STM32CubeIDE, choose **File → Import → General → Existing Projects into Workspace** and select the [CubeIDE project directory](x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32CubeIDE/NUCLEO-N657X0-Q). Leave **Copy projects into workspace** unchecked so the linked sources resolve in the checkout.
-2. Select the profile in [`Inc/app_config.h`](x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/Inc/app_config.h), build the project and use the included ST-LINK Debug configuration. The profile is compiled into the image. Rebuild and reload it after changing the header.
-3. Use a dedicated capture microSD card. The firmware writes images directly to the card. Use the viewer to open or export them.
-4. Open the target UART at **115200 baud, 8N1**. In automatic mode, an empty passage is required during ToF baseline acquisition and during the first camera exposure used to establish the image reference.
-5. Complete the applicable bench test below. After storage completes, stop the firmware and scan the card in the viewer.
-
-| Test condition | Expected observation |
-| --- | --- |
-| USER press in on-demand mode | One full-field image on the card. |
-| First qualifying exposure with the passage empty in automatic mode | The camera reports `empty_reference_saved` and creates no image record. |
-| A test target crossing the passage after reference acquisition | The camera reports its selection in `[CAM][SELECT]`. When the selected action calls for storage, the corresponding image records are present on the card. |
-
 ## Inspect captures on Windows
 
 From a Python environment on Windows, install the viewer dependencies and run it with administrator access for raw drive access.
@@ -54,9 +40,23 @@ Select the physical microSD, **Refresh**, then **Scan Snapshots**. Inspect image
 | --- | --- |
 | [System operation and performance](docs/how-it-works.md) | Detection and capture sequence, image selection, nominal settings and performance metrics. |
 | [Firmware and operating modes](docs/firmware-guide.md) | Firmware entry points, operating modes, configuration and bench validation. |
+| [ToF detection and spatial analysis](docs/tof-detection.md) | Zone baselines, spatial residuals, trigger paths and baseline updates. |
 | [Camera pipeline and extension guide](docs/MASSIF-Camera-Pipeline.md) | Image analysis, crop geometry, buffer reuse and the external detector interface. |
+| [SD storage and image reconstruction](docs/sd-storage-and-reconstruction.md) | Sector layout, persistent write position, viewer scanning and PNG export. |
 | [Optical analysis](docs/reference/optical-analysis.md) | Comparison of 6, 8 and 10 mm f/8 lenses. |
 | [Python image filter](docs/reference/python-image-filter.md) | Host-side image filtering experiment. [Spanish reference](docs/reference/python-image-filter-es.md). |
-| [Engineering archive](docs/archive/README.md) | Earlier designs, bench observations, experiments and field notes. |
 
 The [firmware project](x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main) contains `Src/`, `Inc/`, `Lib/` and the ST package. The repository root contains the [SD viewer](SD_Image_Viewer.py), the [ToF zone monitor](vl53l5cx_zone_monitor.py) and the [ToF datalogger](vl53l5cx_datalogger.py). The ToF tools read measurements printed over the serial port. Enable `VL53L5CX_DET_DEBUG_ZFRAME` in the firmware for live zone readings.
+
+## Engineering archive
+
+The archive documents earlier firmware designs, field settings and experiments. Measurements refer to the hardware and configuration used in each study.
+
+| Topic | Historical records |
+| --- | --- |
+| Architecture and task design | [System architecture](docs/archive/project/MASSIF-Camera-System-Architecture.md), [thread architecture](docs/archive/firmware/07_THREAD_ARCHITECTURE.md), [original project walkthrough](docs/archive/firmware-package/PROJECT_DOCUMENTATION.md) |
+| ToF and field calibration | [Single-sensor field guide](docs/archive/project/TOF_DETECTION_FIELD_GUIDE.md), [noise-rejection proposal](docs/archive/project/tof_detection_noise_mad_strategy.md), [Spanish walkthrough](docs/archive/firmware/TOF_ALGORITHM_EXPLAINED_ES.md) |
+| Acquisition and ROI development | [Multi-resolution strategy](docs/archive/project/MULTI_RES_STRATEGY.md), [capture mode history](docs/archive/firmware/CAPTURE_MODES_REFERENCE.md), [callback-batch notes](docs/archive/firmware/CALLBACK_BATCH_MODE_GUIDE.md), [batch coexistence test plan](docs/archive/firmware-package/BATCH_MODE_TEST_PLAN.md) |
+| Camera quality and timing | [Image-quality review](docs/archive/firmware/CAMERA_IMAGE_QUALITY_REVIEW.md), [exposure tests](docs/archive/firmware/EXPOSURE_AND_TIMING_VALIDATION.md), [binning exploration](docs/archive/firmware/IMX335_BINNING_EXPLORATION_PLAN.md), [low-power study](docs/archive/firmware/LOW_POWER_MODE4_ANALYSIS.md) |
+| Storage and diagnostics | [SD architecture](docs/archive/firmware/03_SD_Storage_Architecture.md), [SD performance study](docs/archive/firmware-package/SD_CARD_ANALYSIS_AND_CAPTURE_MODES.md), [performance diagnostics](docs/archive/firmware/PERFORMANCE_DEBUG_GUIDE.md) |
+| Earlier configuration and terminology | [Field parameters](docs/archive/firmware/09_TUNING_PARAMETERS.md), [tuning guide](docs/archive/firmware/TUNING_GUIDE.md), [terminology glossary](docs/archive/firmware/PROTOCOLS_AND_ABBREVIATIONS.md) |
