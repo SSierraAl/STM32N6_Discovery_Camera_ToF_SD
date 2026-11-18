@@ -571,7 +571,7 @@
 /* ================================================================
    SECTION 9: TOF DETECTION (VL53L5CX)
    All ToF tuning parameters (moved from vl53l5cx_detection.h,
-   which now includes this file). See Documentation/TUNING_GUIDE.md.
+   which now includes this file). See docs/firmware-guide.md at repository root.
    ================================================================ */
 
 /** ToF operating mode.
@@ -840,7 +840,7 @@
    NOTE: they shape the raw per-zone motion values that
    VL53L5CX_DET_MOTION_THRESH is compared against — after changing any of
    them, re-datalog and re-check the ZFRAME motion column.
-   See Documentation/TUNING_GUIDE.md, section 4. */
+   See the ToF section of docs/firmware-guide.md at repository root. */
 #define VL53L5CX_DET_MOTION_MIN_ZONES       1   /* min_nb_for_global_detection: zones required for the plugin's GLOBAL motion flag (datalog MOTION lines; not part of the firmware trigger) */
 #define VL53L5CX_DET_MOTION_PERSIST_FRAMES  10 //  /* nb_of_temporal_accumulations: sensor-side temporal accumulation of the per-zone motion value (higher = smoother, slower reaction) */
 #define VL53L5CX_DET_MOTION_EXTRA_NOISE     0   /* extra_noise_sigma: noise margin added to the plugin's estimate (higher = less sensitive) */

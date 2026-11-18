@@ -1,58 +1,14 @@
 # AGENTS.MD — Project Guide for AI Coding Agents
 
-## 1. Build System
+## 1. Build and source navigation
 
-### Build from STM32CubeIDE (mandatory)
-
-The project **cannot** be built from the command line. The `Makefile` in `nucleo/x-cube-n6-camera-capture-main/` is present but `arm-none-eabi-gcc` + `make` are **not** on the shell PATH. All builds must go through **STM32CubeIDE**.
-
-**How to build:**
-1. Open STM32CubeIDE
-2. File → Import → Existing Projects → select `nucleo/x-cube-n6-camera-capture-main/`
-3. Right-click project → Build Project (or Ctrl+B)
-4. Flash via ST-Link debugger
-
-**Project structure:**
-```
-Discovery/                              ← repo root (this file lives here)
-├── x-cube-n6-camera-capture-main/
-│   └── nucleo/x-cube-n6-camera-capture-main/
-│       ├── Src/                        ← .c source files
-│       ├── Inc/                         ← .h headers (app_config.h, app_cam.h, image_filter.h)
-│       ├── Lib/Camera_Middleware/       ← CMW middleware + IMX335 sensor driver
-│       ├── STM32CubeIDE/               ← STM32CubeIDE project files
-│       ├── Makefile                    ← present but unusable from shell
-│       └── EWARM/                      ← IAR EWARM project files (not actively used)
-├── docs/                               ← project documentation
-├── AGENTS.MD                          ← this file
-└── *_analysis.py, *_datalogger.py     ← Python tools for SD image decoding
-```
-
-### Key files
-
-| File | Purpose |
-|------|---------|
-| `Inc/app_config.h` | **Single central configuration header.** All tuneable constants live here. |
-| `Inc/app_cam.h` | Camera API declarations with full Doxygen-style docs. |
-| `Src/app_cam.c` | Camera implementation: init, capture, AREA3/ROI, pipe config. |
-| `Src/app_thread.c` | RTOS tasks: camera, sensor (ToF), storage. Multi-resolution pipeline. |
-| `Inc/image_filter.h` | Detection algorithm parameters: downsample, thresholds, ROI. |
-| `Src/vl53l5cx_detection.c` | VL53L5CX ToF sensor: init, ranging, baseline, zone detector. |
-
-### Debug console
-
-The firmware prints `[TAG]`-prefixed log lines over UART at 115200 baud. Connect via any serial terminal (PuTTY, screen, Arduino IDE Serial Monitor).
-
-### Python companion tools
-
-All at the repo root. Run from host PC (not the MCU):
-
-- `read_sd_image.py`  — decode raw YUV422 frames from SD dump
-- `vl53l5cx_zone_monitor.py` — real-time ToF zone visualisation
-- `vl53l5cx_datalogger.py` — ToF datalog capture
-- `SD_Image_Viewer.py` — GUI image viewer for captured frames
-
----
+Build and flash with STM32CubeIDE using the project at
+`x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main/STM32CubeIDE/NUCLEO-N657X0-Q/`.
+The CubeIDE project uses linked sources, so import it in place. Use the repository
+[README](README.md) for startup and the [firmware guide](docs/firmware-guide.md)
+for source entry points, operating modes and verification. The
+[camera pipeline guide](docs/MASSIF-Camera-Pipeline.md) describes buffer ownership,
+the optical detector interface and crop selection.
 
 ## 2. Code Style Guidelines
 
@@ -146,36 +102,19 @@ void CAM_Function(void)
 **Critical or non-obvious fixes** include a `/* === CRITICAL === */` or
 `/* IMPORTANT: reason */` annotation so agents don't accidentally reorder.
 
-### 2.5 Multi-Resolution Pipeline Convention
+### 2.5 Capture pipeline invariants
 
-The capture pipeline has three stages (see `app_thread.c`, `CAM_CmdSnap` handler):
+- The default mode 4 profile uses one full-field acquisition. Derive the
+  overview and dynamic crop from the same exposure.
+- Complete native reads before resizing the DMA source in place. Wait for
+  storage to release a queued buffer before any code changes or reuses it.
+- Use the [operating mode table](docs/firmware-guide.md#operating-modes) when
+  modifying a build variant. The fixed DCMIPP crop and the older IMX335 AREA3
+  path have different configuration and startup sequences.
+- In the older AREA3 path, program the sensor ROI after
+  `CMW_CAMERA_DoubleBufferStart()`. The driver start restores full-field readout.
 
-1. **Stage 1** — Downscale 1296×972 → 640×480 → `IF_Process()` detection
-2. **Stage 2** — Save 2 batch frames (1296×972) to SD
-3. **Stage 3** — `CAM_CaptureROI()`: DeInit→Init→PipeConfig→DoubleBufferStart→AREA3→warmup+capture→Stop
-
-Stage 3 AREA3 must **always** program the sensor **after** `CMW_CAMERA_DoubleBufferStart()` because `Camera_Drv.Start()` resets the IMX335 to full 2592×1944.
-
-### 2.6 Common Pitfalls
-
-- **`Camera_Drv.Start()`** reinitialises the IMX335 AREA registers to full-frame. Program AREA3 **after** `DoubleBufferStart` (which calls Start).
-- **`g_capture_busy`** is set by the ToF task before capture and cleared by the camera callback **after Stage 3** finishes. The ToF task must wait for this flag before restarting ranging.
-- **PSRAM budget**: 1296×972 @ YUV422 = ~2.5 MB/frame. 2592×1944 = ~10 MB/frame. Full-res batch capture only works via AREA3 crop.
-- **Storage semaphore**: `Capture_RequestSnapshot()` waits for Stage 2 SD tokens. Stage 3 SD saves happen after it returns — ToF ranging must not restart until `g_capture_busy == 0`.
-
-### 2.7 Threading Model
-
-| Task | Role | Stack (words) |
-|------|------|---------------|
-| `camera_task` | Camera control + detection + Stage 3 | 4096 |
-| `sensor_task` | ToF ranging + trigger + SD Stage 2 | 4096 |
-| `storage_task` | SD block write + meta | 2048 |
-
-Tasks communicate via FreeRTOS queues (`camera_cmd_queue`, `storage_cmd_queue`)
-and semaphores (`camera_ready_sem`, `storage_done_sem`). The `g_capture_busy`
-volatile flag guards the critical capture window across tasks.
-
-### 2.8 When Modifying Code
+### 2.6 When Modifying Code
 
 1. **Always test** with `CAPTURE_MODE=4`, `CAM_BINNING=1`, `CAM_EXPOSURE_MODE=1`.
 2. **Keep `#ifndef` guards** around all `#define`s in `app_config.h`.
