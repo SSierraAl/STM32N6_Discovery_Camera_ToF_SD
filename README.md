@@ -35,12 +35,12 @@ The firmware also provides multiple acquisition modes and configurable detection
 
 | Component | Role |
 | --- | --- |
-| STM32N6570-DK Discovery / OhmLab Neuro N6 | STM32N6-based development and embedded processing platforms. |
-| B-CAMS-IMX / Sony IMX335 | Camera module providing color images at up to 2592 × 1944 pixels (5 MP). |
-| VL53L5CX | Multizone Time-of-Flight sensor used for distance measurements and object detection. Configured here with 16 detection zones. |
-| WS2812B illumination | Addressable LED illumination activated during image acquisition. |
-| microSD card | Stores captured images using the dedicated raw storage format. |
-| DS3231 RTC | Provides timestamps for the captured images when the real-time clock is configured. |
+| STM32N6570-DK Discovery / OhmLab Neuro N6 | STM32N6-based development and embedded platforms. |
+| B-CAMS-IMX / Sony IMX335 | Camera module, 2592 × 1944 pixels (5 MP) color images. |
+| VL53L5CX | Multizone Time-of-Flight sensor used for distance measurements and object detection. |
+| WS2812B illumination | Ring LED illumination activated during image acquisition. |
+| microSD card | Stores captured images using the dedicated raw format. |
+| DS3231 RTC | Provides timestamps for the captured images. |
 
 ## Capture modes
 
@@ -48,9 +48,9 @@ To support the different stages of development, testing, and deployment, the fir
 
 | Mode | Build configuration | Output |
 | --- | --- | --- |
-| **Automatic capture (default on `feature-cameraToF`)** | `CAPTURE_MODE=4`, `CAM_OVERVIEW_CROP=1` | One 5 MP camera exposure per accepted ToF event. Image analysis determines whether to save an overview alone, an overview with a cropped image, or a full-resolution image. |
+| **Automatic capture** | `CAPTURE_MODE=4`, `CAM_OVERVIEW_CROP=1` | One 5 MP camera exposure per accepted ToF event. Image analysis determines whether to save an overview alone, an overview with a cropped image, or a full-resolution image. The system also permit downsample the final image resolution. |
 | **On-demand capture** | `CAPTURE_MODE=0`, `TEST_TOF_MODE=0` | Captures one full-field 2592 × 1944 image per press of the USER button (PC13), using the default mode-0 configuration. Particularly useful for controlled acquisition and dataset generation. |
-| **ToF detection only** | `CAPTURE_MODE=4`, `TEST_TOF_MODE=1` | Runs the ToF detection pipeline without normal image acquisition, allowing observation, calibration, and tuning of detection sensitivity, adaptive thresholds, and triggering behavior. |
+| **ToF detection only** | `CAPTURE_MODE=4`, `TEST_TOF_MODE=1` | Runs the ToF detection pipeline without image acquisition, allowing calibration, and tuning of detection sensitivity, adaptive thresholds, and triggering behavior. |
 
 Additional acquisition variants and configuration dependencies are described in the [Firmware and Operating Modes Guide](docs/firmware-guide.md#operating-modes).
 
@@ -58,7 +58,7 @@ Additional acquisition variants and configuration dependencies are described in 
 
 A dedicated Python-based image viewer is included to inspect and reconstruct the images stored on the microSD card.
 
-Since the embedded system writes images in a custom raw format, the viewer provides the tools required to locate stored captures, reconstruct their image data, inspect the results, and export them as PNG files.
+Since the embedded system writes images in a custom raw format, the viewer provides the tools required to locate stored captures, reconstruct their image data, inspect the results, and export them as PNG files. For it is used it is necessary run the terminal with administrator rights.
 
 ### Installation and execution
 
@@ -110,11 +110,9 @@ The repository root also provides supporting Python tools:
 
 For live zone readings, enable `VL53L5CX_DET_DEBUG_ZFRAME` in the firmware configuration.
 
-## Engineering archive
+## Archive of previous documentation and interations
 
-The engineering archive preserves earlier firmware architectures, experimental approaches, calibration procedures, and technical investigations carried out during development.
-
-These documents provide additional context on the design decisions and evolution of the system. Some describe earlier firmware configurations or hardware arrangements and should therefore be considered historical references rather than the current implementation.
+Earlier firmware architectures, experimental approaches, calibration procedures, and technical investigations carried out during development. These documents provide additional context on the design decisions and evolution of the system. Some describe earlier firmware configurations or hardware arrangements and should therefore be considered references rather than the current implementation.
 
 | Topic | Historical records |
 | --- | --- |
