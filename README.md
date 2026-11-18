@@ -1,56 +1,120 @@
-# MASSIF insect imaging firmware
+# MASSIF – Edge Imaging Monitoring System
 
-The MASSIF imaging system records insect passage through a trap. A multizone time-of-flight (ToF) sensor triggers an illuminated capture on the STM32N6. The firmware compares the captured image with an empty-passage reference to determine whether to store an overview alone or pair it with a crop or a full-resolution image. Blank and repeat detections can be discarded. Images are stored on microSD and exported with a Windows viewer.
+**Project:** MASSIF – Monitoring Automatisé et Systèmes de Surveillance Intelligents de la biodiversité des insectes dans les écosystèmes Forestiers français
+
+## Overview
+
+This repository focuses on the development of an embedded imaging and monitoring system for the automated observation of insects passing through a dedicated trapping structure.
+
+The development is part of the MASSIF project, which aims to establish a network of autonomous monitoring devices deployed across French forest ecosystems. These devices are intended to support long-term biodiversity monitoring by collecting observations of insects, which can serve as sensitive indicators of environmental and ecological changes.
+
+The main engineering objective is to develop a robust, configurable, and energy-efficient embedded system capable of operating autonomously under outdoor conditions, with minimal human intervention.
+
+The system is built around the **STM32N6 microcontroller family**, with firmware designed for the STM32N6570-DK Discovery board and potential adaptation to more compact embedded platforms, including the OhmLab Neuro N6.
+
+### System architecture and operation
+
+The acquisition system observes a constrained passage region through which insects are guided by the mechanical design of the trap.
+
+A multizone Time-of-Flight (ToF) sensor continuously monitors this region, using adaptive reference measurements and configurable detection algorithms to identify the presence or movement of an object. When a detection satisfies the configured triggering conditions, the system activates the illumination and initiates the camera acquisition sequence.
+
+The firmware then analyzes the captured image against an empty-passage reference to determine the most appropriate output. Depending on the detected content and the selected configuration, the system can:
+
+- Store an overview image of the monitored passage.
+- Extract and store a region of interest (ROI) containing the detected object.
+- Preserve the full-resolution image when cropping is not appropriate.
+- Reject empty images and suppress certain repeated detections.
+
+This approach is intended to reduce unnecessary data storage while preserving useful visual information for subsequent analysis.
+
+Images are written directly to a microSD card using a dedicated raw storage format. A companion Python-based Windows application provides image inspection, reconstruction, and export to standard PNG files.
+
+The firmware also provides multiple acquisition modes and configurable detection parameters, allowing the system to be used for field monitoring, laboratory experiments, sensor calibration, and image dataset collection.
 
 ## Hardware and firmware
 
 | Component | Role |
 | --- | --- |
-| STM32N6570-DK Discovery | Runs the firmware and holds the camera images in external RAM. The existing CubeIDE project name contains `nucleo`. |
-| B-CAMS-IMX / Sony IMX335 | Captures a 2592 × 1944 color image of the passage. |
-| VL53L5CX | Measures distance and return signal in 16 zones by default. |
-| WS2812 illumination | Lights the passage for the photo. |
-| microSD and DS3231 | The card holds the photos. The DS3231 clock supplies the time when set. |
+| STM32N6570-DK Discovery / OhmLab Neuro N6 | STM32N6-based development and embedded processing platforms. |
+| B-CAMS-IMX / Sony IMX335 | Camera module providing color images at up to 2592 × 1944 pixels (5 MP). |
+| VL53L5CX | Multizone Time-of-Flight sensor used for distance measurements and object detection. Configured here with 16 detection zones. |
+| WS2812B illumination | Addressable LED illumination activated during image acquisition. |
+| microSD card | Stores captured images using the dedicated raw storage format. |
+| DS3231 RTC | Provides timestamps for the captured images when the real-time clock is configured. |
 
 ## Capture modes
 
+To support the different stages of development, testing, and deployment, the firmware provides several operating modes selected through compile-time configuration.
+
 | Mode | Build configuration | Output |
 | --- | --- | --- |
-| Automatic capture **(default on `feature-cameraToF`)** | `CAPTURE_MODE=4`, `CAM_OVERVIEW_CROP=1` | One 5 MP exposure per accepted ToF event. The image check decides whether to save an overview alone or an overview paired with a crop or a full-size image. Blank and repeat images can be skipped. |
-| On-demand capture | `CAPTURE_MODE=0`, `TEST_TOF_MODE=0` | One 2592 × 1944 full-field image per press of USER (PC13) with the default mode-0 settings. |
-| Callback-batch capture | `CAPTURE_MODE=4`, `CAM_OVERVIEW_CROP=0`, `CAM_NATIVE_ROI=1` | Two separately timed 640 × 768 frames of the configured fixed window by default. |
-| ToF detection only | `CAPTURE_MODE=4`, `TEST_TOF_MODE=1` | The serial log and board LED show detections. USER initiates a new ToF baseline measurement. |
+| **Automatic capture (default on `feature-cameraToF`)** | `CAPTURE_MODE=4`, `CAM_OVERVIEW_CROP=1` | One 5 MP camera exposure per accepted ToF event. Image analysis determines whether to save an overview alone, an overview with a cropped image, or a full-resolution image. |
+| **On-demand capture** | `CAPTURE_MODE=0`, `TEST_TOF_MODE=0` | Captures one full-field 2592 × 1944 image per press of the USER button (PC13), using the default mode-0 configuration. Particularly useful for controlled acquisition and dataset generation. |
+| **ToF detection only** | `CAPTURE_MODE=4`, `TEST_TOF_MODE=1` | Runs the ToF detection pipeline without normal image acquisition, allowing observation, calibration, and tuning of detection sensitivity, adaptive thresholds, and triggering behavior. |
 
-The [firmware guide](docs/firmware-guide.md#operating-modes) covers the remaining capture variants, task flow and configuration dependencies.
+Additional acquisition variants and configuration dependencies are described in the [Firmware and Operating Modes Guide](docs/firmware-guide.md#operating-modes).
 
-## Inspect captures on Windows
+## Image viewer
 
-From a Python environment on Windows, install the viewer dependencies and run it with administrator access for raw drive access.
+A dedicated Python-based image viewer is included to inspect and reconstruct the images stored on the microSD card.
+
+Since the embedded system writes images in a custom raw format, the viewer provides the tools required to locate stored captures, reconstruct their image data, inspect the results, and export them as PNG files.
+
+### Installation and execution
+
+From a Python environment on Windows, install the dependencies:
 
 ```powershell
 python -m pip install PySide6 numpy opencv-python
+```
+
+Run the application with administrator privileges to allow raw access to the SD card:
+
+```powershell
 python .\SD_Image_Viewer.py
 ```
 
-Select the physical microSD, **Refresh**, then **Scan Snapshots**. Inspect images at native scale and use **Download All** or **Extract Selected** to export PNGs. **Format SD** erases the captures found by the scan and resets where the firmware will write the next image. Confirm the selected physical disk before using it.
+### Basic workflow
+
+1. **Refresh:** Detect the available storage devices connected to the computer.
+2. **Scan Snapshots:** Search the selected device for images stored by the embedded system.
+3. **Inspect:** Browse the captured images, their resolutions, categories, timestamps, and filenames.
+4. **Download All / Extract Selected:** Reconstruct and export all images or a selected subset as PNG files.
+5. **Format SD:** Clear the capture storage and reset the internal write position and counters, allowing a new acquisition sequence to begin.
+
+**Warning:** The Format SD operation removes stored capture data. Export any images you want to preserve before using it.
 
 ## Documentation
 
+The following documents provide a more detailed explanation of the system architecture, acquisition algorithms, firmware configuration, and supporting tools.
+
 | Document | Scope |
 | --- | --- |
-| [System operation and performance](docs/how-it-works.md) | Detection and capture sequence, image selection, nominal settings and performance metrics. |
-| [Firmware and operating modes](docs/firmware-guide.md) | Firmware entry points, operating modes, configuration and bench validation. |
-| [ToF detection and spatial analysis](docs/tof-detection.md) | Zone baselines, spatial residuals, trigger paths and baseline updates. |
-| [Camera pipeline and extension guide](docs/MASSIF-Camera-Pipeline.md) | Image analysis, crop geometry, buffer reuse and the external detector interface. |
-| [SD storage and image reconstruction](docs/sd-storage-and-reconstruction.md) | Sector layout, persistent write position, viewer scanning and PNG export. |
-| [Optical analysis](docs/reference/optical-analysis.md) | Comparison of 6, 8 and 10 mm f/8 lenses. |
-| [Python image filter](docs/reference/python-image-filter.md) | Host-side image filtering experiment. [Spanish reference](docs/reference/python-image-filter-es.md). |
+| [System operation and performance](docs/how-it-works.md) | Detection and capture sequence, image selection, nominal settings, and performance metrics. |
+| [Firmware and operating modes](docs/firmware-guide.md) | Firmware entry points, operating modes, configuration parameters, and bench validation. |
+| [ToF detection and spatial analysis](docs/tof-detection.md) | Zone baselines, spatial residuals, trigger paths, and baseline updates. |
+| [Camera pipeline and extension guide](docs/MASSIF-Camera-Pipeline.md) | Image analysis, crop geometry, buffer reuse, and external detector interface. |
+| [SD storage and image reconstruction](docs/sd-storage-and-reconstruction.md) | Sector layout, persistent write position, viewer scanning, and PNG export. |
+| [Optical analysis for lens selection](docs/reference/optical-analysis.md) | Systematic comparison of 6, 8, and 10 mm f/8 lenses. |
+| [Python image filter for CV cropping](docs/reference/python-image-filter.md) | Host-side image filtering experiments and ROI analysis. |
 
-The [firmware project](x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main) contains `Src/`, `Inc/`, `Lib/` and the ST package. The repository root contains the [SD viewer](SD_Image_Viewer.py), the [ToF zone monitor](vl53l5cx_zone_monitor.py) and the [ToF datalogger](vl53l5cx_datalogger.py). The ToF tools read measurements printed over the serial port. Enable `VL53L5CX_DET_DEBUG_ZFRAME` in the firmware for live zone readings.
+### Repository organization
+
+The [firmware project](x-cube-n6-camera-capture-main/nucleo/x-cube-n6-camera-capture-main) contains the main embedded implementation, including the `Src/`, `Inc/`, and `Lib/` directories, along with the associated ST software package and development environment.
+
+The repository root also provides supporting Python tools:
+
+- [SD Image Viewer](SD_Image_Viewer.py): Image reconstruction, visualization, and export from the microSD card.
+- [ToF Zone Monitor](vl53l5cx_zone_monitor.py): Live visualization of multizone ToF measurements received over the serial interface.
+- [ToF Datalogger](vl53l5cx_datalogger.py): Recording and analysis of ToF measurements for debugging and calibration.
+
+For live zone readings, enable `VL53L5CX_DET_DEBUG_ZFRAME` in the firmware configuration.
 
 ## Engineering archive
 
-The archive documents earlier firmware designs, field settings and experiments. Measurements refer to the hardware and configuration used in each study.
+The engineering archive preserves earlier firmware architectures, experimental approaches, calibration procedures, and technical investigations carried out during development.
+
+These documents provide additional context on the design decisions and evolution of the system. Some describe earlier firmware configurations or hardware arrangements and should therefore be considered historical references rather than the current implementation.
 
 | Topic | Historical records |
 | --- | --- |
