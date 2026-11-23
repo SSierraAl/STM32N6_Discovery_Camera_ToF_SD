@@ -230,19 +230,24 @@
 #define CAM_SENSOR_REG_DEBUG  1
 #endif
 
-/** Manual exposure in microseconds. Mode 4 uses a 5 ms comparison, NOT a
-    recommended optimum. Shorter exposure reduces motion blur but collects
-    less light. Select it from measured motion and field of view.
-    CMW_CAMERA_GetExposure returns a cache, not physical register readback. */
+/** Manual exposure in microseconds, applied when CAM_EXPOSURE_MODE is 1.
+    11000 us = 11 ms. In overview/crop mode both saved images come from the
+    same native exposure. The overview is reduced only after acquisition.
+    Shorter integration reduces motion blur but collects less light.
+    CMW_CAMERA_GetExposure returns a cache. Check AFTER_FULL_STANDBY for
+    estimated integration from physical registers after capture. */
 #ifndef CAM_EXPOSURE_VALUE
-#define CAM_EXPOSURE_VALUE   11000 //10ms
+#define CAM_EXPOSURE_VALUE   11000
 #endif
 
 /** Manual sensor gain in millidecibels, quantized down in 300 mdB steps.
     6000 = 6 dB (approximately 2x signal); 12000 = 12 dB (~4x).
     8 rounds to 0 dB, NOT 8x. Range 0..72000; analog range ends at 30000.
-    Current user setting: 12000 mdB = 12 dB (register 40).
-    Shared across modes; brightness/noise require bench comparison. */
+    13000 mdB requests 13 dB and produces 12900 mdB (register 43).
+    In overview/crop mode this sensor gain applies to the shared native
+    exposure. Averaging pixels in the overview can make noise less visible.
+    Clean-build and flash after changes. Compiler -D overrides can replace
+    these guarded defaults. Verify requested and physical-register logs. */
 #ifndef CAM_GAIN_VALUE
 #define CAM_GAIN_VALUE       13000
 #endif

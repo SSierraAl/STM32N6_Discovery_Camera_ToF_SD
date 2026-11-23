@@ -12,6 +12,14 @@ import threading
 import queue
 import cv2
 import numpy as np
+from viewer_image_quality import apply_mild_contrast, quality_filename
+from viewer_chroma_denoise import apply_chroma_denoise
+from viewer_luma_denoise import (
+    apply_luma_denoise, log_noise_change, noise_configuration, noise_filename,
+)
+from viewer_color_profile import (
+    VIEWER_COLOR_WB_STRENGTH, apply_experimental_color, color_filename,
+)
 
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                                QHBoxLayout, QPushButton, QComboBox, QLabel, 
@@ -459,6 +467,52 @@ def apply_robust_white_balance(rgb_img, strength=0.5, stat_step=2):
     balanced = np.clip(img * gains, 0, 255)
     return balanced.astype(np.uint8)
 
+# Inverse of CAM_EnableYuv() in Src/app_cam.c, in [Y, U, V] order.
+# The peripheral's first matrix row produces V, its second Y, its third U.
+# Y has unity scale and zero offset; hardware clamps it to 16..235 but
+# does NOT apply the studio-range 219/255 scaling expected by OpenCV YUY2.
+# Keep this tied to the firmware matrix if that matrix changes in future.
+_CAMERA_YUV_TO_RGB = np.linalg.inv(np.array([
+    [55, 183, 18], [-30, -101, 131], [131, -119, -12],
+], dtype=np.float32) / 256.0).astype(np.float32)
+
+
+def decode_camera_yuyv(packed):
+    """Reconstruct RGB using this firmware's actual color matrix.
+
+    Args:
+        packed: uint8 array shaped (height, even_width, 2), with consecutive
+            bytes Y0,U,Y1,V. Input is read-only and may reference SD bytes.
+    Returns:
+        A new uint8 RGB array shaped (height, width, 3).
+    Raises:
+        ValueError: the array is not a supported packed YUYV image.
+
+    Both pixels in a pair share chroma. Clipped sensor/ISP values and lost
+    4:2:2 chroma cannot be recovered. No sharpening, denoising, gamma or
+    exposure correction is applied. Process short strips to bound temporary
+    memory for 5 MP images; this processing runs only on the PC.
+    """
+    if (packed.dtype != np.uint8 or packed.ndim != 3
+            or packed.shape[2] != 2 or packed.shape[1] % 2):
+        raise ValueError("Expected uint8 YUYV with an even width")
+    height, width = packed.shape[:2]
+    rgb = np.empty((height, width, 3), dtype=np.uint8)
+    for start in range(0, height, 128):
+        strip = packed[start:start + 128]
+        yuv = np.empty((strip.shape[0], width, 3), dtype=np.float32)
+        yuv[:, :, 0] = strip[:, :, 0]
+        yuv[:, 0::2, 1] = strip[:, 0::2, 1].astype(np.float32) - 128.0
+        yuv[:, 1::2, 1] = yuv[:, 0::2, 1]
+        yuv[:, 0::2, 2] = strip[:, 1::2, 1].astype(np.float32) - 128.0
+        yuv[:, 1::2, 2] = yuv[:, 0::2, 2]
+        decoded = cv2.transform(yuv, _CAMERA_YUV_TO_RGB)
+        np.rint(decoded, out=decoded)
+        np.clip(decoded, 0, 255, out=decoded)
+        rgb[start:start + strip.shape[0]] = decoded
+    return rgb
+
+
 def decode_image_data(img_data, width, height, pixel_format):
     """
     Convert raw YUV422 payload → QImage with robust white-balance.
@@ -476,12 +530,14 @@ def decode_image_data(img_data, width, height, pixel_format):
         arr = np.frombuffer(img_data, dtype=np.uint8, count=expected_bytes)
         arr = arr.reshape((height, width, 2))
 
-        # One conversion pass (YUV422 -> RGB) instead of YUV->BGR->RGB
-        rgb = cv2.cvtColor(arr, cv2.COLOR_YUV2RGB_YUY2)
+        # Match CAM_EnableYuv(), rather than assuming BT.601 studio range.
+        # Preview and extraction share this path, including existing SD data.
+        rgb = decode_camera_yuyv(arr)
 
-        # Smart white-balance instead of fixed multipliers
+        # Centralized profile configuration restores the normal WB after the
+        # earlier 0.0 diagnostic test. Tune it in viewer_color_profile.py.
         rgb = apply_robust_white_balance(
-            rgb, strength=VIEWER_WHITE_BALANCE_STRENGTH
+            rgb, strength=VIEWER_COLOR_WB_STRENGTH
         )
 
         h, w, ch = rgb.shape
@@ -490,6 +546,38 @@ def decode_image_data(img_data, width, height, pixel_format):
     except Exception:
         return None
 
+
+
+def presentation_image(qimage, enabled, color_trial=False, chroma_denoise=False):
+    """Return an optional contrast rendering without changing cached pixels.
+
+    Args:
+        qimage: Decoded original-resolution image; never mutated.
+        enabled: Apply the fixed mild contrast curve if true.
+        color_trial: Apply the opt-in experimental global RGB matrix first.
+        chroma_denoise: False/0 bypasses; True/1 smooths chroma;
+            2 also applies bounded luminance smoothing before the matrix.
+    Returns:
+        The input when disabled, otherwise an independent RGB888 QImage.
+        Row padding is respected, including small crop widths.
+    """
+    if not enabled and not color_trial and not chroma_denoise:
+        return qimage
+    image = qimage.convertToFormat(QImage.Format.Format_RGB888)
+    rows = np.frombuffer(image.constBits(), dtype=np.uint8,
+                         count=image.sizeInBytes()).reshape(image.height(), image.bytesPerLine())
+    rgb = rows[:, :image.width() * 3].reshape(image.height(), image.width(), 3)
+    adjusted = apply_chroma_denoise(rgb) if chroma_denoise else rgb
+    if chroma_denoise == 2:
+        adjusted = apply_luma_denoise(adjusted)
+    if chroma_denoise:
+        log_noise_change(rgb, adjusted, chroma_denoise)
+    if color_trial:
+        adjusted = apply_experimental_color(adjusted)
+    if enabled:
+        adjusted = apply_mild_contrast(adjusted)
+    return QImage(adjusted.data, image.width(), image.height(),
+                  image.width() * 3, QImage.Format.Format_RGB888).copy()
 
 
 class Snapshot:
@@ -724,11 +812,16 @@ class ExtractThread(QThread):
     finished_ok = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, drive, snapshots, out_dir):
+    def __init__(self, drive, snapshots, out_dir, contrast=False, color_trial=False, chroma_denoise=False):
         super().__init__()
         self.drive = drive
         self.snapshots = snapshots
         self.out_dir = out_dir
+        # Capture the selected appearance before starting the worker so the
+        # entire batch stays consistent even if the GUI setting changes.
+        self.contrast = contrast
+        self.color_trial = color_trial
+        self.chroma_denoise = chroma_denoise
         self._cancel = False
 
     def cancel(self):
@@ -763,7 +856,11 @@ class ExtractThread(QThread):
                     self.failed.emit(f"Cannot decode #{snap.idx+1:03d} (pixel format {h['pixel_format']}).")
                     return
 
-                path = os.path.join(self.out_dir, image_filename(h, snap.idx))
+                qimg = presentation_image(qimg, self.contrast, self.color_trial, self.chroma_denoise)
+                filename = quality_filename(image_filename(h, snap.idx), self.contrast)
+                filename = color_filename(filename, self.color_trial)
+                filename = noise_filename(filename, self.chroma_denoise)
+                path = os.path.join(self.out_dir, filename)
                 if not qimg.save(path):
                     self.failed.emit(f"Failed to save:\n{path}")
                     return
@@ -1258,6 +1355,54 @@ class SDVisualizer(QMainWindow):
         controls = QFrame()
         controls.setObjectName("ControlsFrame")
         ctrl_layout = QVBoxLayout(controls)
+
+        appearance = QHBoxLayout()
+        appearance.addWidget(QLabel("Appearance"))
+        self.contrast_combo = QComboBox()
+        self.contrast_combo.addItem("Original contrast", False)
+        self.contrast_combo.addItem("Mild contrast", True)
+        self.contrast_combo.setCurrentIndex(0)
+        self.contrast_combo.setToolTip(
+            "Applies to preview and PNG exports. SD data remains unchanged. "
+            "Enhanced filenames end in _contrast. No artificial sharpening.")
+        self.contrast_combo.currentIndexChanged.connect(self._refresh_appearance)
+        appearance.addWidget(self.contrast_combo)
+        appearance.addStretch()
+        ctrl_layout.addLayout(appearance)
+
+        color_row = QHBoxLayout()
+        color_row.addWidget(QLabel("Color profile"))
+        self.color_combo = QComboBox()
+        self.color_combo.addItem("Current color (white balance restored)", False)
+        self.color_combo.addItem("Experimental color - compare all colors", True)
+        self.color_combo.setCurrentIndex(1)
+        self.color_combo.setToolTip(
+            "Optional global color matrix. May shift greens/blues or clip saturated "
+            "channels. Not a calibrated profile. Exports end in _color_trial.")
+        self.color_combo.currentIndexChanged.connect(self._refresh_appearance)
+        color_row.addWidget(self.color_combo)
+        color_row.addStretch()
+        ctrl_layout.addLayout(color_row)
+
+        noise_row = QHBoxLayout()
+        noise_row.addWidget(QLabel("Noise reduction"))
+        self.noise_combo = QComboBox()
+        self.noise_combo.addItem("Off - retain original grain", False)
+        self.noise_combo.addItem("Mild chroma reduction", True)
+        self.noise_combo.addItem("Color + luminance grain reduction", 2)
+        self.noise_combo.setCurrentIndex(2)
+        self.noise_combo.setToolTip(
+            "Color-only retains brightness grain. Color + luminance also smooths "
+            "small brightness changes. Fine texture can soften; compare with Off.")
+        self.noise_combo.currentIndexChanged.connect(self._refresh_appearance)
+        self.noise_combo.currentIndexChanged.connect(self._refresh_noise_info)
+        noise_row.addWidget(self.noise_combo)
+        noise_row.addStretch()
+        ctrl_layout.addLayout(noise_row)
+        self.noise_info_label = QLabel(noise_configuration(self.noise_combo.currentData()))
+        self.noise_info_label.setWordWrap(True)
+        self.noise_info_label.setTextFormat(Qt.TextFormat.PlainText)
+        ctrl_layout.addWidget(self.noise_info_label)
         
         scale_lbl = QLabel("<b>Image Scale</b>")
         ctrl_layout.addWidget(scale_lbl)
@@ -1284,7 +1429,8 @@ class SDVisualizer(QMainWindow):
         ctrl_layout.addLayout(scale_opts_layout)
 
         save_layout = QHBoxLayout()
-        btn_save_orig = QPushButton("💾 Save Original")
+        btn_save_orig = QPushButton("💾 Save at Original Resolution")
+        btn_save_orig.setToolTip("Preserve pixel dimensions and use the selected Appearance.")
         btn_save_orig.setObjectName("SuccessButton")
         btn_save_orig.clicked.connect(lambda: self.save_image(scale_mode="original"))
         save_layout.addWidget(btn_save_orig)
@@ -1465,7 +1611,9 @@ class SDVisualizer(QMainWindow):
         self.image_name_label.setText(image_filename(self.current_snap.header, self.current_snap.idx, "original"))
 
         if self.current_snap.qimage:
-            self.viewer.set_image(self.current_snap.qimage)
+            self.viewer.set_image(presentation_image(
+                self.current_snap.qimage, self.contrast_combo.currentData(),
+                self.color_combo.currentData(), self.noise_combo.currentData()))
             self.scale_group.button(0).setChecked(True)
             self.statusBar().showMessage("Loaded from cache.")
             return
@@ -1487,7 +1635,8 @@ class SDVisualizer(QMainWindow):
         if seq != self._load_seq or self.current_snap is not snap:
             return
         snap.qimage = qimg
-        self.viewer.set_image(qimg)
+        self.viewer.set_image(presentation_image(qimg, self.contrast_combo.currentData(),
+                                                 self.color_combo.currentData(), self.noise_combo.currentData()))
 
         # Reset scale radio buttons to "Fit"
         self.scale_group.button(0).setChecked(True)
@@ -1498,6 +1647,29 @@ class SDVisualizer(QMainWindow):
         if seq != self._load_seq or self.current_snap is not snap:
             return
         self.statusBar().showMessage(f"Error: {msg}")
+
+    def _refresh_noise_info(self, _index):
+        """Expose loaded settings independently of whether an image is open."""
+        self.noise_info_label.setText(noise_configuration(self.noise_combo.currentData()))
+
+    def _refresh_appearance(self, _index):
+        """Re-render the cached original when the appearance choice changes.
+
+        The cache stays unmodified, so toggling never accumulates processing.
+        Preserve the current zoom and scroll position for an A/B comparison.
+        """
+        if self.current_snap is None or self.current_snap.qimage is None:
+            return
+        transform = self.viewer.transform()
+        hbar, vbar = self.viewer.horizontalScrollBar(), self.viewer.verticalScrollBar()
+        hpos, vpos = hbar.value(), vbar.value()
+        self.viewer.set_image(presentation_image(
+            self.current_snap.qimage, self.contrast_combo.currentData(),
+            self.color_combo.currentData(), self.noise_combo.currentData()))
+        self.viewer.setTransform(transform)
+        self.viewer._update_scale()
+        hbar.setValue(hpos)
+        vbar.setValue(vpos)
 
     def save_image(self, scale_mode="original"):
         if not self.current_snap or not self.current_snap.qimage:
@@ -1510,9 +1682,15 @@ class SDVisualizer(QMainWindow):
 
         try:
             filename = image_filename(self.current_snap.header, self.current_snap.idx, scale_mode)
+            contrast = self.contrast_combo.currentData()
+            filename = quality_filename(filename, contrast)
+            color_trial = self.color_combo.currentData()
+            filename = color_filename(filename, color_trial)
+            chroma_denoise = self.noise_combo.currentData()
+            filename = noise_filename(filename, chroma_denoise)
             path = os.path.join(out_dir, filename)
             
-            img_to_save = self.current_snap.qimage
+            img_to_save = presentation_image(self.current_snap.qimage, contrast, color_trial, chroma_denoise)
 
             if scale_mode == "scaled":
                 # Create a QImage of the scaled, visible area (or scaled entire image)
@@ -1523,9 +1701,8 @@ class SDVisualizer(QMainWindow):
                 # Smooth scaling directly through QImage
                 img_to_save = img_to_save.scaled(new_w, new_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
                 
-                # Apply sharpening if scale > 1.1 using basic convolution
-                if scale > 1.1:
-                    img_to_save = self._apply_sharpening(img_to_save)
+                # Export the resized image directly so the saved appearance
+                # reflects resampling without an additional sharpening filter.
 
             if img_to_save.save(path):
                 dialog(self, "info", "Success", f"Saved to:\n{path}")
@@ -1533,24 +1710,6 @@ class SDVisualizer(QMainWindow):
                 dialog(self, "critical", "Error", "Failed to save image.")
         except Exception as e:
             dialog(self, "critical", "Error", str(e))
-
-    def _apply_sharpening(self, qimage):
-        """Applies a lightweight sharpening kernel to emulate ImageEnhance.Sharpness"""
-        # Convert QImage to CV2
-        img_format = qimage.format()
-        qimage = qimage.convertToFormat(QImage.Format.Format_RGB888)
-        ptr = qimage.constBits()
-        arr = np.array(ptr).reshape(qimage.height(), qimage.width(), 3)
-        
-        # Define unsharp mask kernel
-        kernel = np.array([[0, -0.5, 0], 
-                           [-0.5, 3, -0.5], 
-                           [0, -0.5, 0]])
-        sharpened = cv2.filter2D(arr, -1, kernel)
-        
-        # Convert back
-        h, w, ch = sharpened.shape
-        return QImage(sharpened.data, w, h, ch * w, QImage.Format_RGB888).copy()
 
     def extract_selected(self):
         rows = self.listbox.selectedItems()
@@ -1566,7 +1725,10 @@ class SDVisualizer(QMainWindow):
         if not out_dir:
             return
 
-        self.extract_thread = ExtractThread(self.drive, snaps, out_dir)
+        self.extract_thread = ExtractThread(self.drive, snaps, out_dir,
+                                            contrast=self.contrast_combo.currentData(),
+                                            color_trial=self.color_combo.currentData(),
+                                            chroma_denoise=self.noise_combo.currentData())
         self.extract_thread.progress.connect(lambda m: self.statusBar().showMessage(m))
         self.extract_thread.finished_ok.connect(self._on_extract_ok)
         self.extract_thread.failed.connect(self._on_extract_failed)
