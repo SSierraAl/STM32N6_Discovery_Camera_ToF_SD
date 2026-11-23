@@ -30,7 +30,7 @@ In the default mode and the fixed-window batch, the camera waits for each SD wri
 
 ## Operating modes
 
-### On-demand capture
+### 1. On-demand capture
 
 Build with `CAPTURE_MODE=0` and `TEST_TOF_MODE=0`. The default `CAM_BINNING=0` selects the full 2592 × 1944 output, with `SNAP_WARMUP_FRAMES=8`. Green indicates ready. A debounced USER press on PC13 starts the ring and `btn_thread_fct()` calls `CAM_CaptureSingleFrame()` directly.
 
@@ -39,13 +39,13 @@ Build with `CAPTURE_MODE=0` and `TEST_TOF_MODE=0`. The default `CAM_BINNING=0` s
 3. Turn the ring off, take an RTC stamp, reinitialize the SD interface and write through the button task's raw writer. A failed write gets one recovery attempt if reinitialization succeeds.
 4. Restore the ready indication and wait for button release. One press yields at most one record. ToF, optical localization and the asynchronous save queue are outside this path.
 
-### Mode 4 with overview and dynamic crop
+### 2. Batch mode with overview and dynamic crop (Mode 4)
 
-The checked-in settings resolve to `CAM_OVERVIEW_CROP=1` and `CAM_NATIVE_ROI=0`. `CAM_CallbackInit()` initializes the full-field camera at boot and leaves it in standby. Each accepted ToF event wakes the camera, uses five full-field warmup frames and retains **one** 2592 × 1944 YUYV snapshot. `CAM_CaptureFullFrame()` uses continuous mode for warmup, then captures the retained frame in snapshot mode to prevent the next frame from overwriting it. After acquisition the sensor returns to standby and the ring goes off.
+The checked-in settings resolve to `CAM_OVERVIEW_CROP=1` and `CAM_NATIVE_ROI=0`. `CAM_CallbackInit()` initializes the full-field camera at boot and leaves it in standby. Each accepted ToF event wakes the camera, uses five full-field warmup frames and retains one 2592 × 1944 YUYV snapshot. `CAM_CaptureFullFrame()` uses continuous mode for warmup, then captures the retained frame in snapshot mode to prevent the next frame from overwriting it. After acquisition the sensor returns to standby and the ring goes off.
 
 `CAM_LocalizeFrame()` estimates where the object lies. `SelectPhoto()` decides which records to write. With `CAM_FIRST_IMAGE_DIVISOR=2`, the saved overview is 1296 × 972. The native crop is read from the original 5 MP source, with the same RTC/tick metadata as its overview. Its pixels remain at acquisition scale. The number of saved records is independent of `CALLBACK_FRAMES`.
 
-| Optical result | Records |
+| Camera/Image result | Records |
 | --- | --- |
 | Reference initialization, confirmed blank, or duplicate position | None |
 | Uncertain object or fragmented change | `overview_uncertain` |
@@ -53,9 +53,9 @@ The checked-in settings resolve to `CAM_OVERVIEW_CROP=1` and `CAM_NATIVE_ROI=0`.
 | Single object with oversized crop | `full_large` + `overview_large` |
 | Multiple accepted components | `full_multi` + `overview_multi` |
 
-### Mode 4 callback batch (snap batch)
+### Mode callback batch
 
-Set `CAM_OVERVIEW_CROP=0` with `CAPTURE_MODE=4`. The derived `CAM_NATIVE_ROI=1` selects the fixed **DCMIPP window** at `(976,584)` with size `640 × 768`. It limits the delivered pixels at native scale. The sensor still reads its full field. This mode stores separate exposures from the same fixed window on each accepted ToF event.
+Set `CAM_OVERVIEW_CROP=0` with `CAPTURE_MODE=4`. The derived `CAM_NATIVE_ROI=1` selects the fixed DCMIPP window at `(976,584)` with size `640 × 768`. It limits the delivered pixels at native scale. The sensor still reads its full field. This mode stores separate exposures from the same fixed window on each accepted ToF event.
 
 ```mermaid
 sequenceDiagram
@@ -63,7 +63,7 @@ sequenceDiagram
     participant Cam as Camera task
     participant DMA as DCMIPP
     participant SD as Storage task
-    ToF->>Cam: Start lit capture
+    ToF->>Cam: ToF object detection
     Cam->>DMA: Start Pipe 1
     loop Warmup and retained frames
         DMA-->>Cam: Frame complete

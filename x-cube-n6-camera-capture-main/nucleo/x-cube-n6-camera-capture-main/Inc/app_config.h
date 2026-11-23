@@ -235,7 +235,7 @@
     less light. Select it from measured motion and field of view.
     CMW_CAMERA_GetExposure returns a cache, not physical register readback. */
 #ifndef CAM_EXPOSURE_VALUE
-#define CAM_EXPOSURE_VALUE   13000 //10ms
+#define CAM_EXPOSURE_VALUE   11000 //10ms
 #endif
 
 /** Manual sensor gain in millidecibels, quantized down in 300 mdB steps.
@@ -244,7 +244,7 @@
     Current user setting: 12000 mdB = 12 dB (register 40).
     Shared across modes; brightness/noise require bench comparison. */
 #ifndef CAM_GAIN_VALUE
-#define CAM_GAIN_VALUE       12000
+#define CAM_GAIN_VALUE       13000
 #endif
 
 
