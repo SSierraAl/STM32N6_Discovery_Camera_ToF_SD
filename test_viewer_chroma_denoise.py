@@ -13,7 +13,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 import _sd_image_viewer_core as viewer
-from test_viewer_image_quality import pixels
+from test_viewer_image_quality import pixels, close_test_window
 from viewer_chroma_denoise import apply_chroma_denoise, denoise_filename
 
 
@@ -82,8 +82,9 @@ class ChromaDenoiseTests(unittest.TestCase):
             window=viewer.SDVisualizer()
         try:
             self.assertFalse(window.contrast_combo.currentData())
-            self.assertTrue(window.color_combo.currentData())
-            self.assertTrue(window.noise_combo.currentData())
+            self.assertFalse(hasattr(window, "color_combo"))
+            self.assertFalse(window.noise_combo.currentData())
+            self.assertEqual(window.noise_combo.count(), 2)
             rng=np.random.default_rng(11)
             rgb=rng.integers(100,180,(257,6,3),dtype=np.uint8)
             image=QImage(rgb.data,6,257,18,QImage.Format.Format_RGB888).copy()
@@ -99,15 +100,16 @@ class ChromaDenoiseTests(unittest.TestCase):
                     for denoise in (False,True,False):
                         window.noise_combo.setCurrentIndex(int(denoise))
                         self.assertAlmostEqual(window.viewer.current_scale,1.0)
-                        window.save_image("original")
-                        name=denoise_filename("single_color_trial.png",denoise)
+                        window.save_image()
+                        mode = 2 if denoise else False
+                        name=viewer.noise_filename("single_color_trial.png",mode)
                         saved=QImage(str(Path(directory)/name))
                         self.assertEqual((saved.width(),saved.height()),(6,257))
                         np.testing.assert_array_equal(pixels(saved),pixels(viewer.presentation_image(
-                            image,False,True,denoise)))
+                            image,False,True,mode)))
             np.testing.assert_array_equal(pixels(image),rgb)
         finally:
-            window.close()
+            close_test_window(window)
 
 
 if __name__ == "__main__": unittest.main()

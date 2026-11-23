@@ -15,7 +15,7 @@ import numpy as np
 from viewer_image_quality import apply_mild_contrast, quality_filename
 from viewer_chroma_denoise import apply_chroma_denoise
 from viewer_luma_denoise import (
-    apply_luma_denoise, log_noise_change, noise_configuration, noise_filename,
+    apply_luma_denoise, log_noise_change, noise_filename,
 )
 from viewer_color_profile import (
     VIEWER_COLOR_WB_STRENGTH, apply_experimental_color, color_filename,
@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QComboBox, QLabel, 
                                QListWidget, QGraphicsView, QGraphicsScene, 
                                QGraphicsPixmapItem, QMessageBox, QSplitter, 
-                               QFileDialog, QInputDialog, QRadioButton, QButtonGroup, QFrame)
+                               QFileDialog, QInputDialog, QFrame)
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QRectF
 from PySide6.QtGui import QImage, QPixmap, QPainter, QAction, QIcon, QPalette, QColor
 
@@ -1370,75 +1370,26 @@ class SDVisualizer(QMainWindow):
         appearance.addStretch()
         ctrl_layout.addLayout(appearance)
 
-        color_row = QHBoxLayout()
-        color_row.addWidget(QLabel("Color profile"))
-        self.color_combo = QComboBox()
-        self.color_combo.addItem("Current color (white balance restored)", False)
-        self.color_combo.addItem("Experimental color - compare all colors", True)
-        self.color_combo.setCurrentIndex(1)
-        self.color_combo.setToolTip(
-            "Optional global color matrix. May shift greens/blues or clip saturated "
-            "channels. Not a calibrated profile. Exports end in _color_trial.")
-        self.color_combo.currentIndexChanged.connect(self._refresh_appearance)
-        color_row.addWidget(self.color_combo)
-        color_row.addStretch()
-        ctrl_layout.addLayout(color_row)
-
         noise_row = QHBoxLayout()
         noise_row.addWidget(QLabel("Noise reduction"))
         self.noise_combo = QComboBox()
-        self.noise_combo.addItem("Off - retain original grain", False)
-        self.noise_combo.addItem("Mild chroma reduction", True)
+        self.noise_combo.addItem("Off", False)
         self.noise_combo.addItem("Color + luminance grain reduction", 2)
-        self.noise_combo.setCurrentIndex(2)
+        self.noise_combo.setCurrentIndex(0)
         self.noise_combo.setToolTip(
-            "Color-only retains brightness grain. Color + luminance also smooths "
-            "small brightness changes. Fine texture can soften; compare with Off.")
+            "Reduces color and brightness grain. Fine texture can soften; compare with Off.")
         self.noise_combo.currentIndexChanged.connect(self._refresh_appearance)
-        self.noise_combo.currentIndexChanged.connect(self._refresh_noise_info)
         noise_row.addWidget(self.noise_combo)
         noise_row.addStretch()
         ctrl_layout.addLayout(noise_row)
-        self.noise_info_label = QLabel(noise_configuration(self.noise_combo.currentData()))
-        self.noise_info_label.setWordWrap(True)
-        self.noise_info_label.setTextFormat(Qt.TextFormat.PlainText)
-        ctrl_layout.addWidget(self.noise_info_label)
-        
-        scale_lbl = QLabel("<b>Image Scale</b>")
-        ctrl_layout.addWidget(scale_lbl)
-
-        scale_opts_layout = QHBoxLayout()
-        self.scale_group = QButtonGroup(self)
-        
-        scales = [("Fit to Window", 0), ("0.25", 0.25), ("0.5", 0.5), 
-                  ("0.75", 0.75), ("100% (native)", 1.0), ("1.5", 1.5), ("2.0", 2.0)]
-        
-        for i, (text, val) in enumerate(scales):
-            rb = QRadioButton(text)
-            if i == 0: rb.setChecked(True)
-            self.scale_group.addButton(rb, i)
-            scale_opts_layout.addWidget(rb)
-            
-            # Use lambda to capture the value
-            if val == 0:
-                rb.clicked.connect(self.viewer.fit_to_window)
-            else:
-                rb.clicked.connect(lambda checked, v=val: self.viewer.set_explicit_scale(v))
-                
-        scale_opts_layout.addStretch()
-        ctrl_layout.addLayout(scale_opts_layout)
 
         save_layout = QHBoxLayout()
         btn_save_orig = QPushButton("💾 Save at Original Resolution")
         btn_save_orig.setToolTip("Preserve pixel dimensions and use the selected Appearance.")
         btn_save_orig.setObjectName("SuccessButton")
-        btn_save_orig.clicked.connect(lambda: self.save_image(scale_mode="original"))
+        btn_save_orig.clicked.connect(lambda: self.save_image())
         save_layout.addWidget(btn_save_orig)
 
-        btn_save_scaled = QPushButton("💾 Save at Current Scale")
-        btn_save_scaled.clicked.connect(lambda: self.save_image(scale_mode="scaled"))
-        save_layout.addWidget(btn_save_scaled)
-        
         save_layout.addStretch()
         ctrl_layout.addLayout(save_layout)
 
@@ -1613,8 +1564,7 @@ class SDVisualizer(QMainWindow):
         if self.current_snap.qimage:
             self.viewer.set_image(presentation_image(
                 self.current_snap.qimage, self.contrast_combo.currentData(),
-                self.color_combo.currentData(), self.noise_combo.currentData()))
-            self.scale_group.button(0).setChecked(True)
+                True, self.noise_combo.currentData()))
             self.statusBar().showMessage("Loaded from cache.")
             return
 
@@ -1636,10 +1586,7 @@ class SDVisualizer(QMainWindow):
             return
         snap.qimage = qimg
         self.viewer.set_image(presentation_image(qimg, self.contrast_combo.currentData(),
-                                                 self.color_combo.currentData(), self.noise_combo.currentData()))
-
-        # Reset scale radio buttons to "Fit"
-        self.scale_group.button(0).setChecked(True)
+                                                 True, self.noise_combo.currentData()))
         self.statusBar().showMessage("Image loaded.")
 
     @Slot(object, int, str)
@@ -1647,10 +1594,6 @@ class SDVisualizer(QMainWindow):
         if seq != self._load_seq or self.current_snap is not snap:
             return
         self.statusBar().showMessage(f"Error: {msg}")
-
-    def _refresh_noise_info(self, _index):
-        """Expose loaded settings independently of whether an image is open."""
-        self.noise_info_label.setText(noise_configuration(self.noise_combo.currentData()))
 
     def _refresh_appearance(self, _index):
         """Re-render the cached original when the appearance choice changes.
@@ -1665,13 +1608,14 @@ class SDVisualizer(QMainWindow):
         hpos, vpos = hbar.value(), vbar.value()
         self.viewer.set_image(presentation_image(
             self.current_snap.qimage, self.contrast_combo.currentData(),
-            self.color_combo.currentData(), self.noise_combo.currentData()))
+            True, self.noise_combo.currentData()))
         self.viewer.setTransform(transform)
         self.viewer._update_scale()
         hbar.setValue(hpos)
         vbar.setValue(vpos)
 
-    def save_image(self, scale_mode="original"):
+    def save_image(self):
+        """Export the fixed color profile at source resolution, independent of zoom."""
         if not self.current_snap or not self.current_snap.qimage:
             QMessageBox.warning(self, "Warning", "Select an image first.")
             return
@@ -1681,28 +1625,18 @@ class SDVisualizer(QMainWindow):
         if not out_dir: return
 
         try:
-            filename = image_filename(self.current_snap.header, self.current_snap.idx, scale_mode)
+            filename = image_filename(self.current_snap.header, self.current_snap.idx, "original")
             contrast = self.contrast_combo.currentData()
             filename = quality_filename(filename, contrast)
-            color_trial = self.color_combo.currentData()
+            # The accepted experimental profile is now fixed for preview and
+            # all exports; its numeric settings remain in viewer_color_profile.py.
+            color_trial = True
             filename = color_filename(filename, color_trial)
             chroma_denoise = self.noise_combo.currentData()
             filename = noise_filename(filename, chroma_denoise)
             path = os.path.join(out_dir, filename)
             
             img_to_save = presentation_image(self.current_snap.qimage, contrast, color_trial, chroma_denoise)
-
-            if scale_mode == "scaled":
-                # Create a QImage of the scaled, visible area (or scaled entire image)
-                scale = self.viewer.current_scale
-                new_w = int(img_to_save.width() * scale)
-                new_h = int(img_to_save.height() * scale)
-                
-                # Smooth scaling directly through QImage
-                img_to_save = img_to_save.scaled(new_w, new_h, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-                
-                # Export the resized image directly so the saved appearance
-                # reflects resampling without an additional sharpening filter.
 
             if img_to_save.save(path):
                 dialog(self, "info", "Success", f"Saved to:\n{path}")
@@ -1727,7 +1661,7 @@ class SDVisualizer(QMainWindow):
 
         self.extract_thread = ExtractThread(self.drive, snaps, out_dir,
                                             contrast=self.contrast_combo.currentData(),
-                                            color_trial=self.color_combo.currentData(),
+                                            color_trial=True,
                                             chroma_denoise=self.noise_combo.currentData())
         self.extract_thread.progress.connect(lambda m: self.statusBar().showMessage(m))
         self.extract_thread.finished_ok.connect(self._on_extract_ok)

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import QApplication
 import _sd_image_viewer_core as viewer
 import viewer_chroma_denoise as chroma
 import viewer_luma_denoise as luma
-from test_viewer_image_quality import pixels
+from test_viewer_image_quality import pixels, close_test_window
 
 
 class LumaTests(unittest.TestCase):
@@ -30,7 +30,8 @@ class LumaTests(unittest.TestCase):
         values=np.clip(150+rng.normal(0,4,(257,61)),0,255).astype(np.uint8)
         image=np.repeat(values[:,:,None],3,axis=2)
         original=image.copy()
-        filtered=luma.apply_luma_denoise(image)
+        # Test a defined strength independently of the user's preferred default.
+        filtered=luma.apply_luma_denoise(image, amount=0.55)
         self.assertLess(filtered[:,:,0].std(),image[:,:,0].std()*.85)
         np.testing.assert_array_equal(filtered[:,:,0],filtered[:,:,1])
         np.testing.assert_array_equal(filtered[:,:,0],filtered[:,:,2])
@@ -93,8 +94,9 @@ class LumaTests(unittest.TestCase):
             with patch.object(viewer.SDVisualizer,"request_drive_list"):
                 window=viewer.SDVisualizer()
             try:
-                self.assertEqual(window.noise_combo.currentData(),2)
-                self.assertIn("Luma:",window.noise_info_label.text())
+                self.assertFalse(window.noise_combo.currentData())
+                self.assertEqual(window.noise_combo.count(), 2)
+                self.assertFalse(hasattr(window, "noise_info_label"))
                 # Full-size export through the real save method must retain 5 MP.
                 full=QImage(2592,1944,QImage.Format.Format_RGB888)
                 full.fill(0xFF969696)
@@ -103,16 +105,16 @@ class LumaTests(unittest.TestCase):
                 window.viewer.set_image(full)
                 window.viewer.set_explicit_scale(1.0)
                 window.noise_combo.setCurrentIndex(0)
-                self.assertEqual(window.noise_info_label.text(),"NR Off")
-                window.noise_combo.setCurrentIndex(2)
+                window.noise_combo.setCurrentIndex(1)
+                self.assertEqual(window.noise_combo.currentData(), 2)
                 self.assertAlmostEqual(window.viewer.current_scale,1.0)
                 with patch.object(viewer.QFileDialog,"getExistingDirectory",return_value=directory), \
                         patch.object(viewer,"image_filename",return_value="full.png"),patch.object(viewer,"dialog"):
-                    window.save_image("original")
+                    window.save_image()
                 saved=QImage(str(Path(directory)/"full_color_trial_color_luma_nr.png"))
                 self.assertEqual((saved.width(),saved.height()),(2592,1944))
             finally:
-                window.close()
+                close_test_window(window)
 
 
 if __name__ == "__main__": unittest.main()

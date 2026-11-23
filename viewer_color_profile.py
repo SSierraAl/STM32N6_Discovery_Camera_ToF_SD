@@ -13,7 +13,9 @@ VIEWER_COLOR_WB_STRENGTH = 1.0
 # Dimensionless coefficient k in G'=G+k(G-B), B'=B-k(G-B), R'=R.
 # This expands green-blue separation globally. Every row sums to one, so
 # neutral grays stay neutral. It is NOT a selective orange-to-yellow recolor.
-# k=0 disables the effect. Keep this opt-in until other colors are validated.
+# k=0 disables the effect. The accepted 0.40 setting is now fixed in the
+# desktop pipeline; there is no color selector. It remains a visual tuning
+# profile rather than a colorimetric calibration.
 VIEWER_EXPERIMENTAL_CHROMA_STRENGTH = 0.40
 
 

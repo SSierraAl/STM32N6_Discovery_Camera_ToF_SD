@@ -13,6 +13,7 @@ from unittest.mock import patch
 
 import numpy as np
 from PySide6.QtGui import QImage
+from PySide6.QtCore import QCoreApplication, QEvent
 from PySide6.QtWidgets import QApplication
 
 import _sd_image_viewer_core as viewer
@@ -25,6 +26,13 @@ def pixels(image):
     rows = np.frombuffer(image.constBits(), dtype=np.uint8).reshape(
         image.height(), image.bytesPerLine())
     return rows[:, :image.width() * 3].reshape(image.height(), image.width(), 3).copy()
+
+
+def close_test_window(window):
+    """Destroy GUI resources before QApplication teardown in headless tests."""
+    window.close()
+    window.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
 
 class QualityTests(unittest.TestCase):
@@ -61,7 +69,6 @@ class QualityTests(unittest.TestCase):
         with patch.object(viewer.SDVisualizer, "request_drive_list"):
             window = viewer.SDVisualizer()
         window.contrast_combo.setCurrentIndex(1)
-        window.color_combo.setCurrentIndex(0)
         window.noise_combo.setCurrentIndex(0)
         try:
             image = QImage(2592, 1944, QImage.Format.Format_RGB888)
@@ -75,17 +82,17 @@ class QualityTests(unittest.TestCase):
                 with patch.object(viewer.QFileDialog, "getExistingDirectory", return_value=directory), \
                         patch.object(viewer, "image_filename", return_value="test.png"), \
                         patch.object(viewer, "dialog"):
-                    for index, filename in ((1, "test_contrast.png"), (0, "test.png")):
+                    for index, filename in ((1, "test_contrast_color_trial.png"), (0, "test_color_trial.png")):
                         window.contrast_combo.setCurrentIndex(index)
                         self.assertAlmostEqual(window.viewer.current_scale, 1.0)
-                        window.save_image("original")
+                        window.save_image()
                         loaded = QImage(str(Path(directory) / filename))
                         self.assertEqual((loaded.width(), loaded.height()), (2592, 1944))
-                        expected = viewer.presentation_image(image, bool(index))
+                        expected = viewer.presentation_image(image, bool(index), True)
                         np.testing.assert_array_equal(pixels(loaded), pixels(expected))
             np.testing.assert_array_equal(pixels(image)[0, 0], [85, 85, 85])
         finally:
-            window.close()
+            close_test_window(window)
 
     def test_batch_export_matches_preview_and_names(self):
         image = QImage(6, 3, QImage.Format.Format_RGB888)

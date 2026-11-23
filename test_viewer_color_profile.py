@@ -13,7 +13,7 @@ from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
 import _sd_image_viewer_core as viewer
-from test_viewer_image_quality import pixels
+from test_viewer_image_quality import pixels, close_test_window
 from viewer_color_profile import apply_experimental_color, color_filename
 
 
@@ -47,11 +47,12 @@ class ColorTests(unittest.TestCase):
             self.assertIsNotNone(result)
             self.assertEqual(wb.call_args.kwargs["strength"], 1.0)
 
-    def test_opt_in_toggle_and_individual_export(self):
+    def test_fixed_color_contrast_toggle_and_individual_export(self):
         with patch.object(viewer.SDVisualizer, "request_drive_list"):
             window = viewer.SDVisualizer()
         try:
-            self.assertTrue(window.color_combo.currentData())
+            self.assertFalse(hasattr(window, "color_combo"))
+            self.assertFalse(hasattr(window, "scale_group"))
             self.assertFalse(window.contrast_combo.currentData())
             window.contrast_combo.setCurrentIndex(1)
             window.noise_combo.setCurrentIndex(0)
@@ -66,18 +67,27 @@ class ColorTests(unittest.TestCase):
                 with patch.object(viewer.QFileDialog, "getExistingDirectory", return_value=directory), \
                         patch.object(viewer, "image_filename", return_value="sample.png"), \
                         patch.object(viewer, "dialog"):
-                    for enabled in (True, False):
-                        window.color_combo.setCurrentIndex(int(enabled))
+                    # Cached and freshly loaded paths must use the fixed color
+                    # profile without referencing removed widgets.
+                    window.snapshots = [snap]
+                    window.on_select(0)
+                    window._on_image_ready(image, snap, window._load_seq)
+                    window.viewer.set_explicit_scale(1.0)
+                    for contrast in (True, False):
+                        window.contrast_combo.setCurrentIndex(int(contrast))
                         self.assertAlmostEqual(window.viewer.current_scale, 1.0)
-                        window.save_image("original")
-                        name = color_filename("sample_contrast.png", enabled)
+                        if not contrast:
+                            # Screen zoom must never change exported dimensions.
+                            window.viewer.set_explicit_scale(0.5)
+                        window.save_image()
+                        name = color_filename(viewer.quality_filename("sample.png", contrast), True)
                         saved = QImage(str(Path(directory)/name))
                         self.assertEqual((saved.width(), saved.height()), (2592,1944))
-                        expected = viewer.presentation_image(image, True, enabled)
+                        expected = viewer.presentation_image(image, contrast, True)
                         np.testing.assert_array_equal(pixels(saved), pixels(expected))
             np.testing.assert_array_equal(pixels(image)[0,0], [140,87,42])
         finally:
-            window.close()
+            close_test_window(window)
 
     def test_all_batch_profiles_match_preview(self):
         image = QImage(6, 3, QImage.Format.Format_RGB888)

@@ -6,7 +6,7 @@ import viewer_chroma_denoise as chroma
 
 # Mix in [0,1]; 0 bypasses luminance filtering. Start conservatively because
 # low-contrast insect texture and grain can have similar spatial scales.
-VIEWER_LUMA_DENOISE_AMOUNT = 0.25
+VIEWER_LUMA_DENOISE_AMOUNT = 0.5
 # Odd diameter in pixels. Sigma-space, not diameter alone, controls how far
 # neighbors contribute. Large diameters with small sigma-space mostly add cost.
 VIEWER_LUMA_DENOISE_DIAMETER = 5
